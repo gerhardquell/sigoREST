@@ -1,0 +1,33 @@
+# Binaries
+sigoREST/sigoREST
+sigoE/sigoE
+sigoE
+main
+*.exe
+
+# Go build artifacts
+*.o
+*.a
+*.so
+
+# Session files
+.sessions/
+
+# Certificates (self-signed, generated on first start)
+certs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+*.out
+coverage.txt

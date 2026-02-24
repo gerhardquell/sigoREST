@@ -1,0 +1,720 @@
+{
+  "data": [
+    {
+      "id": "claude-haiku-4-5",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "591bd4d61d1d193cb4bdfd7eba7bc247ca13d0599c7af97b63ac44247a3c2f6c",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 64000,
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000005
+      }
+    },
+    {
+      "id": "llama-4-scout",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "5144ec9afe85bdb230f9d01af81667cb1c434d25ef8caba10f588c46f19e8673",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 8e-8,
+        "output_cost_per_token": 5e-7
+      }
+    },
+    {
+      "id": "text-embedding-3-small",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "baf5ee2a4a2e30b24fa4d9428a293e68a32bee411f16c3915e972c14fc90197f",
+        "max_input_tokens": 8191,
+        "max_output_tokens": null,
+        "input_cost_per_token": 2e-8,
+        "output_cost_per_token": 0
+      }
+    },
+    {
+      "id": "claude-3-5-haiku-20241022",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "fea907b28616c12cbe1721d9207a081d5a6c7cd0cdc2ffe7f5c25e5d5d0824f2",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 8e-7,
+        "output_cost_per_token": 0.000004
+      }
+    },
+    {
+      "id": "qwen3-coder-plus",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "667d9c9049904ec9ebf804fe2a4197e6cea455e42a10276ce75c04e955db2ec7",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.0000018,
+        "output_cost_per_token": 0.000009
+      }
+    },
+    {
+      "id": "gemini-3-pro-image-preview",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "2e14ac158f89b20ad8d7cfce1b798f395520c042c912cc05eed4efba4b864b38",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000012
+      }
+    },
+    {
+      "id": "kimi-k2-thinking",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "52ae85483ba542def7bae24e52606f2e585b203d0c8536b04e0a8e98a16ee23b",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 5.5e-7,
+        "output_cost_per_token": 0.0000025
+      }
+    },
+    {
+      "id": "gpt-4.1-mini",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "a827ab50459294c05ac0c86839e5ee6656e0446e5e940de67700dceadbc42689",
+        "max_input_tokens": 1047576,
+        "max_output_tokens": 32768,
+        "input_cost_per_token": 4e-7,
+        "output_cost_per_token": 0.0000016
+      }
+    },
+    {
+      "id": "gpt-5.2-chat",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "923d5e35fa6eb8ad492bbeff162b64826012cb7b5dde5062c2f34586e9d693e0",
+        "max_input_tokens": 128000,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.00000175,
+        "output_cost_per_token": 0.000014
+      }
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "d69d263ffd69a26b1d67a20f45176313cccb86170526f9d47be173866970563d",
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 0.0000025,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "gpt-4.1",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "2e680e2531483966139973c672db5b5ccd6b5160b2b70b1610f1960eb8b4a1c7",
+        "max_input_tokens": 1047576,
+        "max_output_tokens": 32768,
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000008
+      }
+    },
+    {
+      "id": "claude-opus-4-6",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "991801b0bf3289592646f2a7b5ea1c881f54d941a9c0925236948bc956b2da34",
+        "max_input_tokens": 872000,
+        "max_output_tokens": 128000,
+        "input_cost_per_token": 0.000005,
+        "output_cost_per_token": 0.000025
+      }
+    },
+    {
+      "id": "deepseek-r1-0528",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "1793f0250d30968995f994b1358885085419cafbef98cf01dab1f3b09cb2f861",
+        "max_input_tokens": 65336,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 5e-7,
+        "output_cost_per_token": 0.00000218
+      }
+    },
+    {
+      "id": "kimi-k2.5",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "5ea65a459f188aa1eb452f7e986ef51604d56b1ecd22cc00ae86f079856d5ca4",
+        "max_input_tokens": 262144,
+        "max_output_tokens": 262144,
+        "input_cost_per_token": 6e-7,
+        "output_cost_per_token": 0.000003
+      }
+    },
+    {
+      "id": "qwen3-coder",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "d95b0d4da2fad18ef1fcdfb56fca6e806a02fe981ad255c82529fa542765075e",
+        "max_input_tokens": 262100,
+        "max_output_tokens": 262100,
+        "input_cost_per_token": 2.2e-7,
+        "output_cost_per_token": 9.5e-7
+      }
+    },
+    {
+      "id": "claude-4-sonnet-20250522",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "079393c51e20f4db81a7638179d790fafc04eb88bb023e417411150f50532847",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "mistral-large-3",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "08b3f721612fd0c715db1910228a7427ef578731a3475ee397952ae2be596bec",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 5e-7,
+        "output_cost_per_token": 0.0000015
+      }
+    },
+    {
+      "id": "sonar-deep-research",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "6fa9984c9e1a47d6aca800053fcb3c4f4e1f36bf9a9dc3f9cc0fa810b36298e5",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000008
+      }
+    },
+    {
+      "id": "deepseek-v3.2",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "3feafd22ef07320b19289c1b1b2d2684f38eb366e7762518e0b3a24ccb95a644",
+        "max_input_tokens": 163840,
+        "max_output_tokens": 163840,
+        "input_cost_per_token": 2.7e-7,
+        "output_cost_per_token": 4.2e-7
+      }
+    },
+    {
+      "id": "gpt-5-mini",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "ac6e848c4958d2ce913cb2b47d25af1e21d50da21444de5ac90cc9a4b2207673",
+        "max_input_tokens": 272000,
+        "max_output_tokens": 128000,
+        "input_cost_per_token": 2.5e-7,
+        "output_cost_per_token": 0.000002
+      }
+    },
+    {
+      "id": "mistral-medium-3.1",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "60b983b2c27d64e59404058d6781a851b8a4e6ae25867600664fa8586a892afb",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 4e-7,
+        "output_cost_per_token": 0.000002
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "843c0bcc9917457bf2796d585a51e5d530ce755a7036f031959c91c8809cea38",
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 3e-7,
+        "output_cost_per_token": 0.0000025
+      }
+    },
+    {
+      "id": "codestral-2508",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "639eaf54fcf2eb8b2f467ee673f6cf2eee71932f463fcdf66bb820995e9f6e32",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 3e-7,
+        "output_cost_per_token": 9e-7
+      }
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "8b9669d59b95fbe57c164b60b36b1d30b6c8fc91ef59249bc7ceffcf2b086184",
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 65535,
+        "input_cost_per_token": 5e-7,
+        "output_cost_per_token": 0.000003
+      }
+    },
+    {
+      "id": "sonar-pro",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "e18ab5ecd58e692a6154dbd4f9d286022758293c38fe0da9d48f464b414ae65a",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "kimi-k2-instruct",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "3cabdccbd52672c169f63be5b094022993fe75b8845bf4f42df8114998ac401e",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 5e-7,
+        "output_cost_per_token": 0.0000025
+      }
+    },
+    {
+      "id": "deepseek-v3.1-terminus",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "e80e8dedf0a7057fef9d30c2d02ae9d9d5792be142b44ecbdc54d6e9e8b23532",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 2.7e-7,
+        "output_cost_per_token": 0.000001
+      }
+    },
+    {
+      "id": "qwen3-coder-flash",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "71431bebee85c0cc5435a00f442d8898b974a3b355dc610bec0562ab6d75d3ed",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 5e-7,
+        "output_cost_per_token": 0.000002
+      }
+    },
+    {
+      "id": "gpt-5.1-chat",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "82c56d6c2f2c8b869ffd02066fccc7862a1f9ac0a9a71299499233132ff858b2",
+        "max_input_tokens": 128000,
+        "max_output_tokens": 128000,
+        "input_cost_per_token": 0.00000125,
+        "output_cost_per_token": 0.00001
+      }
+    },
+    {
+      "id": "gpt-4o",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "c0555a7c689a4cb4bfc2bb095f074d26041e7303813695e8d160d9a78262b4fb",
+        "max_input_tokens": 128000,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.0000025,
+        "output_cost_per_token": 0.00001
+      }
+    },
+    {
+      "id": "grok-3",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "2b51252bcb9a62e8544e8582361803af7d49089fe4f0f98ad1afead7fe17c820",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "gpt-5-nano",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "0a0c61d21cf1f674833cca904ee6f94e832af60710056821733117e647593488",
+        "max_input_tokens": 272000,
+        "max_output_tokens": 128000,
+        "input_cost_per_token": 5e-8,
+        "output_cost_per_token": 4e-7
+      }
+    },
+    {
+      "id": "gpt-5-chat",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "ac69b92875ef3ce4c275d665da410624fda162e98cae7e54f791a1b2b5864ec5",
+        "max_input_tokens": 128000,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.00000125,
+        "output_cost_per_token": 0.00001
+      }
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "b8ca363ab8ab02a24bf5457d6152fb56140ff3429b168a251587e4f902a99896",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 64000,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "mistral-large-2411",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "8bc7a667c4eb3efc49d82282836d4f48638954b7d9745db9447cc620a792093a",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000006
+      }
+    },
+    {
+      "id": "deepseek-v3.2-exp",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "5a24cb948e69f1f1af8e418e6621f97627de426061167d2c46183f7aa10eb753",
+        "max_input_tokens": 163840,
+        "max_output_tokens": 163840,
+        "input_cost_per_token": 2.7e-7,
+        "output_cost_per_token": 4.1e-7
+      }
+    },
+    {
+      "id": "mistral-medium-3",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "221127e33c9a6cd4f1875897aaeaa0372b64d8483818e79bb0a6f8714aaca9b3",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 4e-7,
+        "output_cost_per_token": 0.000002
+      }
+    },
+    {
+      "id": "grok-4-0709",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "86662418bb3b139ead77bdbcd288d61ff229c6bdce5150bca10bb9a710a00714",
+        "max_input_tokens": 256000,
+        "max_output_tokens": 256000,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "o4-mini",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "827057cbfcb12a57ba4d45805ff61142242b03e8a3763a8977dc079f93dc1e5d",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 100000,
+        "input_cost_per_token": 0.0000011,
+        "output_cost_per_token": 0.0000044
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-image",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "6ddc1411bcafed88317f86590eb837f68b9e467fe878b125d8080dcc57020a0f",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 3e-7,
+        "output_cost_per_token": 0.0000025
+      }
+    },
+    {
+      "id": "gemini-3-pro-preview",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "aa99f1eaa8f5e0f8017a02e4e21d127d9cfcc39375eb9780b8d3a6c5a693ecde",
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 65535,
+        "input_cost_per_token": 0.000002,
+        "output_cost_per_token": 0.000012
+      }
+    },
+    {
+      "id": "gpt-4.1-nano",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "c7cce5129b5308ea1b803a84ad0a88a22bcad85117a80bcd2661ab96dfb375d7",
+        "max_input_tokens": 1047576,
+        "max_output_tokens": 32768,
+        "input_cost_per_token": 1e-7,
+        "output_cost_per_token": 4e-7
+      }
+    },
+    {
+      "id": "llama-4-maverick",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "669f70d870590ebebf41fb10a3a34dbccbdf9671ef4d7bda398210eed597adce",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 1.5e-7,
+        "output_cost_per_token": 6e-7
+      }
+    },
+    {
+      "id": "grok-4-1-fast",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "0a7c4da9e4dd7ce36b6dbdc357b3a3312a85e8cb104737e41433dbe0b9e4d421",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 2e-7,
+        "output_cost_per_token": 5e-7
+      }
+    },
+    {
+      "id": "mistral-small-3.2-24b-instruct",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "5b3406b3181b67c9fd71a1c2f24e7903cfbea9151334d4fbab5d05c306fe330c",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 1e-7,
+        "output_cost_per_token": 3e-7
+      }
+    },
+    {
+      "id": "grok-3-mini",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "d02301e776b3505639a05009db4802676ddb7d196cbffbc36248b107101d6e7e",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 3e-7,
+        "output_cost_per_token": 5e-7
+      }
+    },
+    {
+      "id": "deepseek-v3.1",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "675b00ee0ace592db62a9f24fd5d1e4f696e00716aff4e30d6e739da2b0721d5",
+        "max_input_tokens": 163840,
+        "max_output_tokens": 163840,
+        "input_cost_per_token": 2.7e-7,
+        "output_cost_per_token": 0.000001
+      }
+    },
+    {
+      "id": "claude-3-7-sonnet-20250219",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "c184a864908043f4ada324915ac4c05018e08e62e1e4bacb47683fb418ff7aae",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "deepseek-v3-0324",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "4c76455ba741f796f105ae6c0f32e439111e34fa626e0c1326b883d9c30f4bd5",
+        "max_input_tokens": 65536,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 2.5e-7,
+        "output_cost_per_token": 0.000001
+      }
+    },
+    {
+      "id": "claude-opus-4-1-20250805",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "b97302f65edcd572808adc5c84494e82579c5bba479576659cbbd35acd254d66",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 32000,
+        "input_cost_per_token": 0.000015,
+        "output_cost_per_token": 0.000075
+      }
+    },
+    {
+      "id": "claude-opus-4-5",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "6d1d56f81bd7fbd3c39902f31ac2ca13263864c77162f843681cb75c86140a5a",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 64000,
+        "input_cost_per_token": 0.000005,
+        "output_cost_per_token": 0.000025
+      }
+    },
+    {
+      "id": "grok-4-fast-non-reasoning",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "62c0bc8084b016423c46cee036b69af6baaf21fce4bead0eb74af87ea707edf2",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 4e-7,
+        "output_cost_per_token": 0.000001
+      }
+    },
+    {
+      "id": "claude-3-5-sonnet-20241022",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "86705083f6fa97bb914dc3adbbee4df4672e290a216061b15de6130c46ac2de3",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 4096,
+        "input_cost_per_token": 0.000003,
+        "output_cost_per_token": 0.000015
+      }
+    },
+    {
+      "id": "text-embedding-3-large",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "69dbe9695678c2845ce7faa213b29943b82df856c74e06690ecfbb2316b3802b",
+        "max_input_tokens": 8191,
+        "max_output_tokens": null,
+        "input_cost_per_token": 1.3e-7,
+        "output_cost_per_token": 0
+      }
+    },
+    {
+      "id": "grok-code-fast-1",
+      "object": "model",
+      "created": 1771701620,
+      "owned_by": "openai",
+      "model_info": {
+        "id": "1be6d569ba1f8fe741888d293423c08d53a683a3ea552265f116b9fdf079318a",
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": 2e-7,
+        "output_cost_per_token": 0.0000015
+      }
+    }
+  ],
+  "object": "list"
+}
