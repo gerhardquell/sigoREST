@@ -820,6 +820,8 @@ type EnhancedCircuitBreaker struct {
 	failures         []time.Time // Zeitstempel der Fehler im Window
 	halfOpenAttempts int
 	lastStateChange  time.Time
+	lastRequest      time.Time    // Zeitstempel des letzten Requests (Rate Limiting)
+	minRequestInterval time.Duration // Mindestzeit zwischen Requests
 	mu               sync.RWMutex
 }
 
@@ -829,10 +831,11 @@ func NewEnhancedCircuitBreaker(config *CircuitBreakerConfig) *EnhancedCircuitBre
 		config = DefaultCircuitBreakerConfig()
 	}
 	return &EnhancedCircuitBreaker{
-		config:          config,
-		state:           CBStateClosed,
-		failures:        make([]time.Time, 0),
-		lastStateChange: time.Now(),
+		config:             config,
+		state:              CBStateClosed,
+		failures:           make([]time.Time, 0),
+		lastStateChange:    time.Now(),
+		minRequestInterval: 100 * time.Millisecond, // Max 10 Requests/Sek pro Modell
 	}
 }
 
@@ -887,6 +890,19 @@ func (cb *EnhancedCircuitBreaker) Do(fn func() error) error {
 	}
 
 	cb.cleanupOldFailures()
+
+	// Rate Limiting: Warte falls nötig
+	if !cb.lastRequest.IsZero() {
+		elapsed := time.Since(cb.lastRequest)
+		if elapsed < cb.minRequestInterval {
+			sleepTime := cb.minRequestInterval - elapsed
+			LogDebug("Rate limiting: waiting", map[string]interface{}{
+				"sleep_ms": sleepTime.Milliseconds(),
+			})
+			time.Sleep(sleepTime)
+		}
+	}
+	cb.lastRequest = time.Now()
 	cb.mu.Unlock()
 
 	// Funktion ausführen
@@ -962,14 +978,16 @@ func (cb *EnhancedCircuitBreaker) GetStateDetails() map[string]interface{} {
 	defer cb.mu.RUnlock()
 
 	return map[string]interface{}{
-		"state":             cb.state.String(),
-		"failures":          len(cb.failures),
-		"threshold":         cb.config.Threshold,
-		"window_seconds":    cb.config.Window.Seconds(),
-		"cooldown_seconds":  cb.config.Cooldown.Seconds(),
-		"half_open_max":     cb.config.HalfOpenMax,
+		"state":              cb.state.String(),
+		"failures":           len(cb.failures),
+		"threshold":          cb.config.Threshold,
+		"window_seconds":     cb.config.Window.Seconds(),
+		"cooldown_seconds":   cb.config.Cooldown.Seconds(),
+		"half_open_max":      cb.config.HalfOpenMax,
 		"half_open_attempts": cb.halfOpenAttempts,
-		"last_state_change": cb.lastStateChange.Format(time.RFC3339),
+		"last_state_change":  cb.lastStateChange.Format(time.RFC3339),
+		"rate_limit_ms":      cb.minRequestInterval.Milliseconds(),
+		"last_request":       cb.lastRequest.Format(time.RFC3339),
 	}
 }
 
