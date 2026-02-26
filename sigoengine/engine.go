@@ -1128,6 +1128,27 @@ func ProbeProvider(ctx context.Context, cfg *ProviderConfig) ProviderHealth {
 }
 
 // **********************************************************************
+// isContextLimitError prüft ob der Fehler ein Context-Limit-Überschreitung ist
+func isContextLimitError(errText string) bool {
+	lower := strings.ToLower(errText)
+	contextKeywords := []string{
+		"context length exceeded",
+		"context window exceeded",
+		"maximum context length",
+		"token limit exceeded",
+		"too many tokens",
+		"context limit",
+		"maximum token",
+	}
+	for _, kw := range contextKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// **********************************************************************
 // CallAPI führt einen HTTP-Call zu einem AI-Provider durch
 func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interface{},
 	timeoutSec int) (string, error) {
@@ -1200,6 +1221,16 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	if errMsg, ok := result["error"].(map[string]interface{}); ok {
 		errText := fmt.Sprintf("%v", errMsg["message"])
 		LogError("API error in response", nil, map[string]interface{}{"api_error": errText})
+
+		// Prüfe auf Context-Limit-Fehler -> client_error
+		if isContextLimitError(errText) {
+			return "", &APIError{
+				Type:       ErrClientError,
+				StatusCode: 400,
+				Message:    errText,
+			}
+		}
+
 		return "", NewError(ErrAPIFailed, errText, nil, logF)
 	}
 
