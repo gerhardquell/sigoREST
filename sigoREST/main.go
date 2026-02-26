@@ -76,8 +76,8 @@ type ModelInfo struct {
 type Server struct {
 	mu       sync.RWMutex
 	memory   MemoryBlock
-	models   map[string]ModelInfo                        // id → ModelInfo
-	breakers map[string]*sigoengine.CircuitBreaker         // Modell → Circuit Breaker
+	models   map[string]ModelInfo                              // id → ModelInfo
+	breakers map[string]*sigoengine.EnhancedCircuitBreaker     // Modell → Enhanced Circuit Breaker
 }
 
 // **********************************************************************
@@ -475,10 +475,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		apiRequest["max_completion_tokens"] = req.MaxTokens
 	}
 
-	// Circuit Breaker pro Modell
+	// Circuit Breaker pro Modell mit Enhanced Configuration
 	s.mu.Lock()
 	if _, exists := s.breakers[req.Model]; !exists {
-		s.breakers[req.Model] = sigoengine.NewCircuitBreaker()
+		config := &sigoengine.CircuitBreakerConfig{
+			Threshold:   5,                    // 5 Fehler in 60s
+			Window:      60 * time.Second,     // 60s Zeitfenster
+			Cooldown:    10 * time.Second,     // 10s Cooldown (statt 5min)
+			HalfOpenMax: 3,                    // Max 3 Requests in Half-Open
+		}
+		s.breakers[req.Model] = sigoengine.NewEnhancedCircuitBreaker(config)
 	}
 	breaker := s.breakers[req.Model]
 	s.mu.Unlock()
@@ -487,10 +493,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var responseText string
-	var lastErr error
 
-	for i := 0; i < req.Retries; i++ {
-		err := breaker.Do(func() error {
+	// Exponential Backoff Retry
+	retryConfig := sigoengine.DefaultRetryConfig()
+	retryConfig.MaxRetries = req.Retries
+
+	err := sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
+		return breaker.Do(func() error {
 			text, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
 			if e != nil {
 				return e
@@ -498,21 +507,48 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			responseText = text
 			return nil
 		})
-		if err == nil {
-			break
-		}
-		lastErr = err
-		sigoengine.LogWarn("API-Fehler, Retry", map[string]interface{}{
-			"attempt": i + 1, "retries": req.Retries, "model": req.Model,
-		})
-		if i < req.Retries-1 {
-			time.Sleep(time.Duration(i+1) * time.Second)
-		}
-	}
+	})
 
-	if lastErr != nil {
-		sigoengine.LogError("API-Call fehlgeschlagen", lastErr, map[string]interface{}{"model": req.Model})
-		writeError(w, lastErr.Error(), "api_error", http.StatusBadGateway)
+	if err != nil {
+		// Fehler klassifizieren für typisierte Antwort
+		apiErr := sigoengine.ClassifyError(err)
+
+		sigoengine.LogError("API-Call fehlgeschlagen", err, map[string]interface{}{
+			"model":       req.Model,
+			"error_type":  apiErr.Type,
+			"status_code": apiErr.StatusCode,
+		})
+
+		// HTTP-Status und Error-Type basierend auf Fehlerklasse
+		httpStatus := http.StatusBadGateway
+		errType := "api_error"
+
+		switch apiErr.Type {
+		case sigoengine.ErrRateLimit:
+			httpStatus = http.StatusTooManyRequests // 429
+			errType = "rate_limit"
+			// Retry-After Header setzen
+			if apiErr.RetryAfter > 0 {
+				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", apiErr.RetryAfter.Seconds()))
+			}
+		case sigoengine.ErrAuthFailed:
+			httpStatus = http.StatusUnauthorized // 401
+			errType = "auth_failed"
+		case sigoengine.ErrTimeout:
+			httpStatus = http.StatusGatewayTimeout // 504
+			errType = "timeout"
+		case sigoengine.ErrServerError:
+			httpStatus = http.StatusServiceUnavailable // 503
+			errType = "server_error"
+		case sigoengine.ErrClientError:
+			httpStatus = http.StatusBadRequest // 400
+			errType = "client_error"
+		case sigoengine.ErrCircuitOpen:
+			httpStatus = http.StatusServiceUnavailable // 503
+			errType = "circuit_open"
+		}
+
+		writeError(w, apiErr.Message, errType, httpStatus)
 		return
 	}
 
@@ -648,28 +684,32 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Circuit Breaker Details mit Enhanced Informationen
 	type BreakerState struct {
-		Model    string `json:"model"`
-		Open     bool   `json:"open"`
-		Failures int    `json:"failures"`
+		Model    string                 `json:"model"`
+		Open     bool                   `json:"open"`
+		Failures int                    `json:"failures"`
+		Details  map[string]interface{} `json:"details,omitempty"`
 	}
 
 	var breakers []BreakerState
 	for model, cb := range s.breakers {
-		breakers = append(breakers, BreakerState{
+		state := BreakerState{
 			Model:    model,
 			Open:     cb.IsOpen(),
 			Failures: cb.Failures(),
-		})
+			Details:  cb.GetStateDetails(),
+		}
+		breakers = append(breakers, state)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":         "ok",
-		"timestamp":      time.Now().Unix(),
+		"status":           "ok",
+		"timestamp":        time.Now().Unix(),
 		"available_models": len(s.models),
 		"circuit_breakers": breakers,
-		"memory_set":     s.memory.Content != "",
+		"memory_set":       s.memory.Content != "",
 	})
 }
 
@@ -744,7 +784,7 @@ func main() {
 	srv := &Server{
 		models:   loadModels(),
 		memory:   loadMemory(),
-		breakers: make(map[string]*sigoengine.CircuitBreaker),
+		breakers: make(map[string]*sigoengine.EnhancedCircuitBreaker),
 	}
 
 	// Ollama Auto-Discovery

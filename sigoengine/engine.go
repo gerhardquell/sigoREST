@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,12 @@ const (
 	ErrSessionError     = "SESSION_ERROR"
 	ErrCircuitOpen      = "CIRCUIT_OPEN"
 	ErrUnexpectedFormat = "UNEXPECTED_FORMAT"
+	// Neue Fehlercodes für typisierte Fehlerbehandlung
+	ErrRateLimit   = "RATE_LIMIT"
+	ErrAuthFailed  = "AUTH_FAILED"
+	ErrTimeout     = "TIMEOUT"
+	ErrServerError = "SERVER_ERROR"
+	ErrClientError = "CLIENT_ERROR"
 )
 
 // **********************************************************************
@@ -65,6 +72,129 @@ func (e *SigoError) Error() string {
 // NewError erstellt einen strukturierten Fehler
 func NewError(code, message string, err error, fields map[string]interface{}) *SigoError {
 	return &SigoError{Code: code, Message: message, Err: err, Fields: fields}
+}
+
+// **********************************************************************
+// APIError - Typisierter Fehler mit HTTP-Status für verbesserte Fehlerbehandlung
+
+type APIError struct {
+	Type       string        // "rate_limit", "auth_failed", "timeout", "server_error", "client_error"
+	StatusCode int
+	Message    string
+	RetryAfter time.Duration
+	Err        error
+}
+
+func (e *APIError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("[%s] %s (HTTP %d): %v", e.Type, e.Message, e.StatusCode, e.Err)
+	}
+	return fmt.Sprintf("[%s] %s (HTTP %d)", e.Type, e.Message, e.StatusCode)
+}
+
+// IsRetryable bestimmt, ob ein Retry bei diesem Fehler sinnvoll ist
+func (e *APIError) IsRetryable() bool {
+	switch e.Type {
+	case ErrRateLimit, ErrTimeout, ErrServerError:
+		return true
+	case ErrAuthFailed, ErrClientError:
+		return false
+	default:
+		return false
+	}
+}
+
+// ToSigoError konvertiert APIError zu SigoError für Kompatibilität
+func (e *APIError) ToSigoError() *SigoError {
+	return NewError(e.Type, e.Message, e.Err, map[string]interface{}{
+		"status_code": e.StatusCode,
+		"retry_after": e.RetryAfter.Seconds(),
+	})
+}
+
+// ClassifyError klassifiziert einen Fehler als APIError
+func ClassifyError(err error) *APIError {
+	if err == nil {
+		return nil
+	}
+
+	// Prüfe ob es bereits ein APIError ist
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr
+	}
+
+	// Versuche aus SigoError zu extrahieren
+	if sigoErr, ok := err.(*SigoError); ok {
+		return &APIError{
+			Type:    sigoErr.Code,
+			Message: sigoErr.Message,
+			Err:     sigoErr.Err,
+		}
+	}
+
+	// Timeout-Errors erkennen
+	if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline exceeded") {
+		return &APIError{
+			Type:    ErrTimeout,
+			Message: "Request timeout",
+			Err:     err,
+		}
+	}
+
+	// Default: nicht klassifizierbar
+	return &APIError{
+		Type:    ErrAPIFailed,
+		Message: err.Error(),
+		Err:     err,
+	}
+}
+
+// classifyHTTPError klassifiziert HTTP-Status-Codes als APIError
+func classifyHTTPError(statusCode int, message string, err error) *APIError {
+	switch {
+	case statusCode == 429:
+		return &APIError{
+			Type:       ErrRateLimit,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
+	case statusCode == 401 || statusCode == 403:
+		return &APIError{
+			Type:       ErrAuthFailed,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
+	case statusCode == 408 || statusCode == 504:
+		return &APIError{
+			Type:       ErrTimeout,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
+	case statusCode >= 500:
+		return &APIError{
+			Type:       ErrServerError,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
+	case statusCode >= 400:
+		return &APIError{
+			Type:       ErrClientError,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
+	default:
+		return &APIError{
+			Type:       ErrAPIFailed,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
+	}
 }
 
 // **********************************************************************
@@ -576,7 +706,55 @@ func (s *Session) BuildMessages(newPrompt string) []map[string]string {
 }
 
 // **********************************************************************
-// CircuitBreaker - verhindert Kaskaden-Fehler
+// CircuitBreaker Konstanten - konfigurierbar
+const (
+	DefaultCBThreshold   = 5
+	DefaultCBWindow      = 60 * time.Second
+	DefaultCBCooldown    = 10 * time.Second
+	DefaultCBHalfOpenMax = 3
+)
+
+// CircuitBreakerState repräsentiert den Zustand des Circuit Breakers
+type CircuitBreakerState int
+
+const (
+	CBStateClosed CircuitBreakerState = iota
+	CBStateOpen
+	CBStateHalfOpen
+)
+
+func (s CircuitBreakerState) String() string {
+	switch s {
+	case CBStateClosed:
+		return "closed"
+	case CBStateOpen:
+		return "open"
+	case CBStateHalfOpen:
+		return "half_open"
+	default:
+		return "unknown"
+	}
+}
+
+// CircuitBreakerConfig - Konfiguration für Enhanced Circuit Breaker
+type CircuitBreakerConfig struct {
+	Threshold   int           // Anzahl Fehler bevor Circuit öffnet
+	Window      time.Duration // Zeitfenster für Fehlerzählung
+	Cooldown    time.Duration // Zeit bis Half-Open nach Open
+	HalfOpenMax int           // Max Requests in Half-Open State
+}
+
+// DefaultCircuitBreakerConfig gibt Standard-Konfiguration zurück
+func DefaultCircuitBreakerConfig() *CircuitBreakerConfig {
+	return &CircuitBreakerConfig{
+		Threshold:   DefaultCBThreshold,
+		Window:      DefaultCBWindow,
+		Cooldown:    DefaultCBCooldown,
+		HalfOpenMax: DefaultCBHalfOpenMax,
+	}
+}
+
+// CircuitBreaker - verhindert Kaskaden-Fehler (Legacy, für Rückwärtskompatibilität)
 type CircuitBreaker struct {
 	failures  int
 	lastFail  time.Time
@@ -585,7 +763,7 @@ type CircuitBreaker struct {
 	mu        sync.Mutex
 }
 
-// NewCircuitBreaker erstellt einen neuen Circuit Breaker
+// NewCircuitBreaker erstellt einen neuen Circuit Breaker (Legacy)
 func NewCircuitBreaker() *CircuitBreaker {
 	return &CircuitBreaker{threshold: 3, timeout: 5 * time.Minute}
 }
@@ -635,6 +813,321 @@ func (cb *CircuitBreaker) Failures() int {
 }
 
 // **********************************************************************
+// EnhancedCircuitBreaker - State-Machine mit zeitlichem Fenster
+type EnhancedCircuitBreaker struct {
+	config           *CircuitBreakerConfig
+	state            CircuitBreakerState
+	failures         []time.Time // Zeitstempel der Fehler im Window
+	halfOpenAttempts int
+	lastStateChange  time.Time
+	mu               sync.RWMutex
+}
+
+// NewEnhancedCircuitBreaker erstellt einen neuen Enhanced Circuit Breaker
+func NewEnhancedCircuitBreaker(config *CircuitBreakerConfig) *EnhancedCircuitBreaker {
+	if config == nil {
+		config = DefaultCircuitBreakerConfig()
+	}
+	return &EnhancedCircuitBreaker{
+		config:          config,
+		state:           CBStateClosed,
+		failures:        make([]time.Time, 0),
+		lastStateChange: time.Now(),
+	}
+}
+
+// State gibt den aktuellen Zustand zurück
+func (cb *EnhancedCircuitBreaker) State() CircuitBreakerState {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	return cb.state
+}
+
+// cleanupOldFailures entfernt Fehler außerhalb des Zeitfensters
+func (cb *EnhancedCircuitBreaker) cleanupOldFailures() {
+	cutoff := time.Now().Add(-cb.config.Window)
+	newFailures := make([]time.Time, 0)
+	for _, t := range cb.failures {
+		if t.After(cutoff) {
+			newFailures = append(newFailures, t)
+		}
+	}
+	cb.failures = newFailures
+}
+
+// Do führt fn aus mit State-Machine-Logik
+func (cb *EnhancedCircuitBreaker) Do(fn func() error) error {
+	cb.mu.Lock()
+
+	// Prüfe ob wir von Open -> Half-Open wechseln können
+	if cb.state == CBStateOpen {
+		if time.Since(cb.lastStateChange) >= cb.config.Cooldown {
+			LogInfo("Circuit breaker entering half-open", map[string]interface{}{
+				"previous_failures": len(cb.failures),
+			})
+			cb.state = CBStateHalfOpen
+			cb.halfOpenAttempts = 0
+			cb.lastStateChange = time.Now()
+		} else {
+			cb.mu.Unlock()
+			return NewError(ErrCircuitOpen, "Circuit breaker open", nil, map[string]interface{}{
+				"cooldown_remaining": time.Since(cb.lastStateChange) - cb.config.Cooldown,
+			})
+		}
+	}
+
+	// In Half-Open: begrenzte Requests erlauben
+	if cb.state == CBStateHalfOpen && cb.halfOpenAttempts >= cb.config.HalfOpenMax {
+		cb.mu.Unlock()
+		return NewError(ErrCircuitOpen, "Circuit breaker half-open, max attempts reached", nil, nil)
+	}
+
+	if cb.state == CBStateHalfOpen {
+		cb.halfOpenAttempts++
+	}
+
+	cb.cleanupOldFailures()
+	cb.mu.Unlock()
+
+	// Funktion ausführen
+	err := fn()
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if err != nil {
+		// Fehler klassifizieren - nur retryable Fehler zählen
+		apiErr := ClassifyError(err)
+		if apiErr.IsRetryable() {
+			cb.failures = append(cb.failures, time.Now())
+
+			// Prüfe ob Circuit geöffnet werden muss
+			if len(cb.failures) >= cb.config.Threshold {
+				if cb.state != CBStateOpen {
+					LogWarn("Circuit breaker opened", map[string]interface{}{
+						"failures":  len(cb.failures),
+						"threshold": cb.config.Threshold,
+					})
+					cb.state = CBStateOpen
+					cb.lastStateChange = time.Now()
+				}
+			} else if cb.state == CBStateHalfOpen {
+				// In Half-Open: sofort wieder auf Open
+				cb.state = CBStateOpen
+				cb.lastStateChange = time.Now()
+				LogWarn("Circuit breaker re-opened from half-open", nil)
+			}
+		}
+	} else {
+		// Erfolg: bei Half-Open -> Closed, sonst Fehler zurücksetzen
+		if cb.state == CBStateHalfOpen {
+			LogInfo("Circuit breaker closed (recovered)", nil)
+			cb.state = CBStateClosed
+			cb.failures = make([]time.Time, 0)
+			cb.lastStateChange = time.Now()
+		} else if cb.state == CBStateClosed {
+			// Im Closed State: alte Fehler bereinigen
+			cb.cleanupOldFailures()
+		}
+	}
+
+	return err
+}
+
+// IsOpen prüft ob der Circuit Breaker offen ist
+func (cb *EnhancedCircuitBreaker) IsOpen() bool {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	if cb.state == CBStateOpen {
+		// Prüfe ob Cooldown abgelaufen
+		if time.Since(cb.lastStateChange) >= cb.config.Cooldown {
+			return false // Würde bei Do() zu Half-Open wechseln
+		}
+		return true
+	}
+	return false
+}
+
+// Failures gibt die aktuelle Fehleranzahl im Zeitfenster zurück
+func (cb *EnhancedCircuitBreaker) Failures() int {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.cleanupOldFailures()
+	return len(cb.failures)
+}
+
+// GetStateDetails gibt detaillierte Informationen für Health Checks
+func (cb *EnhancedCircuitBreaker) GetStateDetails() map[string]interface{} {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+
+	return map[string]interface{}{
+		"state":             cb.state.String(),
+		"failures":          len(cb.failures),
+		"threshold":         cb.config.Threshold,
+		"window_seconds":    cb.config.Window.Seconds(),
+		"cooldown_seconds":  cb.config.Cooldown.Seconds(),
+		"half_open_max":     cb.config.HalfOpenMax,
+		"half_open_attempts": cb.halfOpenAttempts,
+		"last_state_change": cb.lastStateChange.Format(time.RFC3339),
+	}
+}
+
+// **********************************************************************
+// RetryConfig - Konfiguration für Exponential Backoff
+type RetryConfig struct {
+	MaxRetries     int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	BackoffFactor  float64
+}
+
+// DefaultRetryConfig gibt Standard-Retry-Konfiguration zurück
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxRetries:     3,
+		InitialBackoff: 500 * time.Millisecond,
+		MaxBackoff:     5 * time.Second,
+		BackoffFactor:  2.0,
+	}
+}
+
+// max gibt das Maximum von zwei time.Duration zurück
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// RetryWithBackoff führt eine Funktion mit Exponential Backoff Retry aus
+func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) error {
+	backoff := config.InitialBackoff
+
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+
+		// Letzter Versuch oder kein Retry möglich
+		if attempt == config.MaxRetries {
+			return err
+		}
+
+		// Fehler klassifizieren
+		apiErr := ClassifyError(err)
+
+		// Kein Retry bei Client-Fehlern oder Auth-Fehlern
+		if !apiErr.IsRetryable() {
+			LogDebug("Retry skipped (non-retryable error)", map[string]interface{}{
+				"error_type": apiErr.Type,
+				"attempt":    attempt + 1,
+			})
+			return err
+		}
+
+		// Retry-After aus Rate-Limit-Fehler extrahieren
+		sleepDuration := backoff
+		if apiErr.Type == ErrRateLimit && apiErr.RetryAfter > 0 {
+			sleepDuration = apiErr.RetryAfter
+			LogDebug("Using Retry-After header", map[string]interface{}{
+				"retry_after_seconds": sleepDuration.Seconds(),
+			})
+		}
+
+		LogDebug("Retrying after error", map[string]interface{}{
+			"error_type":     apiErr.Type,
+			"attempt":        attempt + 1,
+			"max_retries":    config.MaxRetries,
+			"backoff_ms":     sleepDuration.Milliseconds(),
+			"next_backoff_ms": minDuration(time.Duration(float64(backoff)*config.BackoffFactor), config.MaxBackoff).Milliseconds(),
+		})
+
+		// Warte mit Context-Respektierung
+		select {
+		case <-ctx.Done():
+			return NewError(ErrTimeout, "Context cancelled during retry backoff", ctx.Err(), nil)
+		case <-time.After(sleepDuration):
+		}
+
+		// Backoff verdoppeln (exponentiell), aber MaxBackoff nicht überschreiten
+		backoff = minDuration(time.Duration(float64(backoff)*config.BackoffFactor), config.MaxBackoff)
+	}
+
+	return nil // Sollte nie erreicht werden
+}
+
+// minDuration gibt das Minimum von zwei time.Duration zurück
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// **********************************************************************
+// ProviderHealth - Status eines Providers für Health Checks
+type ProviderHealth struct {
+	Model          string                 `json:"model"`
+	Status         string                 `json:"status"` // "available", "unavailable", "circuit_open"
+	Latency        time.Duration          `json:"latency_ms"`
+	LastChecked    time.Time              `json:"last_checked"`
+	Error          string                 `json:"error,omitempty"`
+	CircuitDetails map[string]interface{} `json:"circuit_details,omitempty"`
+}
+
+// ProbeProvider prüft die Erreichbarkeit eines Providers mit Timeout
+func ProbeProvider(ctx context.Context, cfg *ProviderConfig) ProviderHealth {
+	start := time.Now()
+	health := ProviderHealth{
+		Model:       cfg.Model,
+		LastChecked: start,
+	}
+
+	// Kurzer Probe-Request mit kleinem Timeout
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Einfacher Request - wir senden einen ungültigen Prompt um schnell eine Antwort zu bekommen
+	// (entweder Fehler oder schneller Erfolg ohne viele Token)
+	probeRequest := map[string]interface{}{
+		"model":    cfg.Model,
+		"messages": []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1,
+	}
+
+	_, err := CallAPI(probeCtx, cfg, probeRequest, 5)
+	health.Latency = time.Since(start)
+
+	if err != nil {
+		// Prüfe ob es ein erwarteter Fehler ist (z.B. ungültiger API-Key)
+		// oder ein Verbindungsfehler
+		apiErr := ClassifyError(err)
+
+		switch apiErr.Type {
+		case ErrAuthFailed:
+			// Auth-Fehler bedeutet der Server ist erreichbar
+			health.Status = "available"
+			health.Error = "auth_check_required"
+		case ErrRateLimit:
+			health.Status = "available"
+			health.Error = "rate_limited"
+		case ErrTimeout:
+			health.Status = "unavailable"
+			health.Error = "timeout"
+		default:
+			health.Status = "unavailable"
+			health.Error = err.Error()
+		}
+	} else {
+		health.Status = "available"
+	}
+
+	return health
+}
+
+// **********************************************************************
 // CallAPI führt einen HTTP-Call zu einem AI-Provider durch
 func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interface{},
 	timeoutSec int) (string, error) {
@@ -676,7 +1169,19 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 		logF["status_code"] = resp.StatusCode
 		logF["body"] = string(body)
 		LogError("HTTP error", nil, logF)
-		return "", NewError(ErrAPIFailed, fmt.Sprintf("HTTP %d", resp.StatusCode), nil, logF)
+
+		// Retry-After Header parsen
+		var retryAfter time.Duration
+		if retryHeader := resp.Header.Get("Retry-After"); retryHeader != "" {
+			if seconds, err := strconv.Atoi(retryHeader); err == nil {
+				retryAfter = time.Duration(seconds) * time.Second
+			}
+		}
+
+		// APIError mit Status-Code erstellen
+		apiErr := classifyHTTPError(resp.StatusCode, string(body), nil)
+		apiErr.RetryAfter = retryAfter
+		return "", apiErr
 	}
 
 	body, _ := io.ReadAll(resp.Body)
