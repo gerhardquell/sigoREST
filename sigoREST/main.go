@@ -749,6 +749,100 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// GET /api/help - API-Dokumentation
+func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	help := map[string]interface{}{
+		"name":        "sigoREST",
+		"description": "OpenAI-kompatible REST-API für KI-Modelle",
+		"version":     "1.0",
+		"endpoints": []map[string]interface{}{
+			{
+				"path":        "/v1/chat/completions",
+				"method":      "POST",
+				"description": "OpenAI-kompatible Chat-Completion API",
+				"parameters": map[string]string{
+					"model":              "Modell-ID oder Shortcode (z.B. 'claude-h', 'gpt41')",
+					"messages":           "Array von {role, content} Objekten",
+					"temperature":        "Optional: 0.0-2.0 (default: Modell-Mittelwert)",
+					"max_tokens":         "Optional: Max. Ausgabe-Tokens",
+					"session_id":         "Optional: Session-ID für Gesprächsverlauf",
+					"timeout":            "Optional: Timeout in Sekunden (default: 180)",
+					"retries":            "Optional: Anzahl Retries (default: 3)",
+				},
+				"example": `curl -s http://localhost:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-h","messages":[{"role":"user","content":"Hallo"}]}'`,
+			},
+			{
+				"path":        "/v1/models",
+				"method":      "GET",
+				"description": "Liste aller verfügbaren Modelle (OpenAI-kompatibel)",
+				"example":     "curl -s http://localhost:9080/v1/models",
+			},
+			{
+				"path":        "/api/models",
+				"method":      "GET",
+				"description": "Detaillierte Modell-Informationen (Preise, Limits)",
+				"example":     "curl -s http://localhost:9080/api/models",
+			},
+			{
+				"path":        "/api/health",
+				"method":      "GET",
+				"description": "Server-Status, Circuit Breaker Zustand",
+				"example":     "curl -s http://localhost:9080/api/health | jq",
+			},
+			{
+				"path":        "/api/memory",
+				"method":      "GET/PUT",
+				"description": "Globaler Memory-Block lesen/schreiben",
+				"parameters": map[string]string{
+					"content": "System-Prompt für alle Anfragen",
+					"cache":   "Boolean: Anthropic Caching aktivieren",
+				},
+				"example": `curl -s -X PUT http://localhost:9080/api/memory \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Antworte immer auf Deutsch.","cache":true}'`,
+			},
+			{
+				"path":        "/api/help",
+				"method":      "GET",
+				"description": "Diese Hilfe-Dokumentation",
+				"example":     "curl -s http://localhost:9080/api/help",
+			},
+		},
+		"features": map[string]string{
+			"circuit_breaker":    "Automatische Fehlerisolation nach 5 Fehlern in 60s",
+			"retry":              "Exponential Backoff: 500ms → 1s → 2s → max 5s",
+			"session_management": "JSON-basierte Sessions in .sessions/",
+			"ip_access_control":  "HTTP: localhost, HTTPS: privates Netz",
+			"ollama_discovery":   "Auto-Discovery lokaler Ollama-Modelle",
+			"memory_block":       "Globaler System-Prompt für alle Anfragen",
+		},
+		"error_types": map[string]string{
+			"rate_limit":   "HTTP 429 - Zu viele Anfragen, Retry-After Header gesetzt",
+			"auth_failed":  "HTTP 401 - Ungültiger API-Key",
+			"timeout":      "HTTP 504 - Request Timeout",
+			"server_error": "HTTP 503 - Upstream Server-Fehler",
+			"client_error": "HTTP 400 - Ungültige Anfrage",
+			"circuit_open": "HTTP 503 - Circuit Breaker geöffnet",
+		},
+		"environment_variables": map[string]string{
+			"MAMMOUTH_API_KEY": "Für GPT, Claude, Gemini, Grok, DeepSeek, ...",
+			"MOONSHOT_API_KEY": "Für Kimi Modelle (direkt)",
+			"ZAI_API_KEY":      "Für GLM Modelle (direkt)",
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(help)
+}
+
+// **********************************************************************
 // Hilfsfunktion für Fehler-Antworten
 func writeError(w http.ResponseWriter, msg, errType string, status int) {
 	var resp ErrorResponse
@@ -823,6 +917,7 @@ func main() {
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.HandleFunc("/api/memory", srv.handleMemory)
+	mux.HandleFunc("/api/help", srv.handleHelp)
 
 	// HTTP-Server (nur localhost)
 	httpHandler := ipMiddleware(isLocalhost, mux)
