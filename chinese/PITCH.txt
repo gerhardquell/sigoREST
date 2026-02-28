@@ -1,0 +1,20 @@
+sigoREST - 一句话介绍
+========================
+
+【中文】
+sigoREST 是支持中国大模型（Kimi、DeepSeek、GLM）的开源 AI 网关，一行代码切换模型，自托管保护数据隐私。
+
+【English】
+Open-source AI gateway with first-class support for Chinese LLMs (Kimi, DeepSeek, GLM). Self-hosted, OpenAI-compatible API.
+
+
+适合发布在：
+- Twitter/X
+- 微信群/朋友圈
+- LinkedIn
+- 邮件签名
+
+
+标签 / Hashtags
+==============
+#AI #LLM #Kimi #DeepSeek #ChatGLM #开源 #OpenSource #Golang #API网关 #AIGC #大模型
