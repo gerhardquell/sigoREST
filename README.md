@@ -12,19 +12,42 @@ sigorest/
 └── sigoREST/main.go        # REST-Server
 ```
 
-## Build & Start
+## Installation
+
+### System-Weite Installation (Empfohlen)
+
+**sigoREST Server** (als systemd-Service):
+```bash
+# Binary kompilieren und installieren
+go build -o sigoREST/sigoREST ./sigoREST/
+sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+
+# Konfiguration anlegen
+sudo mkdir -p /usr/local/slib/sigoREST/certs
+sudo cp sigoREST/models.csv /usr/local/slib/sigoREST/
+sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
+
+# Als systemd-Service einrichten (siehe docs/systemd-install.md)
+```
+
+**sigoE CLI**:
+```bash
+# Binary kompilieren und installieren
+go build -o cmd/sigoE/sigoE ./cmd/sigoE/
+sudo cp cmd/sigoE/sigoE /usr/local/bin/sigoE
+```
+
+### Entwicklung (Lokal)
 
 ```bash
 # Alle Pakete bauen
 go build ./...
 
-# REST-Server
-go build -o sigoREST/sigoREST ./sigoREST/
+# REST-Server starten
 ./sigoREST/sigoREST -v debug
 
-# CLI (Rückwärtskompatibel zu sigoEngine)
-go build -o sigoE ./cmd/sigoE/
-./sigoE -l
+# CLI nutzen
+./cmd/sigoE/sigoE -l
 ```
 
 ## Server-Flags
@@ -38,6 +61,26 @@ go build -o sigoE ./cmd/sigoE/
 | `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
 | `-q` | — | Quiet Mode (nur Fehler) |
 | `-j` | — | JSON-Logs |
+| `-version` | — | Version anzeigen und beenden |
+
+## CLI Flags (sigoE)
+
+| Flag | Default | Beschreibung |
+|------|---------|--------------|
+| `-m` | `gpt41` | Modell (Shortcode oder vollständiger Name) |
+| `-s` | — | Session-ID für Gesprächsverlauf |
+| `-n` | `0` | Max. Tokens (0 = Modell-Default) |
+| `-T` | `-1` | Temperatur (-1 = Modell-Default) |
+| `-t` | `180` | Timeout in Sekunden |
+| `-r` | `3` | Anzahl Wiederholungsversuche |
+| `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
+| `-V` | — | **Version anzeigen** |
+| `-j` | — | JSON-Ausgabe |
+| `-q` | — | Quiet Mode (nur Fehler) |
+| `-l` | — | Alle verfügbaren Modelle anzeigen |
+| `-i` | — | Modell-Info anzeigen |
+| `-h` | — | Hilfe anzeigen |
+| `-sp` | — | System-Prompt |
 
 ## Zugriffskontrolle
 
@@ -67,6 +110,53 @@ Globaler System-Kontext für alle Anfragen (wird immer zuerst eingefügt):
 }
 ```
 `cache: true` → Anthropic ephemeral caching. OpenAI cached automatisch ab 1024 Tokens.
+
+## Client Libraries
+
+Offizielle Clients für verschiedene Programmiersprachen:
+
+| Sprache | Pfad | Installation |
+|---------|------|--------------|
+| **Python** | [`clients/python/`](clients/python/) | `pip install clients/python/` |
+| **Go** | [`clients/go/`](clients/go/) | `go get github.com/gquell/sigoclient` |
+| **JavaScript** | [`clients/javascript/`](clients/javascript/) | Kopiere `client.js` |
+| **Common Lisp** | [`clients/clisp-exp/`](clients/clisp-exp/) | Experimentell |
+
+### Python-Beispiel
+```python
+from sigoclient import SigoClient
+
+client = SigoClient("http://127.0.0.1:9080")
+response = client.chat("kimi", "Hello!")
+print(response.content)
+```
+
+### Go-Beispiel
+```go
+client := sigoclient.New("http://127.0.0.1:9080")
+resp, err := client.Chat(ctx, "kimi", "Hello!")
+fmt.Println(resp.Content)
+```
+
+### JavaScript-Beispiel
+```javascript
+const client = new SigoClient('http://127.0.0.1:9080');
+const response = await client.chat('kimi', 'Hello!');
+console.log(response.content);
+```
+
+### Common Lisp-Beispiel (experimentell)
+```lisp
+(load "clients/clisp-exp/sigoclient.lisp")
+(use-package :sigoclient)
+
+;; Ping
+(ping)  ; => T
+
+;; Chat
+(chat "kimi" "Hallo!")
+; => "Hallo! Wie kann ich dir helfen?"
+```
 
 ## API Endpoints
 
@@ -98,6 +188,12 @@ OpenAI-kompatible Modell-Liste (nur Whitelist).
 curl -s http://localhost:9080/api/models
 ```
 Volle Modell-Infos: Preise, Token-Limits, Temperatur-Range.
+
+### GET /ping
+```bash
+curl -s http://localhost:9080/ping
+```
+Einfacher Health-Check für Load Balancer. Antwortet mit `pong`.
 
 ### GET /api/health
 ```bash
@@ -221,6 +317,18 @@ export MOONSHOT_API_KEY=...   # Moonshot.ai (Kimi)
 export ZAI_API_KEY=...        # Z.ai (GLM)
 ```
 
-## systemd
+## systemd Service
 
-Siehe `systemd-install.md`.
+Für Produktiv-Umgebungen wird sigoREST als systemd-Service empfohlen:
+- Binary: `/usr/local/sbin/sigoREST`
+- Daten/Konfiguration: `/usr/local/slib/sigoREST/`
+- CLI Client: `/usr/local/bin/sigoE`
+
+Detaillierte Anleitung: [`docs/systemd-install.md`](docs/systemd-install.md)
+
+Schnellstart:
+```bash
+sudo systemctl start sigoREST
+sudo systemctl enable sigoREST
+journalctl -u sigoREST -f
+```
