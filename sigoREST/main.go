@@ -39,6 +39,8 @@ import (
 	"sigorest/sigoengine"
 )
 
+const version = "1.0"
+
 // **********************************************************************
 // Embedded Default-Dateien
 //
@@ -83,13 +85,15 @@ type Server struct {
 // **********************************************************************
 // Server-Konfiguration (Flags)
 var (
-	httpPort  = flag.Int("http-port", 9080, "HTTP-Port für localhost")
-	httpsPort = flag.Int("https-port", 9443, "HTTPS-Port für privates Netz")
-	certFile  = flag.String("cert", "./certs/server.crt", "TLS-Zertifikat")
-	keyFile   = flag.String("key", "./certs/server.key", "TLS-Schlüssel")
-	logLevel  = flag.String("v", "info", "Log-Level: debug|info|warn|error")
-	quiet     = flag.Bool("q", false, "Quiet Mode")
-	jsonLogs  = flag.Bool("j", false, "JSON-Logs")
+	httpPort    = flag.Int("http-port", 9080, "HTTP-Port für localhost")
+	httpsPort   = flag.Int("https-port", 9443, "HTTPS-Port für privates Netz")
+	certFile    = flag.String("cert", "./certs/server.crt", "TLS-Zertifikat")
+	keyFile     = flag.String("key", "./certs/server.key", "TLS-Schlüssel")
+	logLevel    = flag.String("v", "info", "Log-Level: debug|info|warn|error")
+	quiet       = flag.Bool("q", false, "Quiet Mode")
+	jsonLogs    = flag.Bool("j", false, "JSON-Logs")
+	showVersion = flag.Bool("version", false, "Version anzeigen")
+	modelsPath  = flag.String("models", "", "Pfad zur models.csv (optional)")
 )
 
 // **********************************************************************
@@ -157,6 +161,14 @@ func ipMiddleware(allowedCheck func(net.IP) bool, next http.Handler) http.Handle
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+// serverHeaderMiddleware fügt den Server-Header zu jeder Antwort hinzu
+func serverHeaderMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", fmt.Sprintf("sigoREST/%s", version))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -234,17 +246,29 @@ func ensureTLSCert(certPath, keyPath string) error {
 // **********************************************************************
 // Modelle aus CSV laden
 
-// loadModels liest models.csv (Disk hat Vorrang vor embedded)
+// loadModels liest models.csv (Custom Path → Disk → Embedded)
 func loadModels() map[string]ModelInfo {
 	var csvContent string
 
-	data, err := os.ReadFile("./models.csv")
-	if err == nil {
-		csvContent = string(data)
-		sigoengine.LogInfo("models.csv von Disk geladen")
-	} else {
-		csvContent = defaultModelsCSV
-		sigoengine.LogInfo("models.csv (embedded default) verwendet")
+	// 1. Custom Pfad (wenn gesetzt via -models Flag)
+	if customPath := sigoengine.GetModelsCSVPath(); customPath != "" {
+		data, err := os.ReadFile(customPath)
+		if err == nil {
+			csvContent = string(data)
+			sigoengine.LogInfo("models.csv von custom Pfad geladen", map[string]interface{}{"path": customPath})
+		}
+	}
+
+	// 2. Lokale models.csv
+	if csvContent == "" {
+		data, err := os.ReadFile("./models.csv")
+		if err == nil {
+			csvContent = string(data)
+			sigoengine.LogInfo("models.csv von Disk geladen")
+		} else {
+			csvContent = defaultModelsCSV
+			sigoengine.LogInfo("models.csv (embedded default) verwendet")
+		}
 	}
 
 	models := make(map[string]ModelInfo)
@@ -674,6 +698,18 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// GET /ping - Einfacher Health-Check für Load Balancer
+func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("pong"))
+}
+
+// **********************************************************************
 // GET /api/health - Server-Status
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -859,9 +895,20 @@ func writeError(w http.ResponseWriter, msg, errType string, status int) {
 func main() {
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Printf("sigoREST Version %s\n", version)
+		os.Exit(0)
+	}
+
 	sigoengine.SetLogLevel(sigoengine.ParseLogLevel(*logLevel))
 	sigoengine.SetJSONMode(*jsonLogs)
 	sigoengine.SetQuietMode(*quiet)
+
+	// Custom models.csv Pfad setzen (muss vor Registry-Zugriff passieren)
+	if *modelsPath != "" {
+		sigoengine.SetModelsCSVPath(*modelsPath)
+		sigoengine.LogInfo("Custom models.csv Pfad gesetzt", map[string]interface{}{"path": *modelsPath})
+	}
 
 	sigoengine.LogInfo("sigoREST startet", map[string]interface{}{
 		"http_port":  *httpPort,
@@ -912,6 +959,7 @@ func main() {
 
 	// HTTP-Mux einmal erstellen (beide Listener nutzen dieselben Handler)
 	mux := http.NewServeMux()
+	mux.HandleFunc("/ping", srv.handlePing)
 	mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
@@ -920,7 +968,7 @@ func main() {
 	mux.HandleFunc("/api/help", srv.handleHelp)
 
 	// HTTP-Server (nur localhost)
-	httpHandler := ipMiddleware(isLocalhost, mux)
+	httpHandler := serverHeaderMiddleware(ipMiddleware(isLocalhost, mux))
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", *httpPort),
 		Handler:      httpHandler,
@@ -930,7 +978,7 @@ func main() {
 	}
 
 	// HTTPS-Server (privates Netz)
-	httpsHandler := ipMiddleware(isPrivateNet, mux)
+	httpsHandler := serverHeaderMiddleware(ipMiddleware(isPrivateNet, mux))
 
 	tlsCert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
 	if err != nil {

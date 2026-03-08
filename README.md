@@ -7,9 +7,15 @@ IP-basierte Zugriffskontrolle, globaler Memory-Block für Prompt-Caching.
 
 ```
 sigorest/
-├── sigoengine/engine.go    # Shared Package (Modelle, API-Call, Session, CircuitBreaker)
-├── cmd/sigoE/main.go       # CLI-Wrapper (identisch zu originalem sigoEngine)
-└── sigoREST/main.go        # REST-Server
+├── sigoengine/
+│   ├── engine.go           # Shared Package (API-Call, Session, CircuitBreaker)
+│   ├── models.go           # Model-Struct + CoreModels (5 Embedded Fallbacks)
+│   └── models_registry.go  # Registry-Logik (JSON/CSV Loading, Lookup)
+├── cmd/sigoE/main.go       # CLI-Wrapper
+└── sigoREST/
+    ├── main.go             # REST-Server
+    ├── models.csv          # Vollständige Modell-Liste (38+ Modelle)
+    └── memory.json         # Globaler System-Prompt
 ```
 
 ## Installation
@@ -56,6 +62,7 @@ go build ./...
 |------|---------|--------------|
 | `-http-port` | `9080` | HTTP (nur localhost 127.0.0.0/8) |
 | `-https-port` | `9443` | HTTPS (privates Netz 192.168.0.0/16, 10.0.0.0/8) |
+| `-models` | — | Pfad zur `models.csv` (optional, für systemd-Installationen) |
 | `-cert` | `./certs/server.crt` | TLS-Zertifikat (wird beim ersten Start auto-generiert) |
 | `-key` | `./certs/server.key` | TLS-Schlüssel |
 | `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
@@ -95,11 +102,27 @@ go build ./...
 Beide Dateien: Disk hat Vorrang vor eingebetteten Defaults.
 
 ### models.csv
-Komma-separierte Whitelist der erlaubten Shortcodes:
+
+Semikolon-getrennte Modell-Definitionen (11 Felder pro Zeile):
+
 ```
-claude-h,gpt41,gemini-p,deepseek-r1,kimi,grok3m
+id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
 ```
-Unbekannte Shortcodes werden beim Start mit Warnung ignoriert.
+
+**Beispiel:**
+```
+gpt-4.1;gpt41;https://api.mammouth.ai/v1/chat/completions;MAMMOUTH_API_KEY;128000;8192;2.0;8.0;0.0;2.0;
+claude-sonnet-4-6;cl-s;https://api.mammouth.ai/v1/chat/completions;MAMMOUTH_API_KEY;200000;8192;3.0;15.0;0.0;1.0;
+```
+
+**Ladereihenfolge (Priorität):**
+1. Custom Path (`-models` Flag) — für systemd-Installationen
+2. `~/.config/sigorest/models.json` (User-Override)
+3. `~/.config/sigorest/models.csv` (User-Override)
+4. `./models.csv` (lokale Datei)
+5. Embedded `CoreModels` (5 Fallback-Modelle)
+
+Ohne externe Dateien stehen 5 Core-Modelle zur Verfügung: `gpt41`, `cl-s`, `cl-o`, `kimi`, `zai-glm45`
 
 ### memory.json
 Globaler System-Kontext für alle Anfragen (wird immer zuerst eingefügt):
@@ -323,6 +346,29 @@ Für Produktiv-Umgebungen wird sigoREST als systemd-Service empfohlen:
 - Binary: `/usr/local/sbin/sigoREST`
 - Daten/Konfiguration: `/usr/local/slib/sigoREST/`
 - CLI Client: `/usr/local/bin/sigoE`
+
+**systemd mit custom models.csv:**
+```bash
+# Server mit explizitem Pfad zur models.csv starten
+sudo /usr/local/sbin/sigoREST -models /usr/local/slib/sigoREST/models.csv
+```
+
+Service-File Beispiel (`/etc/systemd/system/sigorest.service`):
+```ini
+[Unit]
+Description=sigoREST Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sigoREST -models /usr/local/slib/sigoREST/models.csv
+Restart=on-failure
+User=sigorest
+Group=sigorest
+
+[Install]
+WantedBy=multi-user.target
+```
 
 Detaillierte Anleitung: [`docs/systemd-install.md`](docs/systemd-install.md)
 

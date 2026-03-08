@@ -4,6 +4,260 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-03-08: Konfigurierbarer models.csv Pfad
+
+**Zielsetzung:**
+sigoREST benötigt ein Flag um den Pfad zur `models.csv` explizit anzugeben (z.B. für systemd-Installationen unter `/usr/local/slib/sigoREST/models.csv`). Bei systemd-Installationen ist `~/.config/sigorest/` nicht verfügbar (kein User-Home).
+
+**Was erreicht wurde:**
+
+1. **Neues Flag `-models` in `sigoREST/main.go`**
+   - `modelsPath := flag.String("models", "", "Pfad zur models.csv (optional)")`
+   - Optionale Angabe, bei Nicht-Verwendung bleibt bestehende Ladereihenfolge erhalten
+
+2. **Neue Funktionen in `sigoengine/models_registry.go`**
+   - `SetModelsCSVPath(path string)` — Setzt den Custom-Pfad vor Registry-Initialisierung
+   - `GetModelsCSVPath() string` — Getter für den gesetzten Pfad
+   - `overrideModelsPath` Variable (package-level)
+
+3. **Angepasste Ladereihenfolge in `loadModelsWithOverride()`**
+   - Priorität 1: Custom Path (aus `-models` Flag)
+   - Priorität 2: `~/.config/sigorest/models.json`
+   - Priorität 3: `~/.config/sigorest/models.csv`
+   - Priorität 4: System-weite Pfade (Projekt-Disk, etc.)
+   - Priorität 5: `CoreModels` (embedded Fallback)
+
+4. **Angepasste `loadModels()` in `sigoREST/main.go`**
+   - Prüft zuerst `sigoengine.GetModelsCSVPath()`
+   - Dann lokale `./models.csv`
+   - Zuletzt embedded default
+   - Logging zeigt Quelle des geladenen files
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **sigoE bleibt unverändert** | CLI-Tool nutzt weiterhin automatische Suche. Die Änderung betrifft nur den Server, der unter systemd läuft. |
+| **Getter/Setter Pattern** | `GetModelsCSVPath()` ermöglicht der lokalen `loadModels()` den Zugriff ohne direkte Variable-Export. |
+| **Pfad vor Registry-Init setzen** | `SetModelsCSVPath()` muss vor dem ersten Registry-Zugriff aufgerufen werden, da `sync.Once` die Initialisierung nur einmal erlaubt. |
+| **Optionales Flag** | Wenn `-models` nicht gesetzt, verhält sich der Server exakt wie vorher (Rückwärtskompatibilität). |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoengine/models_registry.go` | `overrideModelsPath` Variable, `SetModelsCSVPath()`, `GetModelsCSVPath()`, Integration in `loadModelsWithOverride()` |
+| `sigoREST/main.go` | `-models` Flag, Aufruf von `SetModelsCSVPath()`, angepasste `loadModels()` mit Custom-Pfad-Prüfung |
+
+**Testing & Verifikation:**
+
+```bash
+# Build erfolgreich
+go build ./...
+
+# Ohne Flag (bestehendes Verhalten)
+./sigoREST/sigoREST -v debug
+# → "models.csv (embedded default) verwendet" oder "von Disk geladen"
+
+# Mit custom Pfad
+./sigoREST/sigoREST -models /usr/local/slib/sigoREST/models.csv -v debug
+# → "Custom models.csv Pfad gesetzt"
+# → "models.csv von custom Pfad geladen"
+
+# Health check zeigt Modelle
+curl -s http://localhost:9080/api/health | jq '.available_models'
+```
+
+**systemd-Service Beispiel:**
+
+```ini
+[Unit]
+Description=sigoREST Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sigoREST -models /usr/local/slib/sigoREST/models.csv
+Restart=on-failure
+User=sigorest
+Group=sigorest
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Erkenntnisse & Learnings:**
+
+1. **Timing ist kritisch bei sync.Once**: Die Registry-Initialisierung mit `sync.Once` passiert beim ersten Zugriff. Der Custom-Pfad muss davor gesetzt werden, sonst hat er keine Wirkung.
+
+2. **Separation CLI vs Server**: sigoE läuft immer im User-Kontext und hat Zugriff auf `~/.config/`. sigoREST läuft oft als Service-User ohne Home-Verzeichnis — daher ist der explizite Pfad notwendig.
+
+3. **Zweistufiges Loading**: Die `sigoengine` Registry und die lokale `loadModels()` im Server haben jetzt beide Custom-Pfad-Support. Das ist redundant, aber notwendig da sie unabhängige Loading-Strategien haben.
+
+**Status:** ✅ Erfolgreich abgeschlossen
+
+---
+
+## Session 2026-03-08: Model Registry Refactoring
+
+**Zielsetzung:**
+Die Modell-Definitionen waren redundant verteilt zwischen `sigoengine/engine.go` (hardcodierte Map) und `sigoREST/models.csv` (CSV-Datei). Das Ziel war eine typisierte, zentrale Registry mit Override-Möglichkeit für User.
+
+**Was erreicht wurde:**
+
+1. **Neue typisierte Registry (`sigoengine/models.go`)**
+   - `Model` struct mit 11 Feldern (ID, Shortcode, Endpoint, APIKeyEnv, etc.)
+   - `CoreModels` Slice mit 5 Fallback-Modellen (3 Mammouth, 1 Moonshot, 1 ZAI)
+   - Typsicherheit statt `map[string]interface{}` mit Type Assertions
+
+2. **Registry-Logik (`sigoengine/models_registry.go`)**
+   - Thread-safe mit `sync.RWMutex` und `sync.Once`
+   - Ladereihenfolge: `~/.config/sigorest/models.json` → `~/.config/sigorest/models.csv` → `sigoREST/models.csv` → `CoreModels`
+   - Lookup-Funktionen: `GetModelByID()`, `GetModelByShortcode()`, `GetAllModels()`
+   - Ollama-Integration: `AddOllamaModel()` für Runtime-Discovery
+
+3. **Anpassung `sigoengine/engine.go`**
+   - `LoadConfig()` nutzt nun die neue Registry
+   - `MammothModels` Map wird zur Laufzeit aus Registry befüllt (Abwärtskompatibilität)
+   - Alte `ResolveModelName()`, `GetModelDefaultTokens()`, `GetModelTemperatureRange()` entfernt (Duplikate)
+
+4. **Anpassung `cmd/sigoE/main.go`**
+   - `listAllModels()` iteriert über `GetAllModels()` statt `MammothModels` Map
+   - `showModelInfo()` nutzt `GetModelByID()` und `GetModelByShortcode()`
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+ | **Nur 5 Core-Modelle embedded** | Binary-Größe minimieren, trotzdem funktionsfähig ohne externe Dateien. Vollständige Liste in `models.csv`. |
+| **JSON vor CSV im User-Config** | JSON ist typisierter und moderner, aber CSV bleibt primär für einfache manuelle Pflege. |
+| **Semikolon als CSV-Trennzeichen** | Komma ist in JSON-Arrays zu verbreitet. Semikolon erlaubt kommagetrennte Listen ohne Escaping. |
+| **Thread-Safety mit RWMutex** | Registry wird von mehreren goroutines (REST-Server) gleichzeitig gelesen, Ollama-Discovery schreibt. |
+| **Legacy `MammothModels` Map beibehalten** | Bestehender Code in `cmd/sigoE/main.go` nutzt die Map noch. Migration in kleinen Schritten. |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoengine/models.go` | **NEU** - `Model` struct + `CoreModels` Slice |
+| `sigoengine/models_registry.go` | **NEU** - Registry-Logik mit init(), Loading, Lookup |
+| `sigoengine/engine.go` | `LoadConfig()` angepasst, Legacy-Map-Initialisierung, Duplikate entfernt |
+| `cmd/sigoE/main.go` | `listAllModels()` und `showModelInfo()` auf neue Registry umgestellt |
+
+**Testing & Verifikation:**
+
+```bash
+# Build erfolgreich
+go build ./...
+
+# 38 Modelle aus models.csv geladen
+./sigoE -l | wc -l  # ~40 Zeilen
+
+# Shortcode-Auflösung funktioniert
+./sigoE -m cl-o -i  # Zeigt claude-opus-4-6 Info
+
+# API-Requests funktionieren
+echo "Hallo" | ./sigoE -m gpt41  # Antwort vom Modell
+```
+
+**Erkenntnisse & Learnings:**
+
+1. **Single Source of Truth**: Die `models.csv` ist nun die primäre Definition. CoreModels sind nur noch Fallback.
+
+2. **Typisierung zahlt sich aus**: `model.MaxOutputTokens` statt `info["max_output"].(int)` ist lesbarer und sicherer.
+
+3. **CSV-Parsing Robustheit**: Semikolon als Trennzeichen vermeidet Escaping-Probleme bei JSON-Arrays in Feldern.
+
+4. **Migration in kleinen Schritten**: Die `MammothModels` Map bleibt für Abwärtskompatibilität erhalten, wird aber aus der neuen Registry befüllt.
+
+**Status:** ✅ Erfolgreich abgeschlossen
+
+---
+
+## Session 2026-03-07: Versions-Management und Health-Checks
+
+**Zielsetzung:**
+Versions-Informationen über die Kommandozeile verfügbar machen und einen einfachen Health-Check Endpoint für Load Balancer hinzufügen.
+
+**Was erreicht wurde:**
+
+1. **CLI Version Flag (`sigoE`)**
+   - Neues Flag: `-V` (großes V, da `-v` bereits für Log-Level genutzt wird)
+   - Ausgabe: `sigoE Version 1.0`
+   - Konstante `const version = "1.0"` zentral definiert
+
+2. **REST-Server Version Flag (`sigoREST`)**
+   - Neues Flag: `-version`
+   - Ausgabe: `sigoREST Version 1.0`
+   - Gleiche Konstante für konsistente Versionsverwaltung
+
+3. **HTTP Server-Header**
+   - Neue Middleware: `serverHeaderMiddleware()`
+   - Fügt `Server: sigoREST/1.0` zu jeder HTTP-Antwort hinzu
+   - Wird in der Handler-Chain nach `ipMiddleware` eingebunden
+   - Gilt für beide Listener (HTTP :9080 und HTTPS :9443)
+
+4. **Ping Endpoint**
+   - Neuer Endpoint: `GET /ping`
+   - Antwort: Plain-Text `pong` (4 Bytes)
+   - Ideal für Load Balancer Health Checks (schnell, kein JSON-Parsing)
+   - Status: 200 OK
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|-------------|--------------|
+| **`-V` statt `-v` für CLI** | `-v` war bereits für Log-Level (`debug|info|warn|error`) belegt. Großes `-V` ist Unix-Konvention für Version. |
+| **`-version` für REST-Server** | Server hat weniger Flags, daher ist ausgeschriebene `-version` lesbarer. |
+| **Middleware-Chain-Reihenfolge** | `serverHeaderMiddleware` außen (zuerst aufgerufen, zuletzt verarbeitet) → Header wird auch für Fehlerantworten gesetzt. |
+| **Plain-Text für `/ping`** | Load Balancer prüfen oft nur den Status-Code. JSON wäre Overhead für diesen Zweck. |
+| **Separation von `/ping` und `/api/health`** | `/ping` = schneller Liveness-Check, `/api/health` = detaillierter Readiness-Check mit Circuit Breaker Status. |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `cmd/sigoE/main.go` | `const version`, `-V` Flag, `showVersion` Handler |
+| `sigoREST/main.go` | `const version`, `-version` Flag, `serverHeaderMiddleware()`, `handlePing()` |
+
+**Beispiele:**
+
+```bash
+# CLI Version
+$ ./sigoE/sigoE -V
+sigoE Version 1.0
+
+# Server Version
+$ ./sigoREST/sigoREST -version
+sigoREST Version 1.0
+
+# Server-Header in Antworten
+$ curl -si http://localhost:9080/api/health | grep Server
+Server: sigoREST/1.0
+
+# Ping Endpoint
+$ curl -i http://localhost:9080/ping
+HTTP/1.1 200 OK
+Server: sigoREST/1.0
+Content-Type: text/plain
+
+pong
+```
+
+**Lessons Learned:**
+
+1. **Middleware-Komposition** — Durch das Wrappen von Handlern (`serverHeaderMiddleware(ipMiddleware(...))`) bleibt der Code modular und wiederverwendbar.
+
+2. **Versions-Konstanten** — Zentrale Definition als `const` erleichtert zukünftige Releases (nur eine Stelle ändern).
+
+3. **Header-Setzung** — Der `Server`-Header ist Teil der HTTP-Spezifikation und hilft Clients bei der API-Erkennung ohne zusätzliche Calls.
+
+4. **Load Balancer Patterns** — Ein dedizierter `/ping` Endpoint ist schneller als `/api/health` (keine Locks, keine JSON-Serialisierung) und ideal für häufige Health-Checks.
+
+**Status:** ✅ Erfolgreich abgeschlossen
+
+---
+
 ## Session 2026-02-19
 
 **Was gebaut wurde:**
