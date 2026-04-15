@@ -1,3 +1,12 @@
 Start: Mo 23. Feb 16:20:26 CET 2026
 Ende: Mo 23. Feb 17:50:32 CET 2026
 Start: Di 24. Feb 20:30:03 CET 2026
+Ende: Di 24. Feb 20:37:00 CET 2026
+Start: Do 26. Feb 18:51:10 CET 2026
+Ende: Do 26. Feb 21:53:14 CET 2026
+Start: Sa 28. Feb 14:28:33 CET 2026
+Ende: Sa 28. Feb 14:49:00 CET 2026
+Start: Sa 7. Mär 13:19:23 CET 2026
+Ende: Sa 7. Mär 15:49:06 CET 2026
+Start: So 8. Mär 15:07:30 CET 2026
+Ende: So 8. Mär 16:36:26 CET 2026

@@ -1,0 +1,25 @@
+{
+  "name": "sigoclient",
+  "version": "1.0.0",
+  "description": "JavaScript client for sigoREST - OpenAI-compatible AI Gateway",
+  "main": "client.js",
+  "type": "module",
+  "scripts": {
+    "test": "node examples/basic.js",
+    "example:basic": "node examples/basic.js",
+    "example:session": "node examples/session.js",
+    "example:listmodels": "node examples/listmodels.js"
+  },
+  "keywords": [
+    "sigorest",
+    "ai",
+    "llm",
+    "openai",
+    "client"
+  ],
+  "author": "Gerhard Quell <gquell@skequell.de>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -24,6 +24,8 @@ import (
 	"sigorest/sigoengine"
 )
 
+const version = "1.0"
+
 func main() {
 	var (
 		model        = flag.String("m", "gpt41", "Modell (Shortcode oder vollständiger Name)")
@@ -39,8 +41,14 @@ func main() {
 		systemPrompt = flag.String("sp", "", "System-Prompt")
 		showInfo     = flag.Bool("i", false, "Modell-Info anzeigen")
 		logLevel     = flag.String("v", "info", "Log-Level: debug|info|warn|error")
+		showVersion  = flag.Bool("V", false, "Version anzeigen")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("sigoE Version %s\n", version)
+		os.Exit(0)
+	}
 
 	sigoengine.SetLogLevel(sigoengine.ParseLogLevel(*logLevel))
 	sigoengine.SetJSONMode(*jsonOut)
@@ -214,24 +222,23 @@ func listAllModels() {
 	}
 
 	var entries []modelEntry
-	for name, info := range sigoengine.MammothModels {
-		endpoint := info["endpoint"].(string)
+	for _, m := range sigoengine.GetAllModels() {
 		var provider string
 		switch {
-		case strings.Contains(endpoint, "mammouth"):
+		case strings.Contains(m.Endpoint, "mammouth"):
 			provider = "Mammoth.ai"
-		case strings.Contains(endpoint, "moonshot"):
+		case strings.Contains(m.Endpoint, "moonshot"):
 			provider = "Moonshot"
-		case strings.Contains(endpoint, "z.ai"):
+		case strings.Contains(m.Endpoint, "z.ai"):
 			provider = "Z.ai"
 		default:
 			provider = "Other"
 		}
 		entries = append(entries, modelEntry{
-			name:      name,
-			shortcode: info["shortcode"].(string),
-			inCost:    info["input_cost"].(float64),
-			outCost:   info["output_cost"].(float64),
+			name:      m.ID,
+			shortcode: m.Shortcode,
+			inCost:    m.InputCost,
+			outCost:   m.OutputCost,
 			provider:  provider,
 		})
 	}
@@ -259,19 +266,22 @@ func listAllModels() {
 }
 
 func showModelInfo(modelName string) {
-	info, exists := sigoengine.MammothModels[modelName]
+	m, exists := sigoengine.GetModelByID(modelName)
 	if !exists {
-		fmt.Printf("Modell '%s' nicht gefunden\n", modelName)
-		return
+		// Versuche über Shortcode zu finden
+		m, exists = sigoengine.GetModelByShortcode(modelName)
+		if !exists {
+			fmt.Printf("Modell '%s' nicht gefunden\n", modelName)
+			return
+		}
 	}
-	fmt.Printf("\nModell: %s\n", modelName)
-	fmt.Printf("Shortcode:   %s\n", info["shortcode"])
-	fmt.Printf("Endpoint:    %s\n", info["endpoint"])
-	fmt.Printf("API Key Env: %s\n", info["apikey"])
-	fmt.Printf("Max Context: %d Tokens\n", info["max_tokens"])
-	fmt.Printf("Max Output:  %d Tokens\n", info["max_output"])
-	minT, maxT, defT := sigoengine.GetModelTemperatureRange(modelName)
-	fmt.Printf("Temperatur:  %.1f - %.1f (Default: %.1f)\n", minT, maxT, defT)
-	fmt.Printf("Preis Input: $%.2f/M Tokens\n", info["input_cost"])
-	fmt.Printf("Preis Output:$%.2f/M Tokens\n", info["output_cost"])
+	fmt.Printf("\nModell: %s\n", m.ID)
+	fmt.Printf("Shortcode:   %s\n", m.Shortcode)
+	fmt.Printf("Endpoint:    %s\n", m.Endpoint)
+	fmt.Printf("API Key Env: %s\n", m.APIKeyEnv)
+	fmt.Printf("Max Context: %d Tokens\n", m.MaxInputTokens)
+	fmt.Printf("Max Output:  %d Tokens\n", m.MaxOutputTokens)
+	fmt.Printf("Temperatur:  %.1f - %.1f (Default: %.1f)\n", m.MinTemperature, m.MaxTemperature, (m.MinTemperature+m.MaxTemperature)/2.0)
+	fmt.Printf("Preis Input: $%.2f/M Tokens\n", m.InputCost)
+	fmt.Printf("Preis Output:$%.2f/M Tokens\n", m.OutputCost)
 }
