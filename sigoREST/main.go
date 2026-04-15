@@ -403,6 +403,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		APIKey:   os.Getenv(modelInfo.APIKey),
 	}
 
+	// Provider-Ping: scheitert → sofortiger Fehler, kein API-Call
+	if err := sigoengine.PingProvider(modelInfo.Endpoint); err != nil {
+		sigoengine.LogWarn("Provider nicht erreichbar", map[string]interface{}{
+			"model":    modelID,
+			"endpoint": modelInfo.Endpoint,
+			"error":    err.Error(),
+		})
+		writeError(w, "Provider nicht erreichbar: "+err.Error(), "provider_unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Defaults setzen
 	if req.MaxTokens == 0 && modelInfo.MaxOutputTokens > 0 {
 		req.MaxTokens = modelInfo.MaxOutputTokens
