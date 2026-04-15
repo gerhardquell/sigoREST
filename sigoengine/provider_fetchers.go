@@ -90,6 +90,10 @@ func generateProviderShortcode(id string, used map[string]bool) string {
 		return -1
 	}, strings.ToLower(id))
 
+	if clean == "" {
+		return id // Fallback: Sonderzeichen-only ID, gib original zurück
+	}
+
 	candidate := clean
 	if len(candidate) > 7 {
 		candidate = candidate[:7]

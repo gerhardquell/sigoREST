@@ -460,16 +460,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		messages = append(messages, memMsg)
 	}
 
-	// Session-History laden und einbauen
-	if req.SessionID != "" {
-		session := sigoengine.LoadSession(req.SessionID, req.Model)
-		for _, m := range session.History {
-			messages = append(messages, map[string]interface{}{
-				"role": m.Role, "content": m.Content,
-			})
-		}
-	}
-
 	// System-Prompt: Request-Wert hat Vorrang vor globalem Default
 	effectiveSystemPrompt := globalSystemPrompt
 	if req.SystemPrompt != "" {
@@ -480,6 +470,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"role":    "system",
 			"content": effectiveSystemPrompt,
 		})
+	}
+
+	// Session-History laden und einbauen
+	if req.SessionID != "" {
+		session := sigoengine.LoadSession(req.SessionID, req.Model)
+		for _, m := range session.History {
+			messages = append(messages, map[string]interface{}{
+				"role": m.Role, "content": m.Content,
+			})
+		}
 	}
 
 	// User-Messages aus Request (außer system, die kommt von Memory)
@@ -669,12 +669,8 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Ollama-Modelle zur Liste hinzufügen
-	ollamaModels := sigoengine.GetOllamaModels()
-
 	var models []ModelInfo
 	for id, info := range s.models {
-		// Cloud-Modell
 		models = append(models, ModelInfo{
 			ID:                       id,
 			Shortcode:                info.Shortcode,
@@ -687,23 +683,6 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 			MinTemperature:           info.MinTemperature,
 			MaxTemperature:           info.MaxTemperature,
 			RequiresCompletionTokens: info.RequiresCompletionTokens,
-		})
-	}
-
-	// Ollama-Modelle hinzufügen
-	for sc := range ollamaModels {
-		models = append(models, ModelInfo{
-			ID:                       sc,
-			Shortcode:                sc,
-			Endpoint:                 "http://localhost:11434/v1/chat/completions",
-			APIKey:                   "",
-			MaxInputTokens:           0,
-			MaxOutputTokens:          0,
-			InputCost:                0,
-			OutputCost:               0,
-			MinTemperature:           0.0,
-			MaxTemperature:           2.0,
-			RequiresCompletionTokens: false,
 		})
 	}
 
