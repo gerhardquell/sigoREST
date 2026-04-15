@@ -399,9 +399,49 @@ type ProviderConfig struct {
 
 // OllamaModelInfo beschreibt ein lokal installiertes Ollama-Modell
 type OllamaModelInfo struct {
-	Shortcode  string // z.B. "ollama-llama3"
-	OllamaName string // z.B. "llama3:latest" (echter Ollama-Name)
-	Size       int64  `json:"size"`
+	Shortcode     string // z.B. "ollama-llama3"
+	OllamaName    string // z.B. "llama3:latest" (echter Ollama-Name)
+	Size          int64  `json:"size"`
+	ContextLength int    // aus /api/show, 0 wenn unbekannt
+}
+
+// fetchOllamaContextLength fragt POST /api/show für ein Modell ab und
+// gibt die Context-Length zurück (0 wenn nicht verfügbar).
+func fetchOllamaContextLength(endpoint, modelName string) int {
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	type showReq struct {
+		Name string `json:"name"`
+	}
+	body, _ := json.Marshal(showReq{Name: modelName})
+
+	resp, err := client.Post(
+		endpoint+"/api/show",
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ModelInfo map[string]interface{} `json:"modelinfo"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0
+	}
+
+	// Suche nach context_length in modelinfo (Feldname variiert je nach Modell-Typ)
+	for k, v := range result.ModelInfo {
+		if strings.HasSuffix(k, ".context_length") || k == "context_length" {
+			switch val := v.(type) {
+			case float64:
+				return int(val)
+			}
+		}
+	}
+	return 0
 }
 
 var (
@@ -451,10 +491,12 @@ func DiscoverOllamaModels(endpoint string) int {
 			shortcode = strings.TrimSuffix(shortcode, "-latest")
 		}
 
+		ctxLen := fetchOllamaContextLength(endpoint, m.Name)
 		ollamaRegistry[shortcode] = OllamaModelInfo{
-			Shortcode:  shortcode,
-			OllamaName: name,
-			Size:       m.Size,
+			Shortcode:     shortcode,
+			OllamaName:    name,
+			Size:          m.Size,
+			ContextLength: ctxLen,
 		}
 		LogDebug("Ollama-Modell registriert", map[string]interface{}{
 			"shortcode": shortcode, "model": name,
