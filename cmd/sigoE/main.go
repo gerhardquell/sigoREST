@@ -198,7 +198,8 @@ func showHelp() {
 	fmt.Println("sigoEngine - SI Gateway in GO")
 	fmt.Println("Usage: sigoE [Optionen] [Prompt]")
 	fmt.Println("       echo 'Prompt' | sigoE [Optionen]")
-	fmt.Println("       sigoE [Optionen] < datei.txt\n")
+	fmt.Println("       sigoE [Optionen] < datei.txt")
+	fmt.Println()
 	flag.PrintDefaults()
 	fmt.Println("\nSessions:")
 	sessions, _ := filepath.Glob(".sessions/*.json")
@@ -213,7 +214,8 @@ func showHelp() {
 
 func listAllModels() {
 	fmt.Println("Verfügbare Modelle:")
-	fmt.Println("===================\n")
+	fmt.Println("===================")
+	fmt.Println()
 
 	type modelEntry struct {
 		name, shortcode string
