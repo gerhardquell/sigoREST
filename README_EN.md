@@ -10,14 +10,14 @@ IP-based access control, global memory block for prompt caching.
 ```
 sigorest/
 ├── sigoengine/
-│   ├── engine.go           # Shared Package (API calls, sessions, circuit breaker)
-│   ├── models.go           # Model struct + CoreModels (5 embedded fallbacks)
-│   └── models_registry.go  # Registry logic (JSON/CSV loading, lookup)
-├── cmd/sigoE/main.go       # CLI wrapper
+│   ├── engine.go              # Shared Package (API calls, sessions, circuit breaker)
+│   ├── models.go              # Model struct + CoreModels (CLI fallback)
+│   ├── models_registry.go     # Registry logic (lookup, shortcode)
+│   └── provider_fetchers.go   # Provider fetchers (Mammouth, Moonshot, ZAI)
+├── cmd/sigoE/main.go          # CLI wrapper
 └── sigoREST/
-    ├── main.go             # REST server
-    ├── models.csv          # Full model list (38+ models)
-    └── memory.json         # Global system prompt
+    ├── main.go                # REST server
+    └── memory.json            # Global memory block
 ```
 
 ## Installation
@@ -32,7 +32,6 @@ sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
 
 # Create configuration
 sudo mkdir -p /usr/local/slib/sigoREST/certs
-sudo cp sigoREST/models.csv /usr/local/slib/sigoREST/
 sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
 
 # Setup as systemd service (see docs/systemd-install.md)
@@ -64,7 +63,6 @@ go build ./...
 |------|---------|-------------|
 | `-http-port` | `9080` | HTTP (localhost only 127.0.0.0/8) |
 | `-https-port` | `9443` | HTTPS (private networks 192.168.0.0/16, 10.0.0.0/8) |
-| `-models` | — | Path to `models.csv` (optional, for systemd installations) |
 | `-cert` | `./certs/server.crt` | TLS certificate (auto-generated on first start) |
 | `-key` | `./certs/server.key` | TLS key |
 | `-v` | `info` | Log level: `debug\|info\|warn\|error` |
@@ -103,28 +101,18 @@ go build ./...
 
 Both files: Disk takes precedence over embedded defaults.
 
-### models.csv
+### Dynamic Model Discovery
 
-Semicolon-separated model definitions (11 fields per line):
+At server startup, models are automatically loaded from the following providers:
 
-```
-id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
-```
+| Provider | Models | Auth |
+|----------|--------|------|
+| Mammouth | ~67 models (GPT, Claude, Gemini, Grok, DeepSeek, ...) | `MAMMOUTH_API_KEY` |
+| Moonshot | ~13 models (Kimi, moonshot-v1-*) | `MOONSHOT_API_KEY` |
+| ZAI | ~7 models (GLM series) | `ZAI_API_KEY` |
+| Ollama | Locally available models | — |
 
-**Example:**
-```
-gpt-4.1;gpt41;https://api.mammouth.ai/v1/chat/completions;MAMMOUTH_API_KEY;128000;8192;2.0;8.0;0.0;2.0;
-claude-sonnet-4-6;cl-s;https://api.mammouth.ai/v1/chat/completions;MAMMOUTH_API_KEY;200000;8192;3.0;15.0;0.0;1.0;
-```
-
-**Loading Priority:**
-1. Custom Path (`-models` flag) — for systemd installations
-2. `~/.config/sigorest/models.json` (user override)
-3. `~/.config/sigorest/models.csv` (user override)
-4. `./models.csv` (local file)
-5. Embedded `CoreModels` (5 fallback models)
-
-Without external files, 5 core models are available: `gpt41`, `cl-s`, `cl-o`, `kimi`, `zai-glm45`
+If a provider is unreachable, the server starts with the remaining models.
 
 ### memory.json
 Global system context for all requests (always inserted first):
@@ -149,11 +137,12 @@ curl -s http://localhost:9080/v1/chat/completions \
     "max_tokens": 1024,
     "session_id": "my-project",
     "timeout": 120,
-    "retries": 3
+    "retries": 3,
+    "system_prompt": "Optional: overrides the global system prompt"
   }'
 ```
 
-`session_id`, `timeout`, `retries` are sigoREST extensions — all other fields are standard OpenAI.
+`session_id`, `timeout`, `retries`, `system_prompt` are sigoREST extensions — all other fields are standard OpenAI.
 
 ### GET /v1/models
 ```bash
@@ -192,6 +181,20 @@ curl -s -X PUT http://localhost:9080/api/memory \
 ```
 Changes the memory block at runtime and writes it to disk.
 
+### GET /api/system-prompt
+```bash
+curl -s http://localhost:9080/api/system-prompt
+```
+Read the current global system prompt.
+
+### PUT /api/system-prompt
+```bash
+curl -s -X PUT http://localhost:9080/api/system-prompt \
+  -H "Content-Type: application/json" \
+  -d '{"system_prompt":"You are a helpful assistant."}'
+```
+Set the global system prompt and save it to `system-prompt.txt`. Can be overridden per request.
+
 ## Client Examples
 
 ### Go
@@ -221,20 +224,23 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-## Models (Whitelist Default)
+## Models
 
-sigoREST provides first-class support for Chinese LLMs, including **Kimi** from Moonshot.ai and **DeepSeek**:
+Models are dynamically loaded from providers at server startup (~84 models).
+Current list:
+```bash
+curl -s http://localhost:9080/v1/models | jq '.data[].id'
+```
 
-| Shortcode | Model | Provider | Input $/M | Output $/M |
-|-----------|-------|----------|-----------|------------|
-| `claude-h` | claude-3-5-haiku-20241022 | Mammoth.ai | $0.80 | $4.00 |
-| `gpt41` | gpt-4.1 | Mammoth.ai | $2.00 | $8.00 |
-| `gemini-p` | gemini-2.5-pro | Mammoth.ai | $2.50 | $15.00 |
-| `deepseek-r1` | deepseek-r1-0528 | Mammoth.ai | $3.00 | $8.00 |
-| `kimi` | kimi-k2.5 | Moonshot.ai | $0.60 | $3.00 |
-| `grok3m` | grok-3-mini | Mammoth.ai | $0.30 | $0.50 |
+**Examples:**
 
-All available cloud shortcodes: `./sigoE -l`
+| Shortcode | Model | Provider |
+|-----------|-------|----------|
+| `gpt41` | gpt-4.1 | Mammouth |
+| `claude-h` | claude-3-5-haiku-20241022 | Mammouth |
+| `kimi` | kimi-k2.5 | Moonshot |
+| `glm51` | glm-5.1 | ZAI |
+| `ollama-gemma3` | gemma3:latest | Ollama (local) |
 
 ## Ollama (Local LLMs)
 
@@ -304,12 +310,6 @@ For production environments, sigoREST should be run as a systemd service:
 - Data/Configuration: `/usr/local/slib/sigoREST/`
 - CLI Client: `/usr/local/bin/sigoE`
 
-**systemd with custom models.csv:**
-```bash
-# Start server with explicit path to models.csv
-sudo /usr/local/sbin/sigoREST -models /usr/local/slib/sigoREST/models.csv
-```
-
 Service file example (`/etc/systemd/system/sigorest.service`):
 ```ini
 [Unit]
@@ -318,7 +318,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/sigoREST -models /usr/local/slib/sigoREST/models.csv
+ExecStart=/usr/local/sbin/sigoREST
 Restart=on-failure
 User=sigorest
 Group=sigorest
