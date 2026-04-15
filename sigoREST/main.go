@@ -29,8 +29,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -43,9 +41,6 @@ const version = "1.0"
 
 // **********************************************************************
 // Embedded Default-Dateien
-//
-//go:embed models.csv
-var defaultModelsCSV string
 
 //go:embed memory.json
 var defaultMemoryJSON string
@@ -93,7 +88,6 @@ var (
 	quiet       = flag.Bool("q", false, "Quiet Mode")
 	jsonLogs    = flag.Bool("j", false, "JSON-Logs")
 	showVersion = flag.Bool("version", false, "Version anzeigen")
-	modelsPath  = flag.String("models", "", "Pfad zur models.csv (optional)")
 )
 
 // **********************************************************************
@@ -244,76 +238,59 @@ func ensureTLSCert(certPath, keyPath string) error {
 }
 
 // **********************************************************************
-// Modelle aus CSV laden
+// Modelle von Provider-APIs laden
 
-// loadModels liest models.csv (Custom Path → Disk → Embedded)
-func loadModels() map[string]ModelInfo {
-	var csvContent string
-
-	// 1. Custom Pfad (wenn gesetzt via -models Flag)
-	if customPath := sigoengine.GetModelsCSVPath(); customPath != "" {
-		data, err := os.ReadFile(customPath)
-		if err == nil {
-			csvContent = string(data)
-			sigoengine.LogInfo("models.csv von custom Pfad geladen", map[string]interface{}{"path": customPath})
-		}
+// modelInfoFromEngine konvertiert sigoengine.Model → ModelInfo
+func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
+	return ModelInfo{
+		ID:                       m.ID,
+		Shortcode:                m.Shortcode,
+		Endpoint:                 m.Endpoint,
+		APIKey:                   m.APIKeyEnv,
+		MaxInputTokens:           m.MaxInputTokens,
+		MaxOutputTokens:          m.MaxOutputTokens,
+		InputCost:                m.InputCost,
+		OutputCost:               m.OutputCost,
+		MinTemperature:           m.MinTemperature,
+		MaxTemperature:           m.MaxTemperature,
+		RequiresCompletionTokens: m.RequiresCompletionTokens,
 	}
+}
 
-	// 2. Lokale models.csv
-	if csvContent == "" {
-		data, err := os.ReadFile("./models.csv")
-		if err == nil {
-			csvContent = string(data)
-			sigoengine.LogInfo("models.csv von Disk geladen")
-		} else {
-			csvContent = defaultModelsCSV
-			sigoengine.LogInfo("models.csv (embedded default) verwendet")
-		}
-	}
-
+// loadModelsFromProviders ruft alle Provider-APIs beim Start ab.
+// Fehler bei einzelnen Providern werden geloggt; der Server startet
+// trotzdem mit den verfügbaren Modellen.
+func loadModelsFromProviders() map[string]ModelInfo {
 	models := make(map[string]ModelInfo)
-	lines := strings.Split(strings.TrimSpace(csvContent), "\n")
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.Split(line, ";")
-		if len(parts) < 10 {
-			sigoengine.LogWarn("Ungültige CSV-Zeile ignoriert (weniger als 10 Felder)", map[string]interface{}{"line": line})
-			continue
-		}
-
-		id := strings.TrimSpace(parts[0])
-		shortcode := strings.TrimSpace(parts[1])
-		endpoint := strings.TrimSpace(parts[2])
-		apikey := strings.TrimSpace(parts[3])
-		maxInput, _ := strconv.Atoi(parts[4])
-		maxOutput, _ := strconv.Atoi(parts[5])
-		inputCost, _ := strconv.ParseFloat(parts[6], 64)
-		outputCost, _ := strconv.ParseFloat(parts[7], 64)
-		minTemp, _ := strconv.ParseFloat(parts[8], 64)
-		maxTemp, _ := strconv.ParseFloat(parts[9], 64)
-		requiresCompletion := len(parts) > 10 && strings.TrimSpace(parts[10]) == "true"
-
-		models[id] = ModelInfo{
-			ID:                       id,
-			Shortcode:                shortcode,
-			Endpoint:                 endpoint,
-			APIKey:                   apikey,
-			MaxInputTokens:           maxInput,
-			MaxOutputTokens:          maxOutput,
-			InputCost:                inputCost,
-			OutputCost:               outputCost,
-			MinTemperature:           minTemp,
-			MaxTemperature:           maxTemp,
-			RequiresCompletionTokens: requiresCompletion,
+	// 1. Mammouth (kein API-Key nötig)
+	if ms, err := sigoengine.FetchMammouthModels(); err != nil {
+		sigoengine.LogWarn("Mammouth-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
+	} else {
+		for _, m := range ms {
+			models[m.ID] = modelInfoFromEngine(m)
 		}
 	}
 
-	sigoengine.LogInfo("Modelle geladen", map[string]interface{}{"count": len(models)})
+	// 2. Moonshot
+	if ms, err := sigoengine.FetchMoonshotModels(); err != nil {
+		sigoengine.LogWarn("Moonshot-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
+	} else {
+		for _, m := range ms {
+			models[m.ID] = modelInfoFromEngine(m)
+		}
+	}
+
+	// 3. ZAI (fällt intern auf statische Liste zurück)
+	if ms, err := sigoengine.FetchZAIModels(); err != nil {
+		sigoengine.LogWarn("ZAI-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
+	} else {
+		for _, m := range ms {
+			models[m.ID] = modelInfoFromEngine(m)
+		}
+	}
+
+	sigoengine.LogInfo("Provider-Modelle geladen", map[string]interface{}{"count": len(models)})
 	return models
 }
 
@@ -904,12 +881,6 @@ func main() {
 	sigoengine.SetJSONMode(*jsonLogs)
 	sigoengine.SetQuietMode(*quiet)
 
-	// Custom models.csv Pfad setzen (muss vor Registry-Zugriff passieren)
-	if *modelsPath != "" {
-		sigoengine.SetModelsCSVPath(*modelsPath)
-		sigoengine.LogInfo("Custom models.csv Pfad gesetzt", map[string]interface{}{"path": *modelsPath})
-	}
-
 	sigoengine.LogInfo("sigoREST startet", map[string]interface{}{
 		"http_port":  *httpPort,
 		"https_port": *httpsPort,
@@ -923,7 +894,7 @@ func main() {
 
 	// Server-State initialisieren
 	srv := &Server{
-		models:   loadModels(),
+		models:   loadModelsFromProviders(),
 		memory:   loadMemory(),
 		breakers: make(map[string]*sigoengine.EnhancedCircuitBreaker),
 	}
@@ -933,20 +904,16 @@ func main() {
 	if n := sigoengine.DiscoverOllamaModels(ollamaEndpoint); n > 0 {
 		srv.mu.Lock()
 		ollamaModels := sigoengine.GetOllamaModels()
-		for sc := range ollamaModels {
-			// Ollama-Modell zur models Map hinzufügen
+		for sc, info := range ollamaModels {
 			srv.models[sc] = ModelInfo{
-				ID:                       sc,
-				Shortcode:                sc,
-				Endpoint:                 "http://localhost:11434/v1/chat/completions",
-				APIKey:                   "",
-				MaxInputTokens:           0,
-				MaxOutputTokens:          0,
-				InputCost:                0,
-				OutputCost:               0,
-				MinTemperature:           0.0,
-				MaxTemperature:           2.0,
-				RequiresCompletionTokens: false,
+				ID:              sc,
+				Shortcode:       sc,
+				Endpoint:        "http://localhost:11434/v1/chat/completions",
+				APIKey:          "",
+				MaxInputTokens:  info.ContextLength,
+				MaxOutputTokens: 0,
+				MinTemperature:  0.0,
+				MaxTemperature:  2.0,
 			}
 		}
 		srv.mu.Unlock()
