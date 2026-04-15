@@ -9,8 +9,11 @@
 package sigoengine
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -104,4 +107,116 @@ func generateProviderShortcode(id string, used map[string]bool) string {
 		}
 	}
 	return id
+}
+
+// **********************************************************************
+// FetchMammouthModels ruft https://api.mammouth.ai/public/models ab.
+// Kein API-Key nötig (öffentlicher Endpoint).
+// Unterstützt zwei Response-Formate: Array oder {"data": [...]}
+func FetchMammouthModels() ([]Model, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.mammouth.ai/public/models")
+	if err != nil {
+		return nil, fmt.Errorf("mammouth: GET /public/models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mammouth: /public/models returned HTTP %d", resp.StatusCode)
+	}
+
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("mammouth: invalid JSON: %w", err)
+	}
+
+	models, err := parseMammouthResponse(raw)
+	if err != nil {
+		return nil, err
+	}
+	LogInfo("Mammouth-Modelle geladen", map[string]interface{}{"count": len(models)})
+	return models, nil
+}
+
+// mammouthModel deckt die bekannten Feldnamen beider API-Formate ab.
+type mammouthModel struct {
+	ID string `json:"id"`
+	// Kontextfenster (mögliche Feldnamen)
+	ContextWindow int `json:"context_window"`
+	MaxContext    int `json:"max_context"`
+	// Max Output (mögliche Feldnamen)
+	MaxOutputTokens int `json:"max_output_tokens"`
+	MaxOutput       int `json:"max_output"`
+	// Preise (mögliche Feldnamen, $/1M tokens)
+	InputPricePerMillion  float64 `json:"input_price_per_million"`
+	OutputPricePerMillion float64 `json:"output_price_per_million"`
+	InputCost             float64 `json:"input_cost"`
+	OutputCost            float64 `json:"output_cost"`
+}
+
+func parseMammouthResponse(raw json.RawMessage) ([]Model, error) {
+	// Versuche Array-Format: [{"id": "..."}, ...]
+	var arr []mammouthModel
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return convertMammouthModels(arr), nil
+	}
+
+	// Versuche OpenAI-Format: {"data": [...], "object": "list"}
+	var wrapper struct {
+		Data []mammouthModel `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err == nil && len(wrapper.Data) > 0 {
+		return convertMammouthModels(wrapper.Data), nil
+	}
+
+	return nil, fmt.Errorf("mammouth: unbekanntes Response-Format (weder Array noch {data:[]})")
+}
+
+func convertMammouthModels(items []mammouthModel) []Model {
+	used := make(map[string]bool)
+	var result []Model
+	for _, m := range items {
+		if m.ID == "" {
+			continue
+		}
+		maxIn := firstNonZero(m.ContextWindow, m.MaxContext)
+		maxOut := firstNonZero(m.MaxOutputTokens, m.MaxOutput)
+		inCost := firstNonZeroFloat(m.InputPricePerMillion, m.InputCost)
+		outCost := firstNonZeroFloat(m.OutputPricePerMillion, m.OutputCost)
+
+		sc := generateProviderShortcode(m.ID, used)
+		used[sc] = true
+
+		result = append(result, Model{
+			ID:              m.ID,
+			Shortcode:       sc,
+			Endpoint:        mammouthChatEndpoint,
+			APIKeyEnv:       "MAMMOUTH_API_KEY",
+			MaxInputTokens:  maxIn,
+			MaxOutputTokens: maxOut,
+			InputCost:       inCost,
+			OutputCost:      outCost,
+			MinTemperature:  0.0,
+			MaxTemperature:  2.0,
+		})
+	}
+	return result
+}
+
+func firstNonZero(vals ...int) int {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func firstNonZeroFloat(vals ...float64) float64 {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
