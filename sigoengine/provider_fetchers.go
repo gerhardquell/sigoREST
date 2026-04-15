@@ -297,3 +297,79 @@ func FetchMoonshotModels() ([]Model, error) {
 	LogInfo("Moonshot-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
 }
+
+// **********************************************************************
+// FetchZAIModels versucht https://api.z.ai/api/paas/v4/models abzurufen.
+// API-Key aus ENV: ZAI_API_KEY (Bearer Token).
+// Fallback: zaiStaticModels (13 Modelle) wenn API nicht antwortet oder
+// keinen /models-Endpoint hat (nicht dokumentiert).
+func FetchZAIModels() ([]Model, error) {
+	apiKey := os.Getenv("ZAI_API_KEY")
+	if apiKey == "" {
+		LogWarn("ZAI_API_KEY nicht gesetzt, verwende statische ZAI-Modelle")
+		return zaiStaticModels, nil
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, "https://api.z.ai/api/paas/v4/models", nil)
+	if err != nil {
+		return zaiStaticModels, nil
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		LogInfo("ZAI /models nicht erreichbar, verwende statische Liste", map[string]interface{}{"error": err.Error()})
+		return zaiStaticModels, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		LogInfo("ZAI /models nicht verfügbar, verwende statische Liste", map[string]interface{}{"status": resp.StatusCode})
+		return zaiStaticModels, nil
+	}
+
+	var listResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil || len(listResp.Data) == 0 {
+		LogInfo("ZAI Antwort leer oder ungültig, verwende statische Liste")
+		return zaiStaticModels, nil
+	}
+
+	// Statische Map für schnellen Lookup
+	staticMap := make(map[string]Model, len(zaiStaticModels))
+	for _, m := range zaiStaticModels {
+		staticMap[m.ID] = m
+	}
+
+	used := make(map[string]bool)
+	var result []Model
+	for _, item := range listResp.Data {
+		if item.ID == "" {
+			continue
+		}
+		if known, ok := staticMap[item.ID]; ok {
+			result = append(result, known)
+			used[known.Shortcode] = true
+		} else {
+			sc := generateProviderShortcode(item.ID, used)
+			used[sc] = true
+			result = append(result, Model{
+				ID:              item.ID,
+				Shortcode:       sc,
+				Endpoint:        zaiChatEndpoint,
+				APIKeyEnv:       "ZAI_API_KEY",
+				MaxInputTokens:  128000,
+				MaxOutputTokens: 4096,
+				MinTemperature:  0.0,
+				MaxTemperature:  2.0,
+			})
+		}
+	}
+
+	LogInfo("ZAI-Modelle geladen (dynamisch)", map[string]interface{}{"count": len(result)})
+	return result, nil
+}
