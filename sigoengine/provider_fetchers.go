@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -219,4 +220,80 @@ func firstNonZeroFloat(vals ...float64) float64 {
 		}
 	}
 	return 0
+}
+
+// **********************************************************************
+// FetchMoonshotModels ruft https://api.moonshot.ai/v1/models ab.
+// API-Key aus ENV: MOONSHOT_API_KEY (Bearer Token).
+// OpenAI-Format: Response enthält nur Model-IDs, keine Preise.
+// Bekannte Modelle werden aus moonshotKnownModels angereichert.
+func FetchMoonshotModels() ([]Model, error) {
+	apiKey := os.Getenv("MOONSHOT_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("moonshot: MOONSHOT_API_KEY nicht gesetzt")
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, "https://api.moonshot.ai/v1/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("moonshot: Request-Erstellung fehlgeschlagen: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("moonshot: GET /v1/models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("moonshot: /v1/models returned HTTP %d", resp.StatusCode)
+	}
+
+	var listResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, fmt.Errorf("moonshot: invalid JSON: %w", err)
+	}
+
+	used := make(map[string]bool)
+	var result []Model
+
+	for _, item := range listResp.Data {
+		if item.ID == "" {
+			continue
+		}
+		if known, ok := moonshotKnownModels[item.ID]; ok {
+			result = append(result, known)
+			used[known.Shortcode] = true
+		} else {
+			// Unbekanntes Moonshot-Modell: generiere Shortcode, verwende sichere Defaults
+			sc := generateProviderShortcode(item.ID, used)
+			used[sc] = true
+			result = append(result, Model{
+				ID:              item.ID,
+				Shortcode:       sc,
+				Endpoint:        moonshotChatEndpoint,
+				APIKeyEnv:       "MOONSHOT_API_KEY",
+				MaxInputTokens:  128000,
+				MaxOutputTokens: 4096,
+				MinTemperature:  0.0,
+				MaxTemperature:  2.0,
+			})
+		}
+	}
+
+	// Fallback: API liefert keine Modelle → statische bekannte Liste
+	if len(result) == 0 {
+		LogWarn("Moonshot /v1/models leer, verwende statische Liste")
+		for _, m := range moonshotKnownModels {
+			result = append(result, m)
+		}
+	}
+
+	LogInfo("Moonshot-Modelle geladen", map[string]interface{}{"count": len(result)})
+	return result, nil
 }
