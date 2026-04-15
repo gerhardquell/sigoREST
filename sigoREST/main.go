@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,10 +72,11 @@ type ModelInfo struct {
 // **********************************************************************
 // Server-State
 type Server struct {
-	mu       sync.RWMutex
-	memory   MemoryBlock
-	models   map[string]ModelInfo                              // id → ModelInfo
-	breakers map[string]*sigoengine.EnhancedCircuitBreaker     // Modell → Enhanced Circuit Breaker
+	mu           sync.RWMutex
+	memory       MemoryBlock
+	models       map[string]ModelInfo                          // id → ModelInfo
+	breakers     map[string]*sigoengine.EnhancedCircuitBreaker // Modell → Enhanced Circuit Breaker
+	systemPrompt string                                        // globaler Default-Prompt (leer = kein Prompt)
 }
 
 // **********************************************************************
@@ -317,6 +319,16 @@ func loadMemory() MemoryBlock {
 	return mem
 }
 
+// loadSystemPrompt liest system-prompt.txt von Disk (optional).
+// Gibt leeren String zurück wenn Datei nicht existiert.
+func loadSystemPrompt() string {
+	data, err := os.ReadFile("./system-prompt.txt")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // **********************************************************************
 // Request/Response Typen (OpenAI-kompatibel)
 
@@ -326,13 +338,14 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []ChatMessage `json:"messages"`
-	Temp      float64       `json:"temperature"`
-	MaxTokens int           `json:"max_tokens"`
-	SessionID string        `json:"session_id"` // sigoREST-Erweiterung
-	Timeout   int           `json:"timeout"`    // sigoREST-Erweiterung
-	Retries   int           `json:"retries"`    // sigoREST-Erweiterung
+	Model        string        `json:"model"`
+	Messages     []ChatMessage `json:"messages"`
+	Temp         float64       `json:"temperature"`
+	MaxTokens    int           `json:"max_tokens"`
+	SessionID    string        `json:"session_id"`    // sigoREST-Erweiterung
+	Timeout      int           `json:"timeout"`       // sigoREST-Erweiterung
+	Retries      int           `json:"retries"`       // sigoREST-Erweiterung
+	SystemPrompt string        `json:"system_prompt"` // per-Request Override
 }
 
 type ChatChoice struct {
@@ -394,6 +407,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mem := s.memory
+	globalSystemPrompt := s.systemPrompt
 	s.mu.RUnlock()
 
 	// Config aus ModelInfo aufbauen
@@ -454,6 +468,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				"role": m.Role, "content": m.Content,
 			})
 		}
+	}
+
+	// System-Prompt: Request-Wert hat Vorrang vor globalem Default
+	effectiveSystemPrompt := globalSystemPrompt
+	if req.SystemPrompt != "" {
+		effectiveSystemPrompt = req.SystemPrompt
+	}
+	if effectiveSystemPrompt != "" {
+		messages = append(messages, map[string]interface{}{
+			"role":    "system",
+			"content": effectiveSystemPrompt,
+		})
 	}
 
 	// User-Messages aus Request (außer system, die kommt von Memory)
@@ -773,6 +799,43 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// GET/PUT /api/system-prompt — Globalen System-Prompt lesen/setzen
+func (s *Server) handleSystemPrompt(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		prompt := s.systemPrompt
+		s.mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"system_prompt": prompt})
+
+	case http.MethodPut:
+		var body struct {
+			SystemPrompt string `json:"system_prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		s.systemPrompt = body.SystemPrompt
+		s.mu.Unlock()
+
+		if err := os.WriteFile("./system-prompt.txt", []byte(body.SystemPrompt), 0644); err != nil {
+			sigoengine.LogWarn("system-prompt.txt speichern fehlgeschlagen", map[string]interface{}{"error": err.Error()})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":        "ok",
+			"system_prompt": body.SystemPrompt,
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// **********************************************************************
 // GET /api/help - API-Dokumentation
 func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -905,9 +968,10 @@ func main() {
 
 	// Server-State initialisieren
 	srv := &Server{
-		models:   loadModelsFromProviders(),
-		memory:   loadMemory(),
-		breakers: make(map[string]*sigoengine.EnhancedCircuitBreaker),
+		models:       loadModelsFromProviders(),
+		memory:       loadMemory(),
+		breakers:     make(map[string]*sigoengine.EnhancedCircuitBreaker),
+		systemPrompt: loadSystemPrompt(),
 	}
 
 	// Ollama Auto-Discovery
@@ -943,6 +1007,7 @@ func main() {
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.HandleFunc("/api/memory", srv.handleMemory)
+	mux.HandleFunc("/api/system-prompt", srv.handleSystemPrompt)
 	mux.HandleFunc("/api/help", srv.handleHelp)
 
 	// HTTP-Server (nur localhost)
