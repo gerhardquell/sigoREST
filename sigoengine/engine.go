@@ -359,145 +359,29 @@ func LogError(msg string, err error, fields ...map[string]interface{}) {
 }
 
 // **********************************************************************
-// Modell-Registry
-var MammothModels = map[string]map[string]interface{}{
-	// GPT Models (Mammoth.ai)
-	"gpt-4.1":      {"shortcode": "gpt41", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 8.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gpt-4.1-mini": {"shortcode": "gpt41m", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.4, "output_cost": 1.6, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gpt-4.1-nano": {"shortcode": "gpt41n", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.1, "output_cost": 0.4, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 2048, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gpt-4o":       {"shortcode": "gpt4o", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.5, "output_cost": 10.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"o4-mini":      {"shortcode": "o4m", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 1.1, "output_cost": 4.4, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 65536, "min_temperature": 0.0, "max_temperature": 2.0},
-	"o3":           {"shortcode": "o3", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 8.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 100000, "min_temperature": 0.0, "max_temperature": 1.0},
-	"gpt-5-mini":   {"shortcode": "gpt5m", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.25, "output_cost": 2.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0, "requires_max_completion_tokens": true},
-	"gpt-5-nano":   {"shortcode": "gpt5n", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.1, "output_cost": 0.4, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 2048, "min_temperature": 0.0, "max_temperature": 2.0, "requires_max_completion_tokens": true},
-	"gpt-5-chat":   {"shortcode": "gpt5chat", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 1.25, "output_cost": 10.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0, "requires_max_completion_tokens": true},
-	"gpt-5.1-chat": {"shortcode": "gpt51chat", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 1.25, "output_cost": 10.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0, "requires_max_completion_tokens": true},
-	"gpt-5.2-chat": {"shortcode": "gpt52chat", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 1.25, "output_cost": 10.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0, "requires_max_completion_tokens": true},
+// Legacy Model Registry - wird zur Laufzeit aus CoreModels befüllt
+// für Abwärtskompatibilität mit bestehendem Code
+var MammothModels map[string]map[string]interface{}
 
-	// Mistral Models
-	"mistral-medium-3":               {"shortcode": "mistral-m", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.4, "output_cost": 2.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.0},
-	"mistral-medium-3.1":             {"shortcode": "mistral-m31", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.4, "output_cost": 2.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.0},
-	"mistral-large-2411":             {"shortcode": "mistral-l", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 6.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.0},
-	"Mistral-Large-3":                {"shortcode": "mistral-l3", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 6.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.0},
-	"mistral-small-3.2-24b-instruct": {"shortcode": "mistral-s", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.1, "output_cost": 0.3, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 32000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"magistral-medium-2506":          {"shortcode": "magistral", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 5.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.0},
-	"magistral-medium-2506-thinking": {"shortcode": "magistral-thinking", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 5.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.0},
-	"codestral-2508":                 {"shortcode": "codestral", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.3, "output_cost": 0.9, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 32000, "max_output": 32768, "min_temperature": 0.0, "max_temperature": 1.0},
-
-	// Grok Models
-	"grok-3":                    {"shortcode": "grok3", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 131072, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"grok-3-mini":               {"shortcode": "grok3m", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.3, "output_cost": 0.5, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 131072, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"grok-4-0709":               {"shortcode": "grok4", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 131072, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"grok-4-fast-non-reasoning": {"shortcode": "grok4f", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.2, "output_cost": 0.5, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 131072, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"grok-code-fast-1":          {"shortcode": "grok-code", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.3, "output_cost": 0.9, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 32000, "max_output": 32768, "min_temperature": 0.0, "max_temperature": 1.0},
-
-	// Gemini Models
-	"gemini-2.5-flash":           {"shortcode": "gemini-f", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.3, "output_cost": 2.5, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 1048576, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gemini-2.5-pro":             {"shortcode": "gemini-p", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.5, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 2097152, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gemini-2.5-flash-image":     {"shortcode": "gemini-image", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.3, "output_cost": 2.5, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 1048576, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gemini-3-pro-preview":       {"shortcode": "gemini3p", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.5, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 2097152, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-	"gemini-3-pro-image-preview": {"shortcode": "gemini3p-image", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.5, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 2097152, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 2.0},
-
-	// DeepSeek Models
-	"deepseek-r1-0528":       {"shortcode": "deepseek-r1", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 8.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.5},
-	"deepseek-v3-0324":       {"shortcode": "deepseek-v3", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.9, "output_cost": 0.9, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.5},
-	"deepseek-v3.1":          {"shortcode": "deepseek-v31", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.30, "output_cost": 1.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.5},
-	"deepseek-v3.1-terminus": {"shortcode": "deepseek-terminus", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.30, "output_cost": 1.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.5},
-	"deepseek-v3.2-exp":      {"shortcode": "deepseek-exp", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.30, "output_cost": 0.45, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.5},
-	"deepseek-v3.2":          {"shortcode": "deepseek-v32", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.30, "output_cost": 0.45, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.5},
-
-	// Llama Models
-	"llama-4-maverick": {"shortcode": "llama-mav", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.22, "output_cost": 0.88, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.5},
-	"llama-4-scout":    {"shortcode": "llama-scout", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.15, "output_cost": 0.6, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 1.5},
-
-	// Claude Models
-	"claude-3-5-haiku-20241022":  {"shortcode": "claude-h", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.8, "output_cost": 4.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-3-5-sonnet-20241022": {"shortcode": "claude-s", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-3-7-sonnet-20250219": {"shortcode": "claude-s37", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-4-sonnet-20250522":   {"shortcode": "claude-s4", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-opus-4-1-20250805":   {"shortcode": "claude-41", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 15.0, "output_cost": 75.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-haiku-4-5":           {"shortcode": "claude-h45", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.8, "output_cost": 4.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-sonnet-4-5":          {"shortcode": "claude-s45", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 3.0, "output_cost": 15.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-	"claude-opus-4-5":            {"shortcode": "claude-opus", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 15.0, "output_cost": 75.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 200000, "max_output": 8192, "min_temperature": 0.0, "max_temperature": 1.0},
-
-	// Kimi/Moonshot Models (Direct Moonshot.ai)
-	"kimi-k2.5":        {"shortcode": "kimi", "endpoint": "https://api.moonshot.ai/v1/chat/completions", "input_cost": 0.6, "output_cost": 3.0, "apikey": "MOONSHOT_API_KEY", "max_tokens": 256000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"kimi-k2-instruct": {"shortcode": "kimi-instruct", "endpoint": "https://api.moonshot.ai/v1/chat/completions", "input_cost": 0.8, "output_cost": 4.0, "apikey": "MOONSHOT_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"kimi-k2-thinking": {"shortcode": "kimi-thinking", "endpoint": "https://api.moonshot.ai/v1/chat/completions", "input_cost": 0.6, "output_cost": 2.5, "apikey": "MOONSHOT_API_KEY", "max_tokens": 256000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"moonshot-v1-8k":   {"shortcode": "moon-8k", "endpoint": "https://api.moonshot.ai/v1/chat/completions", "input_cost": 0.12, "output_cost": 0.12, "apikey": "MOONSHOT_API_KEY", "max_tokens": 8000, "max_output": 2048, "min_temperature": 0.0, "max_temperature": 2.0},
-	"moonshot-v1-32k":  {"shortcode": "moon-32k", "endpoint": "https://api.moonshot.ai/v1/chat/completions", "input_cost": 0.06, "output_cost": 0.06, "apikey": "MOONSHOT_API_KEY", "max_tokens": 32000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"moonshot-v1-128k": {"shortcode": "moon-128k", "endpoint": "https://api.moonshot.ai/v1/chat/completions", "input_cost": 0.025, "output_cost": 0.075, "apikey": "MOONSHOT_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-
-	// Z.ai Models (Direct Provider)
-	"GLM-4.6":             {"shortcode": "zai-glm46", "endpoint": "https://api.z.ai/api/paas/v4/chat/completions", "input_cost": 0.6, "output_cost": 2.2, "apikey": "ZAI_API_KEY", "max_tokens": 200000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"GLM-4.5":             {"shortcode": "zai-glm45", "endpoint": "https://api.z.ai/api/paas/v4/chat/completions", "input_cost": 0.6, "output_cost": 2.2, "apikey": "ZAI_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"GLM-4-32B-0414-128K": {"shortcode": "zai-glm432B", "endpoint": "https://api.z.ai/api/paas/v4/chat/completions", "input_cost": 0.1, "output_cost": 0.1, "apikey": "ZAI_API_KEY", "max_tokens": 128000, "max_output": 16000, "min_temperature": 0.0, "max_temperature": 2.0},
-
-	// Qwen Models
-	"qwen3-coder":       {"shortcode": "qwen3-coder", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.3, "output_cost": 0.9, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 32000, "max_output": 32768, "min_temperature": 0.0, "max_temperature": 1.0},
-	"qwen3-coder-flash": {"shortcode": "qwen3-coder-f", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.15, "output_cost": 0.45, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 32000, "max_output": 32768, "min_temperature": 0.0, "max_temperature": 1.0},
-	"qwen3-coder-plus":  {"shortcode": "qwen3-coder-plus", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 0.6, "output_cost": 1.8, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 32000, "max_output": 32768, "min_temperature": 0.0, "max_temperature": 1.0},
-
-	// Sonar / Perplexity
-	"sonar-pro":           {"shortcode": "sonar-pro", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 1.25, "output_cost": 5.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-	"sonar-deep-research": {"shortcode": "sonar-research", "endpoint": "https://api.mammouth.ai/v1/chat/completions", "input_cost": 2.0, "output_cost": 8.0, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 128000, "max_output": 4096, "min_temperature": 0.0, "max_temperature": 2.0},
-
-	// Embedding Models
-	"text-embedding-3-large": {"shortcode": "embedding-large", "endpoint": "https://api.mammouth.ai/v1/embeddings", "input_cost": 0.13, "output_cost": 0.13, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 8191, "max_output": 3072, "min_temperature": 0.0, "max_temperature": 0.0},
-	"text-embedding-3-small": {"shortcode": "embedding-small", "endpoint": "https://api.mammouth.ai/v1/embeddings", "input_cost": 0.02, "output_cost": 0.02, "apikey": "MAMMOUTH_API_KEY", "max_tokens": 8191, "max_output": 1536, "min_temperature": 0.0, "max_temperature": 0.0},
-}
-
-// **********************************************************************
-// Shortcode-Lookup (thread-safe via sync.Once)
-var (
-	shortcodeToModel map[string]string
-	shortcodeOnce    sync.Once
-)
-
-func buildShortcodeMap() {
-	shortcodeOnce.Do(func() {
-		shortcodeToModel = make(map[string]string)
-		for name, info := range MammothModels {
-			if sc, ok := info["shortcode"].(string); ok {
-				shortcodeToModel[sc] = name
-			}
-		}
-	})
-}
-
-// ResolveModelName löst einen Shortcode oder vollständigen Modellnamen auf
-func ResolveModelName(model string) string {
-	buildShortcodeMap()
-	if fullName, exists := shortcodeToModel[model]; exists {
-		return fullName
+// initMammothModels initialisiert die Legacy-Map aus der neuen Registry
+func initMammothModels() {
+	if MammothModels != nil {
+		return
 	}
-	return model
-}
-
-// **********************************************************************
-// GetModelDefaultTokens gibt die Standard-Token-Anzahl für ein Modell zurück
-func GetModelDefaultTokens(modelName string) int {
-	if info, exists := MammothModels[modelName]; exists {
-		if v, ok := info["max_output"].(int); ok {
-			return v
+	MammothModels = make(map[string]map[string]interface{})
+	for _, m := range GetAllModels() {
+		MammothModels[m.ID] = map[string]interface{}{
+			"shortcode":       m.Shortcode,
+			"endpoint":        m.Endpoint,
+			"apikey":          m.APIKeyEnv,
+			"max_tokens":      m.MaxInputTokens,
+			"max_output":      m.MaxOutputTokens,
+			"input_cost":      m.InputCost,
+			"output_cost":     m.OutputCost,
+			"min_temperature": m.MinTemperature,
+			"max_temperature": m.MaxTemperature,
 		}
 	}
-	return DEFAULT_MAX_TOKENS
-}
-
-// GetModelTemperatureRange gibt Min, Max und Default-Temperatur zurück
-func GetModelTemperatureRange(modelName string) (min, max, def float64) {
-	min, max = 0.0, 2.0
-	if info, exists := MammothModels[modelName]; exists {
-		if v, ok := info["min_temperature"].(float64); ok {
-			min = v
-		}
-		if v, ok := info["max_temperature"].(float64); ok {
-			max = v
-		}
-	}
-	def = (min + max) / 2.0
-	return
 }
 
 // **********************************************************************
@@ -595,6 +479,30 @@ func GetOllamaModels() map[string]OllamaModelInfo {
 }
 
 // **********************************************************************
+// PingProvider prüft ob ein Provider-Endpoint erreichbar ist.
+// Sendet HEAD-Request; jeder HTTP-Response gilt als "erreichbar".
+// Timeout: 5 Sekunden.
+func PingProvider(endpoint string) error {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequest(http.MethodHead, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("ping: ungültiger Endpoint %q: %w", endpoint, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("ping: %s nicht erreichbar: %w", endpoint, err)
+	}
+	resp.Body.Close()
+	// Jeder HTTP-Response (auch 4xx/5xx) = Server läuft
+	return nil
+}
+
+// **********************************************************************
 // LoadConfig lädt die Konfiguration für ein Modell aus der Registry + ENV
 func LoadConfig(model string) (*ProviderConfig, error) {
 	// Zuerst Ollama-Registry prüfen (shortcode direkt, kein Resolve nötig)
@@ -612,23 +520,22 @@ func LoadConfig(model string) (*ProviderConfig, error) {
 		}, nil
 	}
 
-	// MammothModels / Cloud-Modelle
+	// Neue typisierte Registry nutzen
 	fullName := ResolveModelName(model)
-	info, exists := MammothModels[fullName]
+	m, exists := GetModelByID(fullName)
 	if !exists {
 		return nil, NewError(ErrConfigNotFound, "Model not found in registry", nil,
 			map[string]interface{}{"requested": model, "resolved": fullName})
 	}
 
-	envVar := info["apikey"].(string)
-	apiKey := os.Getenv(envVar)
+	apiKey := os.Getenv(m.APIKeyEnv)
 	if apiKey == "" {
 		return nil, NewError(ErrAPIKeyMissing, "API key not set", nil,
-			map[string]interface{}{"env_var": envVar, "model": fullName})
+			map[string]interface{}{"env_var": m.APIKeyEnv, "model": fullName})
 	}
 
 	return &ProviderConfig{
-		Endpoint: info["endpoint"].(string),
+		Endpoint: m.Endpoint,
 		Model:    fullName,
 		APIKey:   apiKey,
 		Type:     "mammoth",
