@@ -1,19 +1,19 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Anleitung für Claude Code (claude.ai/code) bei Arbeit mit diesem Repo.
 
 ## Developer
 
-- <IMPORTANCE>Speak german with the User, say "Du" and "Gerhard"</IMPORTANCE>
+- <IMPORTANCE>Deutsch mit User, "Du" und "Gerhard"</IMPORTANCE>
 
 ## Project Overview
 
-sigoREST ist ein drei-schichtiges Go-Projekt mit zwei User-Interfaces:
+sigoREST = drei-schichtiges Go-Projekt, zwei User-Interfaces:
 
 - **sigoE CLI**: Command-line Engine für direkte AI-Abfragen
 - **sigoREST Server**: OpenAI-kompatibler REST-Server für parallele Verbindungen (~100)
 
-Beide nutzen das **Shared Package** `sigoengine` für:
+Beide nutzen **Shared Package** `sigoengine` für:
 - Model-Registry (60+ Modelle von Mammoth.ai, Moonshot.ai, Z.ai)
 - API-Abstraktion (OpenAI + Anthropic Formate)
 - Circuit Breaker + Retry Logic
@@ -67,7 +67,7 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 ```
 
 ### Running Tests
-Kein formales Test-Suite. Manual testing via CLI und REST-API wie oben gezeigt.
+Kein formales Test-Suite. Manual testing via CLI und REST-API wie oben.
 
 ## Architecture
 
@@ -78,7 +78,6 @@ sigorest/
 ├── sigoengine/engine.go    # Shared Package (thread-safe)
 ├── cmd/sigoE/main.go       # CLI-Wrapper (~170 Zeilen)
 ├── sigoREST/main.go        # REST-Server (~840 Zeilen)
-├── sigoREST/models.csv     # Modell-Quelle (embedded + Disk)
 └── sigoREST/memory.json    # Globaler Memory-Block (embedded + Disk)
 ```
 
@@ -90,7 +89,8 @@ Thread-safe Package für CLI und REST. Exportiert:
 |--------|-------|
 | `MammothModels` | Model-Registry (Map: name → config) |
 | `LoadConfig(model)` | Lädt ProviderConfig aus Registry + ENV |
-| `CallAPI(ctx, cfg, req, timeout)` | HTTP-Call mit Retry |
+| `CallAPI(ctx, cfg, req, timeout)` | HTTP-Call mit Retry → `(string, *UsageData, error)` |
+| `UsageData` | Token-Verbrauch (InputTokens, OutputTokens, TotalTokens) |
 | `CircuitBreaker` | Pro-Modell Fehlerisolierung |
 | `Session{History []Message}` | Gesprächsverlauf (max 20) |
 | `Log*()` | Thread-safes Logging (DEBUG/INFO/WARN/ERROR/FATAL) |
@@ -104,7 +104,7 @@ Thread-safe Package für CLI und REST. Exportiert:
 
 ### cmd/sigoE/main.go — CLI-Wrapper
 
-Schlanker Wrapper der sigoengine nutzt. Rückwärtskompatibel zum ursprünglichen sigoEngine Binary.
+Schlanker Wrapper nutzt sigoengine. Rückwärtskompatibel zu ursprünglichem sigoEngine Binary.
 
 **Flags:**
 - `-m` Modell (default: `claude-h`, Shortcode oder vollständiger Name)
@@ -129,7 +129,7 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 
 **Embedded + Disk Pattern:**
 - `//go:embed models.csv` und `//go:embed memory.json` als Defaults
-- Disk-Dateien haben Vorrang wenn vorhanden → Server läuft ohne externe Files
+- Disk-Dateien Vorrang wenn vorhanden → Server läuft ohne externe Files
 
 **Endpoints:**
 | Pfad | Methode | Zweck |
@@ -139,6 +139,10 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 | `/api/models` | GET | Volle Modell-Infos (Preise, Limits) |
 | `/api/health` | GET | Server-Status + Circuit-Breaker |
 | `/api/memory` | GET/PUT | Globaler Memory-Block |
+| `/api/usage`  | GET | Token-Statistiken (RAM, Reset bei Neustart) |
+| `/api/system-prompt` | GET/PUT | Globaler System-Prompt |
+| `/api/help`   | GET | Endpoint-Dokumentation |
+| `/ping`       | GET | Load-Balancer Health-Check |
 
 **sigoREST-Erweiterungen im Request:**
 ```json
@@ -169,13 +173,13 @@ id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_tem
 - `min_temp/max_temp`: Gültiger Temperatur-Bereich
 - `requires_completion_tokens`: `true` für GPT-5 (nutzt `max_completion_tokens` statt `max_tokens`)
 
-**Warum Semikolon?** Komma ist zu verbreitet (CSV-Standard, JSON-Arrays). Semikolon erlaubt kommagetrennte Listen ohne Escaping.
+**Warum Semikolon?** Komma zu verbreitet (CSV-Standard, JSON-Arrays). Semikolon erlaubt kommagetrennte Listen ohne Escaping.
 
-**Shortcode-Resolution:** Der Server prüft zuerst nach ID, dann scannt er alle Shortcodes. Bei Treffer wird die ID für den API-Call verwendet.
+**Shortcode-Resolution:** Server prüft zuerst nach ID, dann scannt alle Shortcodes. Bei Treffer wird ID für API-Call verwendet.
 
 ### Ollama Auto-Discovery
 
-Ollama-Modelle werden beim Serverstart via `GET /api/tags` entdeckt:
+Ollama-Modelle beim Serverstart via `GET /api/tags` entdeckt:
 
 ```go
 ollamaEndpoint := "http://localhost:11434"
@@ -186,7 +190,7 @@ sigoengine.DiscoverOllamaModels(ollamaEndpoint)
 - `llama3:latest` → `ollama-llama3` (`:latest` weggeschnitten)
 - `gemma3:12b` → `ollama-gemma3-12b` (andere Tags als Suffix)
 
-Ollama-Modelle haben keine API-Key (`APIKey: ""`) und nutzen `http://localhost:11434/v1/chat/completions`.
+Ollama-Modelle: kein API-Key (`APIKey: ""`), nutzen `http://localhost:11434/v1/chat/completions`.
 
 **Limitation:** Nur Startzeit-Discovery → Neustart nötig nach `ollama pull`.
 
@@ -206,7 +210,7 @@ Fehler bei einem Modell blockieren andere nicht.
 
 Sessions als JSON-Dateien:
 - Pfad: `.sessions/<model>-<sessionID>.json`
-- Max 20 Messages pro Session (älteste werden verworfen)
+- Max 20 Messages pro Session (älteste verworfen)
 - Modell-spezifisch (`claude-h-projekt-a` vs `gpt41-projekt-a`)
 
 ### Logging
@@ -219,15 +223,15 @@ sigoengine.SetJSONMode(true)   // Machine-parsable
 sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 ```
 
-**Ausgabe:** stderr (stdout bleibt sauber für UNIX piping)
+**Ausgabe:** stderr (stdout sauber für UNIX piping)
 
 ## Important Notes
 
 - **Go-Modul**: `sigorest` mit Go 1.26
-- **Embedded Files**: models.csv und memory.json sind eingebettet, aber Disk hat Vorrang
+- **Embedded Files**: models.csv und memory.json eingebettet, aber Disk hat Vorrang
 - **IPv6**: Geblockt (außer `::1` loopback)
-- **TLS**: Self-signed Zertifikat wird beim ersten Start automatisch generiert
-- **Ports**: 8080/8443 sind auf Gerhards System belegt (lokaler Webserver)
+- **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start
+- **Ports**: 8080/8443 belegt auf Gerhards System (lokaler Webserver)
 
 ## Retrospektiven
 

@@ -189,6 +189,18 @@ curl -s http://localhost:9080/v1/chat/completions \
 
 `session_id`, `timeout`, `retries`, `system_prompt` sind sigoREST-Erweiterungen — alle anderen Felder sind Standard-OpenAI.
 
+Antwort enthält `usage`-Block (sofern Provider Token-Daten liefert):
+```json
+{
+  "choices": [...],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 18,
+    "total_tokens": 60
+  }
+}
+```
+
 ### GET /v1/models
 ```bash
 curl -s http://localhost:9080/v1/models
@@ -225,6 +237,31 @@ curl -s -X PUT http://localhost:9080/api/memory \
   -d '{"content":"Neuer Kontext","cache":true}'
 ```
 Ändert den Memory-Block zur Laufzeit und schreibt ihn auf Disk.
+
+### GET /api/usage
+```bash
+curl -s http://localhost:9080/api/usage | jq
+```
+Kumulierte Token-Statistiken seit Serverstart — pro Modell und gesamt.
+```json
+{
+  "by_model": {
+    "claude-3-5-haiku-20241022": {
+      "input_tokens": 1200,
+      "output_tokens": 340,
+      "total_tokens": 1540,
+      "requests": 5
+    }
+  },
+  "total": {
+    "input_tokens": 1200,
+    "output_tokens": 340,
+    "total_tokens": 1540,
+    "requests": 5
+  }
+}
+```
+Hinweis: Nur RAM — Reset bei Neustart.
 
 ### GET /api/system-prompt
 ```bash

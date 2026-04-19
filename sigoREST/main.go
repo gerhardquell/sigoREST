@@ -69,6 +69,14 @@ type ModelInfo struct {
 	RequiresCompletionTokens bool    `json:"requires_completion_tokens"`
 }
 
+// ModelUsageStats kumulierter Token-Verbrauch pro Modell
+type ModelUsageStats struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	TotalTokens  int64 `json:"total_tokens"`
+	Requests     int64 `json:"requests"`
+}
+
 // **********************************************************************
 // Server-State
 type Server struct {
@@ -77,6 +85,8 @@ type Server struct {
 	models       map[string]ModelInfo                          // id → ModelInfo
 	breakers     map[string]*sigoengine.EnhancedCircuitBreaker // Modell → Enhanced Circuit Breaker
 	systemPrompt string                                        // globaler Default-Prompt (leer = kein Prompt)
+	usageMu      sync.RWMutex
+	usage        map[string]*ModelUsageStats // model-id → Stats
 }
 
 // **********************************************************************
@@ -353,12 +363,19 @@ type ChatChoice struct {
 	Message ChatMessage `json:"message"`
 }
 
+type ChatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type ChatResponse struct {
 	ID      string       `json:"id"`
 	Object  string       `json:"object"`
 	Created int64        `json:"created"`
 	Model   string       `json:"model"`
 	Choices []ChatChoice `json:"choices"`
+	Usage   *ChatUsage   `json:"usage,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -531,6 +548,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var responseText string
+	var responseUsage *sigoengine.UsageData
 
 	// Exponential Backoff Retry
 	retryConfig := sigoengine.DefaultRetryConfig()
@@ -538,11 +556,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	err := sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
 		return breaker.Do(func() error {
-			text, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
+			text, u, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
 			if e != nil {
 				return e
 			}
 			responseText = text
+			responseUsage = u
 			return nil
 		})
 	})
@@ -598,6 +617,27 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		session.Save(req.SessionID, req.Model)
 	}
 
+	// Usage akkumulieren
+	var chatUsage *ChatUsage
+	if responseUsage != nil {
+		chatUsage = &ChatUsage{
+			PromptTokens:     responseUsage.InputTokens,
+			CompletionTokens: responseUsage.OutputTokens,
+			TotalTokens:      responseUsage.TotalTokens,
+		}
+		s.usageMu.Lock()
+		stats, ok := s.usage[modelID]
+		if !ok {
+			stats = &ModelUsageStats{}
+			s.usage[modelID] = stats
+		}
+		stats.InputTokens += int64(responseUsage.InputTokens)
+		stats.OutputTokens += int64(responseUsage.OutputTokens)
+		stats.TotalTokens += int64(responseUsage.TotalTokens)
+		stats.Requests++
+		s.usageMu.Unlock()
+	}
+
 	// OpenAI-kompatible Antwort
 	resp := ChatResponse{
 		ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -608,6 +648,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			Index:   0,
 			Message: ChatMessage{Role: "assistant", Content: responseText},
 		}},
+		Usage: chatUsage,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -909,6 +950,38 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// GET /api/usage - kumulierte Token-Statistiken
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.usageMu.RLock()
+	snapshot := make(map[string]*ModelUsageStats, len(s.usage))
+	for k, v := range s.usage {
+		cp := *v
+		snapshot[k] = &cp
+	}
+	s.usageMu.RUnlock()
+
+	// Gesamt-Summe berechnen
+	var total ModelUsageStats
+	for _, v := range snapshot {
+		total.InputTokens += v.InputTokens
+		total.OutputTokens += v.OutputTokens
+		total.TotalTokens += v.TotalTokens
+		total.Requests += v.Requests
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"by_model": snapshot,
+		"total":    total,
+	})
+}
+
+// **********************************************************************
 // Hilfsfunktion für Fehler-Antworten
 func writeError(w http.ResponseWriter, msg, errType string, status int) {
 	var resp ErrorResponse
@@ -951,6 +1024,7 @@ func main() {
 		memory:       loadMemory(),
 		breakers:     make(map[string]*sigoengine.EnhancedCircuitBreaker),
 		systemPrompt: loadSystemPrompt(),
+		usage:        make(map[string]*ModelUsageStats),
 	}
 
 	// Ollama Auto-Discovery
@@ -987,6 +1061,7 @@ func main() {
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.HandleFunc("/api/memory", srv.handleMemory)
 	mux.HandleFunc("/api/system-prompt", srv.handleSystemPrompt)
+	mux.HandleFunc("/api/usage", srv.handleUsage)
 	mux.HandleFunc("/api/help", srv.handleHelp)
 
 	// HTTP-Server (nur localhost)

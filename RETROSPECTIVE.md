@@ -361,3 +361,77 @@ Umstellung von der redundanten `models.json` (~720 Zeilen, viele Wiederholungen)
 4. Independence von sigoengine.MammothModels — REST-Server kann Modelle konfigurieren, ohne die CLI-Registry zu beeinflussen.
 
 **Status:** ✅ Erfolgreich abgeschlossen
+
+---
+
+## Session 2026-04-20: Usage-Daten (Token-Tracking)
+
+**Zielsetzung:**
+sigoREST lieferte bisher keine Token-Verbrauchsdaten — Provider-Responses wurden geparst, aber `usage`-Felder verworfen. Ziel: (A) Usage im `/v1/chat/completions` Response (OpenAI-kompatibel), (B) kumulierte Statistiken via `/api/usage`.
+
+**Was erreicht wurde:**
+
+1. **`UsageData` Struct in `sigoengine/engine.go`**
+   - Neuer Export: `UsageData{InputTokens, OutputTokens, TotalTokens}`
+   - `CallAPI()` Signatur erweitert: `(string, error)` → `(string, *UsageData, error)`
+   - Neue Hilfsfunktion `extractUsage()` — liest beide Provider-Formate:
+     - Anthropic: `usage.input_tokens` / `usage.output_tokens`
+     - OpenAI: `usage.prompt_tokens` / `usage.completion_tokens`
+   - Bei Fehler oder fehlendem Usage-Block: `nil` zurückgegeben (kein Hard Fail)
+
+2. **`ChatUsage` + erweiterter `ChatResponse` in `sigoREST/main.go`**
+   - Neuer Struct `ChatUsage{PromptTokens, CompletionTokens, TotalTokens}` (OpenAI-Feldnamen)
+   - `ChatResponse.Usage *ChatUsage` — `omitempty`, erscheint nur wenn Provider Daten liefert
+
+3. **In-Memory Usage-Tracking im `Server`**
+   - `ModelUsageStats{InputTokens, OutputTokens, TotalTokens, Requests int64}`
+   - `Server.usage map[string]*ModelUsageStats` + `Server.usageMu sync.RWMutex`
+   - Akkumulation nach jedem erfolgreichen API-Call — thread-safe
+
+4. **Neuer Endpoint `GET /api/usage`**
+   - Antwortet mit `by_model` (pro Modell) + `total` (Summe aller Modelle)
+   - Nur RAM — kein Disk-Persist, Reset bei Serverstart
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **`nil` bei fehlendem Usage** | Nicht alle Provider (Ollama) liefern Usage-Daten. `omitempty` vermeidet leeres `"usage": null` im Response. |
+| **Getrennte `usageMu`** | Eigener Mutex statt `s.mu` — vermeidet Lock-Contention zwischen Modell-Registry und Usage-Updates. |
+| **OpenAI-Feldnamen in `ChatUsage`** | `prompt_tokens`/`completion_tokens` statt `input_tokens`/`output_tokens` — OpenAI-Clients erwarten diese Namen. |
+| **Kein Disk-Persist** | Einfachheit. Für persistente Statistiken wäre SQLite oder JSON-Append nötig — noch kein Bedarf. |
+
+**Betroffene Call-Sites von `CallAPI`:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoengine/engine.go` (PingProvider-Probe) | `_, _, err :=` |
+| `sigoREST/main.go` (Handler) | `text, u, e :=` → Usage akkumulieren |
+| `cmd/sigoE/main.go` (CLI) | `text, _, e :=` (Usage ignoriert) |
+
+**Testing & Verifikation:**
+
+```bash
+# Build
+go build ./...
+
+# Usage im Chat-Response
+curl -s http://localhost:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-h","messages":[{"role":"user","content":"Hallo"}]}' \
+  | jq '.usage'
+# → {"prompt_tokens": 42, "completion_tokens": 18, "total_tokens": 60}
+
+# Kumulierte Statistiken
+curl -s http://localhost:9080/api/usage | jq
+```
+
+**Erkenntnisse & Learnings:**
+
+1. **3 Call-Sites bei `CallAPI`-Signaturänderung**: engine.go (Probe), sigoREST/main.go (Handler), cmd/sigoE/main.go (CLI). Bei zukünftigen Signaturänderungen alle drei prüfen.
+
+2. **Provider-Format-Unterschied**: Anthropic nutzt `input_tokens`/`output_tokens`, OpenAI `prompt_tokens`/`completion_tokens`. `extractUsage()` normalisiert beide auf `UsageData`. Ollama liefert kein `usage`-Feld.
+
+3. **`omitempty` für optionale Felder**: Wenn nicht alle Provider Usage liefern, ist `*ChatUsage` mit `omitempty` sauberer als leeres Struct — Clients sehen kein `"usage": null`.
+
+**Status:** ✅ Erfolgreich abgeschlossen
