@@ -499,11 +499,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// User-Messages aus Request (außer system, die kommt von Memory)
+	// User-Messages aus Request
 	var userPrompt string
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			// User-definierter system-prompt wird NACH memory eingefügt
+			if req.SystemPrompt != "" {
+				sigoengine.LogWarn("Ignoriere role:system in Messages, da system_prompt im Request gesetzt ist", map[string]interface{}{
+					"model": req.Model,
+				})
+				continue
+			}
 			messages = append(messages, map[string]interface{}{
 				"role": "system", "content": msg.Content,
 			})
