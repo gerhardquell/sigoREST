@@ -127,12 +127,12 @@ func extractIP(remoteAddr string) net.IP {
 	return net.ParseIP(host)
 }
 
-// isLocalhost prüft ob die IP im 127.0.0.0/8 Bereich liegt
+// isLocalhost prüft ob die IP im 127.0.0.0/8 Bereich oder ::1 liegt
 func isLocalhost(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	return localhostCIDR.Contains(ip)
+	return localhostCIDR.Contains(ip) || ip.Equal(net.IPv6loopback)
 }
 
 // isPrivateNet prüft ob die IP in einem privaten Netz liegt

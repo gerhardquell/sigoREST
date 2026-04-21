@@ -31,3 +31,6 @@ Thumbs.db
 *.test
 *.out
 coverage.txt
+
+# C++ build artifacts
+clients/cpp/build/
