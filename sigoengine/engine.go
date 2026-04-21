@@ -1250,6 +1250,8 @@ func extractUsage(result map[string]interface{}, providerType string) *UsageData
 		}
 		return 0
 	}
+
+	// Versuche provider-spezifische Feldnamen
 	if providerType == "anthropic" {
 		usage.InputTokens = toInt(u["input_tokens"])
 		usage.OutputTokens = toInt(u["output_tokens"])
@@ -1257,6 +1259,39 @@ func extractUsage(result map[string]interface{}, providerType string) *UsageData
 		usage.InputTokens = toInt(u["prompt_tokens"])
 		usage.OutputTokens = toInt(u["completion_tokens"])
 	}
-	usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+
+	// Fallback fur Gemini-Format
+	if usage.InputTokens == 0 {
+		usage.InputTokens = toInt(u["promptTokenCount"])
+	}
+	if usage.OutputTokens == 0 {
+		usage.OutputTokens = toInt(u["candidatesTokenCount"])
+	}
+
+	// Wenn Input/Output immer noch 0, versuche total_tokens direkt
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
+		usage.TotalTokens = toInt(u["total_tokens"])
+	} else {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+
 	return usage
+}
+
+// EstimateUsage schatzt Token-Verbrauch heuristisch
+// Konservative Naherung: 3 Zeichen ~ 1 Token (westliche Sprachen)
+func EstimateUsage(inputText, outputText string) *UsageData {
+	inputTokens := len([]rune(inputText)) / 3
+	if inputTokens < 1 {
+		inputTokens = 1
+	}
+	outputTokens := len([]rune(outputText)) / 3
+	if outputTokens < 1 {
+		outputTokens = 1
+	}
+	return &UsageData{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+	}
 }
