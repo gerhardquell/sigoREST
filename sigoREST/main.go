@@ -359,8 +359,9 @@ type ChatRequest struct {
 }
 
 type ChatChoice struct {
-	Index   int         `json:"index"`
-	Message ChatMessage `json:"message"`
+	Index        int         `json:"index"`
+	Message      ChatMessage `json:"message"`
+	FinishReason string      `json:"finish_reason,omitempty"`
 }
 
 type ChatUsage struct {
@@ -554,6 +555,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var responseText string
 	var responseUsage *sigoengine.UsageData
+	var responseFinishReason string
 
 	// Input-Text fur Fallback-Schatzung sammeln
 	var inputBuilder strings.Builder
@@ -568,12 +570,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	err := sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
 		return breaker.Do(func() error {
-			text, u, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
+			text, u, fr, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
 			if e != nil {
 				return e
 			}
 			responseText = text
 			responseUsage = u
+			responseFinishReason = fr
 			if responseUsage == nil {
 				responseUsage = sigoengine.EstimateUsage(inputText, responseText)
 				sigoengine.LogDebug("Usage geschatzt", map[string]interface{}{
@@ -665,8 +668,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Created: time.Now().Unix(),
 		Model:   req.Model,
 		Choices: []ChatChoice{{
-			Index:   0,
-			Message: ChatMessage{Role: "assistant", Content: responseText},
+			Index:        0,
+			Message:      ChatMessage{Role: "assistant", Content: responseText},
+			FinishReason: responseFinishReason,
 		}},
 		Usage: chatUsage,
 	}
