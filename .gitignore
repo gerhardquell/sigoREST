@@ -34,3 +34,6 @@ coverage.txt
 
 # C++ build artifacts
 clients/cpp/build/
+
+# External symlinks
+test-translator
