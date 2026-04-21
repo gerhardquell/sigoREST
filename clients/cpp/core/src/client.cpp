@@ -1,12 +1,14 @@
 #include "sigorest/client.hpp"
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
-#include <sstream>
+#include <mutex>
 #include <stdexcept>
 
 namespace sigorest {
 
 using json = nlohmann::json;
+
+constexpr long DEFAULT_TIMEOUT_SECONDS = 180L;
 
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     ((std::string*)userp)->append((char*)contents, size * nmemb);
@@ -14,7 +16,10 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 }
 
 Client::Client(const std::string& baseUrl) : baseUrl_(baseUrl) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    static std::once_flag curlInitFlag;
+    std::call_once(curlInitFlag, []() {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    });
 }
 
 ChatResponse Client::chatCompletion(const std::string& model,
@@ -50,7 +55,7 @@ ChatResponse Client::chatCompletion(const std::string& model,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseStr);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 180L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, DEFAULT_TIMEOUT_SECONDS);
 
     CURLcode res = curl_easy_perform(curl);
     curl_slist_free_all(headers);
@@ -58,6 +63,12 @@ ChatResponse Client::chatCompletion(const std::string& model,
 
     if (res != CURLE_OK) {
         throw std::runtime_error(std::string("CURL error: ") + curl_easy_strerror(res));
+    }
+
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    if (httpCode >= 400) {
+        throw std::runtime_error("HTTP error: " + std::to_string(httpCode));
     }
 
     json respJson = json::parse(responseStr);

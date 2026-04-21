@@ -4,9 +4,6 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QJsonObject>
-#include <QJsonArray>
-#include <memory>
 
 namespace sigorest {
 
@@ -15,6 +12,7 @@ class QtClient : public QObject {
 
 public:
     explicit QtClient(const QString& baseUrl, QObject* parent = nullptr);
+    ~QtClient();
 
     void chatCompletion(const QString& model,
                         const QList<ChatMessage>& messages,
@@ -29,6 +27,8 @@ private slots:
     void onReplyFinished();
 
 private:
+    void clearReply();
+
     QString baseUrl_;
     QNetworkAccessManager* networkManager_;
     QNetworkReply* currentReply_ = nullptr;

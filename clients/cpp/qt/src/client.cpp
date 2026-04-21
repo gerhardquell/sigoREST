@@ -10,6 +10,21 @@ QtClient::QtClient(const QString& baseUrl, QObject* parent)
     : QObject(parent), baseUrl_(baseUrl), networkManager_(new QNetworkAccessManager(this)) {
 }
 
+QtClient::~QtClient() {
+    if (currentReply_) {
+        currentReply_->abort();
+        clearReply();
+    }
+}
+
+void QtClient::clearReply() {
+    if (currentReply_) {
+        disconnect(currentReply_, nullptr, this, nullptr);
+        currentReply_->deleteLater();
+        currentReply_ = nullptr;
+    }
+}
+
 void QtClient::chatCompletion(const QString& model,
                               const QList<ChatMessage>& messages,
                               int maxTokens,
@@ -20,7 +35,7 @@ void QtClient::chatCompletion(const QString& model,
     }
 
     QJsonObject reqJson;
-    reqJson["model"] = QString::fromStdString(model.toStdString());
+    reqJson["model"] = model;
 
     QJsonArray msgArray;
     for (const auto& msg : messages) {
@@ -51,8 +66,7 @@ void QtClient::onReplyFinished() {
 
     if (currentReply_->error() != QNetworkReply::NoError) {
         emit error(currentReply_->errorString());
-        currentReply_->deleteLater();
-        currentReply_ = nullptr;
+        clearReply();
         return;
     }
 
@@ -60,8 +74,7 @@ void QtClient::onReplyFinished() {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
         emit error("Invalid JSON response");
-        currentReply_->deleteLater();
-        currentReply_ = nullptr;
+        clearReply();
         return;
     }
 
@@ -69,8 +82,7 @@ void QtClient::onReplyFinished() {
     if (respJson.contains("error")) {
         QJsonObject errObj = respJson["error"].toObject();
         emit error(errObj["message"].toString());
-        currentReply_->deleteLater();
-        currentReply_ = nullptr;
+        clearReply();
         return;
     }
 
@@ -95,8 +107,7 @@ void QtClient::onReplyFinished() {
     response.usage.total_tokens = usage["total_tokens"].toInt(0);
 
     emit completed(response);
-    currentReply_->deleteLater();
-    currentReply_ = nullptr;
+    clearReply();
 }
 
 } // namespace sigorest
