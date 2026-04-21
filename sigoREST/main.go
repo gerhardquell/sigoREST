@@ -555,6 +555,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var responseText string
 	var responseUsage *sigoengine.UsageData
 
+	// Input-Text fur Fallback-Schatzung sammeln
+	var inputBuilder strings.Builder
+	for _, msg := range req.Messages {
+		inputBuilder.WriteString(msg.Content)
+	}
+	inputText := inputBuilder.String()
+
 	// Exponential Backoff Retry
 	retryConfig := sigoengine.DefaultRetryConfig()
 	retryConfig.MaxRetries = req.Retries
@@ -567,6 +574,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			responseText = text
 			responseUsage = u
+			if responseUsage == nil {
+				responseUsage = sigoengine.EstimateUsage(inputText, responseText)
+				sigoengine.LogDebug("Usage geschatzt", map[string]interface{}{
+					"model":         req.Model,
+					"input_tokens":  responseUsage.InputTokens,
+					"output_tokens": responseUsage.OutputTokens,
+				})
+			}
 			return nil
 		})
 	})
