@@ -1072,7 +1072,7 @@ func ProbeProvider(ctx context.Context, cfg *ProviderConfig) ProviderHealth {
 		"max_tokens": 1,
 	}
 
-	_, _, err := CallAPI(probeCtx, cfg, probeRequest, 5)
+	_, _, _, err := CallAPI(probeCtx, cfg, probeRequest, 5)
 	health.Latency = time.Since(start)
 
 	if err != nil {
@@ -1126,7 +1126,7 @@ func isContextLimitError(errText string) bool {
 // **********************************************************************
 // CallAPI führt einen HTTP-Call zu einem AI-Provider durch
 func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interface{},
-	timeoutSec int) (string, *UsageData, error) {
+	timeoutSec int) (string, *UsageData, string, error) {
 
 	start := time.Now()
 	logF := map[string]interface{}{"endpoint": cfg.Endpoint, "model": cfg.Model}
@@ -1139,7 +1139,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		LogError("Failed to create request", err, logF)
-		return "", nil, NewError(ErrAPIFailed, "Failed to create HTTP request", err, logF)
+		return "", nil, "", NewError(ErrAPIFailed, "Failed to create HTTP request", err, logF)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -1156,7 +1156,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	resp, err := client.Do(req)
 	if err != nil {
 		LogError("HTTP request failed", err, logF)
-		return "", nil, NewError(ErrAPIFailed, "HTTP request failed", err, logF)
+		return "", nil, "", NewError(ErrAPIFailed, "HTTP request failed", err, logF)
 	}
 	defer resp.Body.Close()
 
@@ -1177,7 +1177,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 		// APIError mit Status-Code erstellen
 		apiErr := classifyHTTPError(resp.StatusCode, string(body), nil)
 		apiErr.RetryAfter = retryAfter
-		return "", nil, apiErr
+		return "", nil, "", apiErr
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -1189,7 +1189,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		LogError("Failed to parse response", err, logF)
-		return "", nil, NewError(ErrAPIFailed, "Failed to parse JSON response", err, logF)
+		return "", nil, "", NewError(ErrAPIFailed, "Failed to parse JSON response", err, logF)
 	}
 
 	// Fehler in der API-Antwort
@@ -1199,24 +1199,40 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 
 		// Prüfe auf Context-Limit-Fehler -> client_error
 		if isContextLimitError(errText) {
-			return "", nil, &APIError{
+			return "", nil, "", &APIError{
 				Type:       ErrClientError,
 				StatusCode: 400,
 				Message:    errText,
 			}
 		}
 
-		return "", nil, NewError(ErrAPIFailed, errText, nil, logF)
+		return "", nil, "", NewError(ErrAPIFailed, errText, nil, logF)
 	}
 
 	// Usage-Daten extrahieren (beide Formate)
 	usage := extractUsage(result, cfg.Type)
 
+	// finish_reason extrahieren
+	finishReason := ""
+	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if fr, ok := choice["finish_reason"].(string); ok {
+				finishReason = fr
+			}
+		}
+	}
+	// Anthropic fallback: stop_reason
+	if finishReason == "" && cfg.Type == "anthropic" {
+		if sr, ok := result["stop_reason"].(string); ok {
+			finishReason = sr
+		}
+	}
+
 	// Anthropic-Format: content[0].text
 	if cfg.Type == "anthropic" {
 		if content, ok := result["content"].([]interface{}); ok && len(content) > 0 {
 			if text, ok := content[0].(map[string]interface{})["text"].(string); ok {
-				return text, usage, nil
+				return text, usage, finishReason, nil
 			}
 		}
 	}
@@ -1225,13 +1241,13 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
 		if msg, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{}); ok {
 			if content, ok := msg["content"].(string); ok {
-				return content, usage, nil
+				return content, usage, finishReason, nil
 			}
 		}
 	}
 
 	LogError("Unexpected response format", nil, logF)
-	return "", nil, NewError(ErrUnexpectedFormat, "Unexpected response format", nil, logF)
+	return "", nil, "", NewError(ErrUnexpectedFormat, "Unexpected response format", nil, logF)
 }
 
 // extractUsage liest Token-Verbrauch aus Provider-Response
