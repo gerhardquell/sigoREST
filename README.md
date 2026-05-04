@@ -189,6 +189,34 @@ curl -s http://localhost:9080/v1/chat/completions \
 
 `session_id`, `timeout`, `retries`, `system_prompt` sind sigoREST-Erweiterungen — alle anderen Felder sind Standard-OpenAI.
 
+#### Vision-Unterstützung
+
+sigoREST unterstützt das OpenAI Vision-API-Format. Bilder können als Base64-kodierte Daten-URLs gesendet werden:
+
+```bash
+curl -s http://localhost:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt4o",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Was siehst du auf diesem Bild?"},
+        {"type": "image_url", "image_url": {
+          "url": "data:image/jpeg;base64,/9j/4AAQ..."
+        }}
+      ]
+    }],
+    "max_tokens": 4096
+  }'
+```
+
+**Technische Details:**
+- `ChatMessage.Content` ist `json.RawMessage` — Passthrough für String und Vision-Array-Format
+- Session-Speicherung extrahiert nur Text (keine Bilddaten in `.sessions/`)
+- Empfohlen: JPEG mit quality 75 bei ~100 DPI (ca. 80KB pro Seite)
+- Zu große Bilder (PNG 200+ DPI, >1MB) können Proxy-Fehler (413) verursachen
+
 Antwort enthält `usage`-Block (sofern Provider Token-Daten liefert):
 ```json
 {
@@ -319,6 +347,7 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 | Shortcode | Modell | Provider |
 |-----------|--------|----------|
 | `gpt41` | gpt-4.1 | Mammouth |
+| `gpt4o` | gpt-4o | Mammouth |
 | `claude-h` | claude-3-5-haiku-20241022 | Mammouth |
 | `kimi` | kimi-k2.5 | Moonshot |
 | `glm51` | glm-5.1 | ZAI |
