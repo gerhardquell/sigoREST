@@ -91,9 +91,9 @@ func main() {
 	session := sigoengine.LoadSession(*sessionID, *model)
 
 	// Request aufbauen
-	messages := []map[string]string{}
+	messages := []map[string]interface{}{}
 	if *systemPrompt != "" {
-		messages = append(messages, map[string]string{"role": "system", "content": *systemPrompt})
+		messages = append(messages, map[string]interface{}{"role": "system", "content": *systemPrompt})
 	}
 	for _, m := range session.BuildMessages(prompt) {
 		messages = append(messages, m)

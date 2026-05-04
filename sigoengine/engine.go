@@ -608,8 +608,8 @@ type Response struct {
 // **********************************************************************
 // Message - eine Chat-Nachricht
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 // **********************************************************************
@@ -644,21 +644,62 @@ func (s *Session) Save(sessionID, model string) {
 	os.WriteFile(path, data, 0644)
 }
 
+// ExtractTextFromContent extracts text from Content (string or Vision-Array)
+func ExtractTextFromContent(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &items); err == nil {
+		var texts []string
+		for _, item := range items {
+			if item.Type == "text" {
+				texts = append(texts, item.Text)
+			}
+		}
+		return strings.Join(texts, " ")
+	}
+	return string(raw)
+}
+
+// jsonEscapeString escapes a string for JSON embedding
+func jsonEscapeString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
+}
+
 // AddMessage fügt eine Nachricht zur Session hinzu (max. 20)
+// Speichert nur Text (keine Vision-Arrays) in Session-Dateien
 func (s *Session) AddMessage(role, content string) {
-	s.History = append(s.History, Message{Role: role, Content: content})
+	raw := json.RawMessage(`"` + jsonEscapeString(content) + `"`)
+	s.History = append(s.History, Message{
+		Role:    role,
+		Content: raw,
+	})
 	if len(s.History) > 20 {
 		s.History = s.History[len(s.History)-20:]
 	}
 }
 
 // BuildMessages baut eine OpenAI-kompatible Messages-Liste auf
-func (s *Session) BuildMessages(newPrompt string) []map[string]string {
-	var msgs []map[string]string
+func (s *Session) BuildMessages(newPrompt string) []map[string]interface{} {
+	var msgs []map[string]interface{}
 	for _, m := range s.History {
-		msgs = append(msgs, map[string]string{"role": m.Role, "content": m.Content})
+		var contentValue interface{}
+		if err := json.Unmarshal(m.Content, &contentValue); err != nil {
+			contentValue = string(m.Content)
+		}
+		msgs = append(msgs, map[string]interface{}{
+			"role": m.Role, "content": contentValue,
+		})
 	}
-	msgs = append(msgs, map[string]string{"role": "user", "content": newPrompt})
+	msgs = append(msgs, map[string]interface{}{
+		"role": "user", "content": newPrompt,
+	})
 	return msgs
 }
 

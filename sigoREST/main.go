@@ -343,8 +343,8 @@ func loadSystemPrompt() string {
 // Request/Response Typen (OpenAI-kompatibel)
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 type ChatRequest struct {
@@ -503,6 +503,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// User-Messages aus Request
 	var userPrompt string
 	for _, msg := range req.Messages {
+		var contentValue interface{}
+		if err := json.Unmarshal(msg.Content, &contentValue); err != nil {
+			contentValue = string(msg.Content)
+		}
 		if msg.Role == "system" {
 			if req.SystemPrompt != "" {
 				sigoengine.LogWarn("Ignoriere role:system in Messages, da system_prompt im Request gesetzt ist", map[string]interface{}{
@@ -511,14 +515,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			messages = append(messages, map[string]interface{}{
-				"role": "system", "content": msg.Content,
+				"role": "system", "content": contentValue,
 			})
 		} else {
 			messages = append(messages, map[string]interface{}{
-				"role": msg.Role, "content": msg.Content,
+				"role": msg.Role, "content": contentValue,
 			})
 			if msg.Role == "user" {
-				userPrompt = msg.Content
+				userPrompt = sigoengine.ExtractTextFromContent(msg.Content)
 			}
 		}
 	}
@@ -560,7 +564,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Input-Text fur Fallback-Schatzung sammeln
 	var inputBuilder strings.Builder
 	for _, msg := range req.Messages {
-		inputBuilder.WriteString(msg.Content)
+		inputBuilder.WriteString(sigoengine.ExtractTextFromContent(msg.Content))
 	}
 	inputText := inputBuilder.String()
 
@@ -669,7 +673,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model:   req.Model,
 		Choices: []ChatChoice{{
 			Index:        0,
-			Message:      ChatMessage{Role: "assistant", Content: responseText},
+			Message:      ChatMessage{Role: "assistant", Content: json.RawMessage(`"` + jsonEscapeString(responseText) + `"`)},
 			FinishReason: responseFinishReason,
 		}},
 		Usage: chatUsage,
@@ -1015,6 +1019,12 @@ func writeError(w http.ResponseWriter, msg, errType string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// jsonEscapeString escaped a string for JSON embedding
+func jsonEscapeString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
 }
 
 // **********************************************************************
