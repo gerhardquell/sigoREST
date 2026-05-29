@@ -67,7 +67,14 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 ```
 
 ### Running Tests
-Kein formales Test-Suite. Manual testing via CLI und REST-API wie oben.
+Go-Tests liegen in `sigoengine/` (engine.go ist getrennt von `*_test.go`):
+```bash
+go test ./...                              # alle Tests
+go test ./sigoengine/ -v                   # mit Details
+go test ./sigoengine/ -run TestFetchWithRetry   # einzelner Test (Regex)
+```
+Abgedeckt u.a.: `retry`, `shortcode`, `usage`, `finish_reason`. Server +
+CLI selbst haben keine Go-Tests → manuell via CLI/REST-API testen.
 
 ## Architecture
 
@@ -75,15 +82,21 @@ Kein formales Test-Suite. Manual testing via CLI und REST-API wie oben.
 
 ```
 sigorest/
-├── sigoengine/engine.go    # Shared Package (thread-safe)
-├── cmd/sigoE/main.go       # CLI-Wrapper (~170 Zeilen)
-├── sigoREST/main.go        # REST-Server (~840 Zeilen)
+├── sigoengine/             # Shared Package (thread-safe), mehrere Dateien:
+│   ├── engine.go           #   CallAPI, CircuitBreaker, Session, Logging
+│   ├── models.go           #   Model-Typ, CoreModels (Fallback-Liste)
+│   ├── models_registry.go  #   Lookup-Maps, Laden JSON→CSV→CoreModels
+│   ├── provider_fetchers.go#   Dynamischer Abruf Mammoth/Moonshot/ZAI
+│   ├── retry.go            #   FetchWithRetry (Backoff gegen Boot-DNS-Race)
+│   └── shortcode.go        #   Shortcode-Generierung (Familie+Version+Variante)
+├── cmd/sigoE/main.go       # CLI-Wrapper
+├── sigoREST/main.go        # REST-Server
 └── sigoREST/memory.json    # Globaler Memory-Block (embedded + Disk)
 ```
 
-### sigoengine/engine.go — Shared Package
+### sigoengine — Shared Package
 
-Thread-safe Package für CLI und REST. Exportiert:
+Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Exportiert u.a.:
 
 | Export | Zweck |
 |--------|-------|
@@ -96,6 +109,9 @@ Thread-safe Package für CLI und REST. Exportiert:
 | `Log*()` | Thread-safes Logging (DEBUG/INFO/WARN/ERROR/FATAL) |
 | `DiscoverOllamaModels(endpoint)` | Auto-Discovery lokaler LLMs |
 | `ResolveModelName(shortcode)` | Shortcode → vollständiger Name |
+| `Fetch{Mammouth,Moonshot,ZAI}Models()` | Dynamischer Modell-Abruf pro Provider |
+| `FetchWithRetry(name, attempts, backoff, fn)` | Retry-Wrapper mit Backoff um einen Fetcher |
+| `GenerateShortcode(id, used)` | Sprechender Shortcode aus Modellname |
 
 **Thread-Safety:**
 - `sync.RWMutex` für Logging-Konfiguration
@@ -127,9 +143,11 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 - HTTP `:9080` — Nur localhost (127.0.0.0/8)
 - HTTPS `:9443` — Privates Netz (192.168.0.0/16, 10.0.0.0/8)
 
-**Embedded + Disk Pattern:**
-- `//go:embed models.csv` und `//go:embed memory.json` als Defaults
-- Disk-Dateien Vorrang wenn vorhanden → Server läuft ohne externe Files
+**Modell-Quelle (wichtig):** Der Server lädt seine Modelle beim Start
+**dynamisch** über `loadModelsFromProviders()` (Mammoth/Moonshot/ZAI per HTTP)
+plus Ollama-Discovery — **nicht** aus einer models.csv. Nur `memory.json` ist
+embedded (`//go:embed memory.json`), Disk hat Vorrang. Die CSV/Registry
+(`models_registry.go`) ist primär für die CLI; der Server nutzt sie nicht.
 
 **Endpoints:**
 | Pfad | Methode | Zweck |
@@ -137,6 +155,7 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 | `/v1/chat/completions` | POST | OpenAI-kompatible Chat API |
 | `/v1/models` | GET | Modell-Liste (ID + Shortcode) |
 | `/api/models` | GET | Volle Modell-Infos (Preise, Limits) |
+| `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
 | `/api/health` | GET | Server-Status + Circuit-Breaker |
 | `/api/memory` | GET/PUT | Globaler Memory-Block |
 | `/api/usage`  | GET | Token-Statistiken (RAM, Reset bei Neustart) |
@@ -155,27 +174,41 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 }
 ```
 
-### Modell-Konfiguration (models.csv)
+### Dynamisches Modell-Laden (Server)
 
-Semikolon-getrennte CSV mit 11 Feldern:
+`loadModelsFromProviders()` ruft beim Start sequenziell drei Provider-APIs ab.
+Jeder Fetcher ist in `FetchWithRetry` gewickelt (4 Versuche, 2s/4s/8s Backoff).
+Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
+
+**Wichtige Fallback-Asymmetrie** (relevant bei Netz-/DNS-Problemen):
+| Provider | bei Fehler | Folge |
+|----------|-----------|-------|
+| Mammoth (`/public/models`, kein Key) | `return nil, err` | 0 Modelle |
+| Moonshot (`MOONSHOT_API_KEY`) | `return nil, err` | 0 Modelle |
+| ZAI (`ZAI_API_KEY`) | `return zaiStaticModels, nil` | 13 statische Modelle |
+
+→ Wenn beim Boot nur ~13 Modelle erscheinen ("no such host" im Log): DNS war
+beim Start noch nicht oben. Schutz: systemd-Unit mit `Wants/After=network-online.target`
+(nicht `network.target`!) **plus** der Retry. Siehe `docs/systemd-install.md`.
+Workaround zur Laufzeit: `systemctl restart sigoREST`.
+
+**Shortcode-Generierung:** `GenerateShortcode` (in `shortcode.go`) baut sprechende
+Kürzel: Familie (longest-prefix, z.B. `gpt`/`claude→cl`/`gemini→gem`) + Subfamily
+(`sonnet→s`) + Version (`5.1→51`) + Variante (`mini→m`/`flash→f`), Kollision via
+numerischem Suffix, Cutter-Sanborn-Fallback für Unbekanntes.
+
+**Shortcode-Resolution:** Server prüft zuerst nach ID, dann scannt alle Shortcodes.
+Bei Treffer wird ID für den API-Call verwendet.
+
+### CSV/Registry-Format (CLI, `sigoengine/models_registry.go`)
+
+Lade-Reihenfolge der Registry: JSON → CSV → `CoreModels`. Semikolon-getrennte CSV,
+11 Felder (Semikolon weil Komma in JSON-Arrays/Listen kollidiert):
 ```
 id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
 ```
-
-**Felder:**
-- `id`: Vollständiger Modellname (z.B. `claude-3-5-haiku-20241022`)
-- `shortcode`: Kurzbezeichnung (z.B. `claude-h`)
-- `endpoint`: API URL
-- `apikey`: Environment-Variable (leer bei Ollama)
-- `max_input`: Kontext-Fenster
-- `max_output`: Max Ausgabe-Tokens
-- `input_cost/output_cost`: $/1M Tokens
-- `min_temp/max_temp`: Gültiger Temperatur-Bereich
-- `requires_completion_tokens`: `true` für GPT-5 (nutzt `max_completion_tokens` statt `max_tokens`)
-
-**Warum Semikolon?** Komma zu verbreitet (CSV-Standard, JSON-Arrays). Semikolon erlaubt kommagetrennte Listen ohne Escaping.
-
-**Shortcode-Resolution:** Server prüft zuerst nach ID, dann scannt alle Shortcodes. Bei Treffer wird ID für API-Call verwendet.
+`requires_completion_tokens=true` → Modell nutzt `max_completion_tokens` statt
+`max_tokens` (z.B. GPT-5). `apikey` ist der ENV-Var-Name (leer bei Ollama).
 
 ### Ollama Auto-Discovery
 
@@ -198,11 +231,14 @@ Ollama-Modelle: kein API-Key (`APIKey: ""`), nutzen `http://localhost:11434/v1/c
 
 Pro Modell ein Circuit Breaker (nicht global):
 
+Server nutzt `NewEnhancedCircuitBreaker` pro Modell (`handleChatCompletions`):
 | Parameter | Wert |
 |-----------|-------|
-| Threshold | 3 aufeinanderfolgende Fehler |
-| Timeout | 5 Minuten vor Reset-Attempt |
-| Scope | Pro Modell (`map[string]*CircuitBreaker`) |
+| Threshold | 5 Fehler |
+| Window | 60s Zeitfenster |
+| Cooldown | 10s vor Half-Open |
+| HalfOpenMax | 3 Requests in Half-Open |
+| Scope | Pro Modell (`map[string]*...`) |
 
 Fehler bei einem Modell blockieren andere nicht.
 
@@ -228,7 +264,8 @@ sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 ## Important Notes
 
 - **Go-Modul**: `sigorest` mit Go 1.26
-- **Embedded Files**: models.csv und memory.json eingebettet, aber Disk hat Vorrang
+- **Embedded Files**: nur `memory.json` eingebettet (Disk hat Vorrang); Server-Modelle kommen dynamisch von den Providern, nicht aus einer embedded CSV
+- **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-Fallback-Liste (DNS-Race)
 - **IPv6**: Geblockt (außer `::1` loopback)
 - **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start
 - **Ports**: 8080/8443 belegt auf Gerhards System (lokaler Webserver)
@@ -240,15 +277,18 @@ Detaillierte Session-Historie: Siehe `RETROSPECTIVE.md`
 ## Common Tasks
 
 ### Neues Modell hinzufügen
-Eintrag in `sigoREST/models.csv` hinzufügen. Format siehe oben.
+Server: Modelle kommen dynamisch vom Provider — bekannte Modelle werden in
+`provider_fetchers.go` angereichert (`moonshotKnownModels`, `zaiStaticModels`,
+Mammoth via API). Neuen Provider → neue `Fetch*`-Funktion + Aufruf in
+`loadModelsFromProviders()`. CLI: Eintrag in CSV/Registry.
 
 ### REST-Server als systemd-Service installieren
 ```bash
 sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
 sudo mkdir -p /usr/local/slib/sigoREST
-sudo cp sigoREST/models.csv /usr/local/slib/sigoREST/
 sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
-# Siehe systemd-install.md für Service-Datei
+# API-Keys in EnvironmentFile + Wants/After=network-online.target
+# → vollständige Service-Datei in docs/systemd-install.md
 ```
 
 ### Ollama-Modell nutzen
