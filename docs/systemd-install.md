@@ -47,7 +47,11 @@ Inhalt:
 ```ini
 [Unit]
 Description=sigoREST - AI REST Gateway
-After=network.target
+# network-online.target (nicht network.target!): wartet bis Netz + DNS
+# wirklich oben sind. Sonst scheitert beim Boot der Provider-Fetch mit
+# "no such host" und nur statische Fallback-Modelle laden.
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple

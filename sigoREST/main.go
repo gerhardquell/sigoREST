@@ -275,8 +275,13 @@ func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
 func loadModelsFromProviders() map[string]ModelInfo {
 	models := make(map[string]ModelInfo)
 
+	// Retry-Parameter: 4 Versuche mit 2s/4s/8s Backoff. Fängt den Fall ab,
+	// dass beim Systemstart DNS noch nicht verfügbar ist (siehe FetchWithRetry).
+	const fetchAttempts = 4
+	const fetchBackoff = 2 * time.Second
+
 	// 1. Mammouth (kein API-Key nötig)
-	if ms, err := sigoengine.FetchMammouthModels(); err != nil {
+	if ms, err := sigoengine.FetchWithRetry("mammouth", fetchAttempts, fetchBackoff, sigoengine.FetchMammouthModels); err != nil {
 		sigoengine.LogWarn("Mammouth-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
 	} else {
 		for _, m := range ms {
@@ -285,7 +290,7 @@ func loadModelsFromProviders() map[string]ModelInfo {
 	}
 
 	// 2. Moonshot
-	if ms, err := sigoengine.FetchMoonshotModels(); err != nil {
+	if ms, err := sigoengine.FetchWithRetry("moonshot", fetchAttempts, fetchBackoff, sigoengine.FetchMoonshotModels); err != nil {
 		sigoengine.LogWarn("Moonshot-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
 	} else {
 		for _, m := range ms {
@@ -294,7 +299,7 @@ func loadModelsFromProviders() map[string]ModelInfo {
 	}
 
 	// 3. ZAI (fällt intern auf statische Liste zurück)
-	if ms, err := sigoengine.FetchZAIModels(); err != nil {
+	if ms, err := sigoengine.FetchWithRetry("zai", fetchAttempts, fetchBackoff, sigoengine.FetchZAIModels); err != nil {
 		sigoengine.LogWarn("ZAI-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
 	} else {
 		for _, m := range ms {
