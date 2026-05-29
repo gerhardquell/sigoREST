@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -80,38 +79,10 @@ var zaiStaticModels = []Model{
 }
 
 // **********************************************************************
-// generateProviderShortcode erzeugt einen kurzen eindeutigen Shortcode.
-// Beispiel: "gpt-4.1-mini" → "gpt41mi"; bei Kollision → "gpt415"
+// generateProviderShortcode erzeugt einen sprechenden Shortcode.
+// Verwendet GenerateShortcode mit strukturiertem Parsing + Cutter-Sanborn.
 func generateProviderShortcode(id string, used map[string]bool) string {
-	clean := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return -1
-	}, strings.ToLower(id))
-
-	if clean == "" {
-		return id // Fallback: Sonderzeichen-only ID, gib original zurück
-	}
-
-	candidate := clean
-	if len(candidate) > 7 {
-		candidate = candidate[:7]
-	}
-	if !used[candidate] {
-		return candidate
-	}
-	base := candidate
-	if len(base) > 5 {
-		base = base[:5]
-	}
-	for i := 2; i < 100; i++ {
-		c := fmt.Sprintf("%s%d", base, i)
-		if !used[c] {
-			return c
-		}
-	}
-	return id
+	return GenerateShortcode(id, used)
 }
 
 // **********************************************************************

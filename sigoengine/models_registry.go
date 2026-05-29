@@ -283,11 +283,20 @@ func AddOllamaModel(name, endpoint string) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
-	shortcode := generateOllamaShortcode(name)
+	shortname := name
+	if idx := strings.Index(shortname, ":latest"); idx != -1 {
+		shortname = shortname[:idx]
+	}
+	sc := GenerateShortcode("ollama-"+shortname, nil)
+	// Fallback falls GenerateShortcode keinen ollama-Prefix erkennt
+	if !strings.HasPrefix(sc, "ollama") {
+		sc = "ollama-" + shortname
+		sc = strings.ReplaceAll(sc, ":", "-")
+	}
 
 	m := Model{
 		ID:              name,
-		Shortcode:       shortcode,
+		Shortcode:       sc,
 		Endpoint:        endpoint,
 		APIKeyEnv:       "",
 		MaxInputTokens:  0, // Unbekannt bei Ollama
@@ -297,20 +306,10 @@ func AddOllamaModel(name, endpoint string) {
 	}
 
 	modelsByID[name] = m
-	modelsByShortcode[shortcode] = m
+	modelsByShortcode[sc] = m
 }
 
-// generateOllamaShortcode generiert einen Shortcode aus einem Ollama-Modellnamen
-// z.B. "llama3:latest" → "ollama-llama3"
-func generateOllamaShortcode(name string) string {
-	// Entferne :latest Suffix
-	if idx := strings.Index(name, ":latest"); idx != -1 {
-		name = name[:idx]
-	}
-	// Ersetze andere Tags durch Suffix
-	name = strings.ReplaceAll(name, ":", "-")
-	return "ollama-" + name
-}
+// generateOllamaShortcode ist deprecated – wird von GenerateShortcode ersetzt
 
 // GetModelDefaultTokens gibt die Standard-Token-Anzahl für ein Modell zurück
 func GetModelDefaultTokens(modelName string) int {

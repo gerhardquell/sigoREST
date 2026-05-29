@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -62,10 +63,10 @@ type ModelInfo struct {
 	APIKey                   string  `json:"apikey"`
 	MaxInputTokens           int     `json:"max_input_tokens"`
 	MaxOutputTokens          int     `json:"max_output_tokens"`
-	InputCost                float64 `json:"input_cost"`   // $/1M tokens
-	OutputCost               float64 `json:"output_cost"`  // $/1M tokens
+	InputCost                float64 `json:"input_cost"`  // $/1M tokens
+	OutputCost               float64 `json:"output_cost"` // $/1M tokens
 	MinTemperature           float64 `json:"min_temperature"`
-	MaxTemperature          float64 `json:"max_temperature"`
+	MaxTemperature           float64 `json:"max_temperature"`
 	RequiresCompletionTokens bool    `json:"requires_completion_tokens"`
 }
 
@@ -549,10 +550,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if _, exists := s.breakers[req.Model]; !exists {
 		config := &sigoengine.CircuitBreakerConfig{
-			Threshold:   5,                    // 5 Fehler in 60s
-			Window:      60 * time.Second,     // 60s Zeitfenster
-			Cooldown:    10 * time.Second,     // 10s Cooldown (statt 5min)
-			HalfOpenMax: 3,                    // Max 3 Requests in Half-Open
+			Threshold:   5,                // 5 Fehler in 60s
+			Window:      60 * time.Second, // 60s Zeitfenster
+			Cooldown:    10 * time.Second, // 10s Cooldown (statt 5min)
+			HalfOpenMax: 3,                // Max 3 Requests in Half-Open
 		}
 		s.breakers[req.Model] = sigoengine.NewEnhancedCircuitBreaker(config)
 	}
@@ -765,6 +766,41 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// GET /api/shortcodes - Modell → Shortcode Mapping
+func (s *Server) handleShortcodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Nach ID sortieren für deterministische Ausgabe
+	type scEntry struct {
+		ID        string `json:"id"`
+		Shortcode string `json:"sc"`
+	}
+
+	entries := make([]scEntry, 0, len(s.models))
+	for _, info := range s.models {
+		entries = append(entries, scEntry{ID: info.ID, Shortcode: info.Shortcode})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ID < entries[j].ID
+	})
+
+	// Kompaktes Format: {"id": "sc", ...}
+	result := make(map[string]string, len(entries))
+	for _, e := range entries {
+		result[e.ID] = e.Shortcode
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// **********************************************************************
 // GET /ping - Einfacher Health-Check für Load Balancer
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -906,13 +942,13 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 				"method":      "POST",
 				"description": "OpenAI-kompatible Chat-Completion API",
 				"parameters": map[string]string{
-					"model":              "Modell-ID oder Shortcode (z.B. 'claude-h', 'gpt41')",
-					"messages":           "Array von {role, content} Objekten",
-					"temperature":        "Optional: 0.0-2.0 (default: Modell-Mittelwert)",
-					"max_tokens":         "Optional: Max. Ausgabe-Tokens",
-					"session_id":         "Optional: Session-ID für Gesprächsverlauf",
-					"timeout":            "Optional: Timeout in Sekunden (default: 180)",
-					"retries":            "Optional: Anzahl Retries (default: 3)",
+					"model":       "Modell-ID oder Shortcode (z.B. 'claude-h', 'gpt41')",
+					"messages":    "Array von {role, content} Objekten",
+					"temperature": "Optional: 0.0-2.0 (default: Modell-Mittelwert)",
+					"max_tokens":  "Optional: Max. Ausgabe-Tokens",
+					"session_id":  "Optional: Session-ID für Gesprächsverlauf",
+					"timeout":     "Optional: Timeout in Sekunden (default: 180)",
+					"retries":     "Optional: Anzahl Retries (default: 3)",
 				},
 				"example": `curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -1097,6 +1133,7 @@ func main() {
 	mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
+	mux.HandleFunc("/api/shortcodes", srv.handleShortcodes)
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.HandleFunc("/api/memory", srv.handleMemory)
 	mux.HandleFunc("/api/system-prompt", srv.handleSystemPrompt)
@@ -1108,9 +1145,9 @@ func main() {
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", *httpPort),
 		Handler:      httpHandler,
-		ReadTimeout:  30 * time.Second,
+		ReadTimeout:  120 * time.Second,
 		WriteTimeout: 5 * time.Minute, // AI-Calls können lang dauern
-		IdleTimeout:  120 * time.Second,
+		IdleTimeout:  300 * time.Second,
 	}
 
 	// HTTPS-Server (privates Netz)
@@ -1129,9 +1166,9 @@ func main() {
 			Certificates: []tls.Certificate{tlsCert},
 			MinVersion:   tls.VersionTLS12,
 		},
-		ReadTimeout:  30 * time.Second,
+		ReadTimeout:  90 * time.Second,
 		WriteTimeout: 5 * time.Minute,
-		IdleTimeout:  120 * time.Second,
+		IdleTimeout:  300 * time.Second,
 	}
 
 	// Beide Server parallel starten
