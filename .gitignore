@@ -35,5 +35,11 @@ coverage.txt
 # C++ build artifacts
 clients/cpp/build/
 
+# Python build artifacts
+clients/python/build/
+*.egg-info/
+__pycache__/
+*.pyc
+
 # External symlinks
 test-translator
