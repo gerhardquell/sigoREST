@@ -435,3 +435,35 @@ curl -s http://localhost:9080/api/usage | jq
 3. **`omitempty` für optionale Felder**: Wenn nicht alle Provider Usage liefern, ist `*ChatUsage` mit `omitempty` sauberer als leeres Struct — Clients sehen kein `"usage": null`.
 
 **Status:** ✅ Erfolgreich abgeschlossen
+
+---
+
+## Session 2026-05-31: Boot-Test-Verifikation (DNS-Race-Fix)
+
+**Kontext:** Der DNS-Race-Fix (Commit `8d22b4a` `fix: Provider-Fetch Retry
+gegen Boot-DNS-Race` + systemd `Wants/After=network-online.target`) lag bisher
+nur als Code vor. Die Wirksamkeit beim echten Systemstart war unverifiziert.
+
+**Verifikation:** Boot-Test erfolgreich absolviert. Server lädt beim Start
+alle Provider (Mammoth/Moonshot/ZAI), **nicht** nur die 13er-ZAI-Fallback-Liste.
+
+**Problem-Hintergrund (Asymmetrie):** Bei DNS-Ausfall liefern Mammoth und
+Moonshot `nil, err` (0 Modelle), ZAI dagegen `zaiStaticModels, nil` (13
+statische Modelle). Beim Boot-DNS-Race erschienen daher nur ~13 Modelle.
+Schutz: systemd `network-online.target` (nicht `network.target`!) **plus**
+`FetchWithRetry` (4 Versuche, 2s/4s/8s Backoff).
+
+**Erkenntnisse & Learnings:**
+
+1. **Code ≠ verifiziert**: Race-Conditions beim Boot lassen sich nur im echten
+   Systemstart prüfen, nicht im Build/Unit-Test. Jetzt in der Praxis grün.
+
+2. **Diagnose-Heuristik**: Tauchen beim Boot nur ~13 Modelle auf ("no such
+   host" im Log), ist DNS noch nicht oben → ab jetzt Regression, nicht
+   erwartetes Verhalten.
+
+3. **Begleit-Commit**: `docs/deepseek_beats_opus.txt` als Referenz zur
+   Harness-These festgehalten (Gegenpol zur Scope-Entscheidung: sigoREST
+   bleibt schlanker Proxy ohne Tool-Call-Repair).
+
+**Status:** ✅ Erfolgreich abgeschlossen
