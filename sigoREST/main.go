@@ -537,8 +537,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	apiRequest := map[string]interface{}{
 		"model":       cfg.Model,
 		"messages":    messages,
-		"max_tokens":  req.MaxTokens,
 		"temperature": req.Temp,
+	}
+	// max_tokens nur setzen wenn > 0 (0 → Provider-Default, verhindert leere Antworten)
+	if req.MaxTokens > 0 {
+		apiRequest["max_tokens"] = req.MaxTokens
 	}
 	// GPT-5: max_completion_tokens statt max_tokens
 	if modelInfo.RequiresCompletionTokens {

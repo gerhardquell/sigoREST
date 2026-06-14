@@ -1284,6 +1284,11 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 			if content, ok := msg["content"].(string); ok {
 				return content, usage, finishReason, nil
 			}
+			// content:null → finish_reason:length (max_tokens:0 Fallback)
+			if msg["content"] == nil {
+				return "", usage, finishReason, NewError(ErrClientError,
+					"leere Antwort: max_tokens zu niedrig oder Modell-Limit erreicht", nil, logF)
+			}
 		}
 	}
 
