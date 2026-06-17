@@ -438,7 +438,106 @@ curl -s http://localhost:9080/api/usage | jq
 
 ---
 
-## Session 2026-05-31: Boot-Test-Verifikation (DNS-Race-Fix)
+## Session 2026-06-17: Multi-Channel Support abschließen
+
+**Zielsetzung:**
+Offene Punkte aus der Multi-Channel-Implementierung schließen: konfigurierbares Datenverzeichnis, Health-Monitor-Intervall, Kanal-spezifisches Memory/System-Prompt, Usage-Tracking pro Kanal, Provider-Mismatch-Schutz, persistierende Auth-Fehler-Deaktivierung und vollständige API-Doku.
+
+**Was erreicht wurde:**
+
+1. **Server-Konfiguration**
+   - Neue Flags `-data-dir` (default `/var/sigoREST`) und `-channel-health-interval` (default `30s`)
+   - Globales Memory und System-Prompt werden aus `-data-dir` geladen/gespeichert
+   - `channels.json`, Kanal-Sessions und Kanal-Memory liegen ebenfalls unter `-data-dir`
+
+2. **Kanal-spezifisches Memory und System-Prompt**
+   - `PUT/GET /api/channels/:provider/:name/memory`
+   - `PUT/GET /api/channels/:provider/:name/system-prompt`
+   - In `handleChatCompletions` injiziert: Reihenfolge Global-Memory → Kanal-Memory → Global-System-Prompt → Kanal-System-Prompt → Request-System-Prompt
+
+3. **Usage-Tracking pro Kanal**
+   - Zusätzliche Map `usageByChannel` mit Key `model-id#provider-channel`
+   - `/api/usage` liefert `by_model`, `by_channel` und `total`
+   - `by_model` bleibt rückwärtskompatibel
+
+4. **Kanal-Auflösung robuster gemacht**
+   - `ChannelManager.Resolve` lehnt FullNames ab, deren Provider nicht zum Modell passt
+   - Verhindert z.B. `moonshot-0` bei einem Mammoth-Modell
+
+5. **Auth-Fehler führt zu persistierter Deaktivierung**
+   - Im Chat-Handler und im Health-Monitor wird bei `AUTH_FAILED` `registry.SetActive(..., false)` aufgerufen
+   - `channels.json` wird sofort aktualisiert
+   - `ProbeProvider` meldet Auth-Fehler jetzt als `auth_failed` statt `available`
+
+6. **Dokumentation**
+   - `/api/help` um `/api/version`, `/api/channels/*`, `channel` Request-Parameter und Multi-Channel-Features erweitert
+   - `docs/systemd-install.md` an `-data-dir` und `-channel-health-interval` angepasst
+
+7. **Tests**
+   - `sigoREST/main_test.go` mit Handler-Tests für Channels, Memory, System-Prompt, Version, Usage
+   - `sigoengine/channel_health_test.go` mit Tests für Auto-Aktivierung und Auth-Deaktivierung
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Ein `-data-dir` für alles** | Zentrale Pfad-Quelle für State, Memory, Prompts, Sessions. Einfacher Backup und systemd-Betrieb. |
+| **Request > Kanal > Global** für System-Prompts | Klare Hierarchie: spezifischste Vorgabe gewinnt. |
+| **`usageByChannel` zusätzlich zu `usage`** | Rückwärtskompatibilität für `/api/usage` erhalten, Kanal-Details zusätzlich sichtbar. |
+| **Registry erhält Registry-Pointer in `checkChannel`** | Seiteneffekt „Deaktivieren“ wird explizit und testbar, keine versteckte globale Variable. |
+| **Nur pro Kanal, nicht pro Session Memory** | Entscheidung des Users: Kanal-Memory reicht, pro Session wäre übermäßig granular. |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoREST/main.go` | Flags, Datenverzeichnis, Kanal-System-Prompt, Usage pro Kanal, Auth-Deaktivierung, `/api/help` |
+| `sigoengine/channel_manager.go` | Provider-Mismatch-Schutz in `Resolve` |
+| `sigoengine/channel_health.go` | Statische Endpoint-Fallbacks, Auth-Deaktivierung via `SetActive` |
+| `sigoengine/engine.go` | `ProbeProvider` meldet `auth_failed` und `empty_probe_response` |
+| `sigoengine/env.go` | **NEU** — `LoadEnvFile` / `GetEnvWithFile` für optionale `./env` Datei |
+| `sigoREST/main_test.go` | **NEU** — Handler-Tests für Channels/Memory/System-Prompt/Usage |
+| `sigoengine/channel_health_test.go` | **NEU** — Tests für Auto-Aktivierung und Auth-Deaktivierung |
+| `docs/systemd-install.md` | `-data-dir`, `-channel-health-interval`, Memory-Pfad aktualisiert |
+
+**Testing & Verifikation:**
+
+```bash
+# Build und Tests
+
+go build ./...
+go test ./sigoengine/ ./sigoREST/ -v
+
+# Live am systemd-Daemon
+
+curl -s http://127.0.0.1:9080/api/version
+curl -s http://127.0.0.1:9080/api/channels
+curl -s http://127.0.0.1:9080/api/channels/mammouth/0
+curl -s -X POST http://127.0.0.1:9080/api/channels/mammouth/0/enable
+curl -s http://127.0.0.1:9080/api/usage
+
+# Chat mit und ohne Kanal
+curl -s http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cl46-s","channel":"mammouth-0","messages":[{"role":"user","content":"Sag Hallo"}]}'
+
+curl -s http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cl46-s","messages":[{"role":"user","content":"Sag Hallo"}]}'
+```
+
+**Erkenntnisse & Learnings:**
+
+1. **Health-Probe mit `max_tokens:1` liefert leere Antworten.** Einige Modelle antworten mit `content:null`, was unser Code als `CLIENT_ERROR` klassifizierte. `ProbeProvider` behandelt diesen Fall jetzt als erreichbar.
+
+2. **Auth-Fehler wurde von `ProbeProvider` verschluckt.** Weil Auth als `available` galt, deaktivierte der Health-Monitor Kanäle mit ungültigem Key nie. Trennung in `auth_failed` macht den Fehler sichtbar und handhabbar.
+
+3. **Unit-Tests für HTTP-Handler beschleunigen Iteration.** `httptest` erlaubt schnelle Channel-Endpoint-Tests ohne laufenden Server.
+
+4. **Persistierter Kanal-Status kann überraschen.** Wenn Kanäle einmal aktiviert wurden, bleiben sie über `channels.json` aktiv. Das ist gewollt, aber bei Tests leicht übersehen.
+
+**Status:** ✅ Erfolgreich abgeschlossen und gepusht
+
 
 **Kontext:** Der DNS-Race-Fix (Commit `8d22b4a` `fix: Provider-Fetch Retry
 gegen Boot-DNS-Race` + systemd `Wants/After=network-online.target`) lag bisher
