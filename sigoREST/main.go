@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -44,13 +45,6 @@ import (
 
 //go:embed memory.json
 var defaultMemoryJSON string
-
-// **********************************************************************
-// MemoryBlock - globaler Kontext-Block für alle Anfragen
-type MemoryBlock struct {
-	Content string `json:"content"`
-	Cache   bool   `json:"cache"`
-}
 
 // **********************************************************************
 // ModelInfo - Modell-Informationen aus CSV
@@ -79,13 +73,15 @@ type ModelUsageStats struct {
 // **********************************************************************
 // Server-State
 type Server struct {
-	mu           sync.RWMutex
-	memory       MemoryBlock
-	models       map[string]ModelInfo                          // id → ModelInfo
-	breakers     map[string]*sigoengine.EnhancedCircuitBreaker // Modell → Enhanced Circuit Breaker
-	systemPrompt string                                        // globaler Default-Prompt (leer = kein Prompt)
-	usageMu      sync.RWMutex
-	usage        map[string]*ModelUsageStats // model-id → Stats
+	mu             sync.RWMutex
+	memory         sigoengine.MemoryBlock
+	models         map[string]ModelInfo                          // id → ModelInfo
+	breakers       map[string]*sigoengine.EnhancedCircuitBreaker // Modell → Enhanced Circuit Breaker
+	systemPrompt   string                                        // globaler Default-Prompt (leer = kein Prompt)
+	usageMu        sync.RWMutex
+	usage          map[string]*ModelUsageStats // model-id → Stats
+	channelManager *sigoengine.ChannelManager
+	baseDir        string
 }
 
 // **********************************************************************
@@ -314,7 +310,7 @@ func loadModelsFromProviders() map[string]ModelInfo {
 // Memory-Block laden
 
 // loadMemory liest memory.json (Disk hat Vorrang vor embedded)
-func loadMemory() MemoryBlock {
+func loadMemory() sigoengine.MemoryBlock {
 	var jsonContent []byte
 
 	data, err := os.ReadFile("./memory.json")
@@ -326,7 +322,7 @@ func loadMemory() MemoryBlock {
 		sigoengine.LogInfo("memory.json (embedded default) verwendet")
 	}
 
-	var mem MemoryBlock
+	var mem sigoengine.MemoryBlock
 	if err := json.Unmarshal(jsonContent, &mem); err != nil {
 		sigoengine.LogWarn("memory.json Parse-Fehler, verwende leer", map[string]interface{}{"error": err.Error()})
 	}
@@ -827,6 +823,168 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// Channels API
+
+// handleChannelRouter dispatches /api/channels/:provider/:name/:action
+func (s *Server) handleChannelRouter(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(r.URL.Path, "/")
+	parts := strings.Split(path, "/")
+	// /api/channels/<provider>/<name>/<action>
+	if len(parts) < 4 {
+		writeError(w, "Invalid channel path", "invalid_request", http.StatusBadRequest)
+		return
+	}
+	provider := parts[2]
+	name := parts[3]
+	action := ""
+	if len(parts) >= 5 {
+		action = parts[4]
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		switch action {
+		case "":
+			s.handleChannelDetail(w, r, provider, name)
+			return
+		case "memory":
+			s.handleChannelMemoryGet(w, r, provider, name)
+			return
+		case "system-prompt":
+			s.handleChannelSystemPromptGet(w, r, provider, name)
+			return
+		}
+	case http.MethodPut:
+		switch action {
+		case "memory":
+			s.handleChannelMemoryPut(w, r, provider, name)
+			return
+		case "system-prompt":
+			s.handleChannelSystemPromptPut(w, r, provider, name)
+			return
+		}
+	case http.MethodPost:
+		switch action {
+		case "enable":
+			s.handleChannelEnable(w, r, provider, name)
+			return
+		case "disable":
+			s.handleChannelDisable(w, r, provider, name)
+			return
+		}
+	}
+	writeError(w, "Invalid channel operation", "invalid_request", http.StatusBadRequest)
+}
+
+// GET /api/channels - Liste aller Kanäle
+func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.channelManager.AllChannelStatus())
+}
+
+// GET /api/channels/:provider/:name - Einzelkanal
+func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request, provider, name string) {
+	ch, ok := s.channelManager.Registry().GetChannel(provider, name)
+	if !ok {
+		writeError(w, "Channel not found", "not_found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"provider":           ch.Provider,
+		"name":               ch.Name,
+		"full_name":          ch.FullName(),
+		"active":             ch.Active,
+		"healthy":            ch.Healthy,
+		"last_health_check":  ch.LastHealthCheck,
+		"last_error":         ch.LastError,
+		"consecutive_errors": ch.ConsecutiveErrors,
+	})
+}
+
+// POST /api/channels/:provider/:name/enable
+func (s *Server) handleChannelEnable(w http.ResponseWriter, r *http.Request, provider, name string) {
+	if err := s.channelManager.Registry().SetActive(provider, name, true); err != nil {
+		writeError(w, err.Error(), "not_found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "enabled"})
+}
+
+// POST /api/channels/:provider/:name/disable
+func (s *Server) handleChannelDisable(w http.ResponseWriter, r *http.Request, provider, name string) {
+	if err := s.channelManager.Registry().SetActive(provider, name, false); err != nil {
+		writeError(w, err.Error(), "not_found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "disabled"})
+}
+
+func (s *Server) handleChannelMemoryGet(w http.ResponseWriter, r *http.Request, provider, name string) {
+	path := sigoengine.ChannelMemoryPath(s.baseDir, provider, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sigoengine.MemoryBlock{})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func (s *Server) handleChannelMemoryPut(w http.ResponseWriter, r *http.Request, provider, name string) {
+	var mem sigoengine.MemoryBlock
+	if err := json.NewDecoder(r.Body).Decode(&mem); err != nil {
+		writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		return
+	}
+	path := sigoengine.ChannelMemoryPath(s.baseDir, provider, name)
+	sigoengine.EnsureChannelDir(s.baseDir, provider, name)
+	data, _ := json.MarshalIndent(mem, "", "  ")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		writeError(w, "Cannot write memory: "+err.Error(), "server_error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(mem)
+}
+
+func (s *Server) handleChannelSystemPromptGet(w http.ResponseWriter, r *http.Request, provider, name string) {
+	path := sigoengine.ChannelSystemPromptPath(s.baseDir, provider, name)
+	data, err := os.ReadFile(path)
+	prompt := ""
+	if err == nil {
+		prompt = strings.TrimSpace(string(data))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"system_prompt": prompt})
+}
+
+func (s *Server) handleChannelSystemPromptPut(w http.ResponseWriter, r *http.Request, provider, name string) {
+	var body struct {
+		SystemPrompt string `json:"system_prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		return
+	}
+	path := sigoengine.ChannelSystemPromptPath(s.baseDir, provider, name)
+	sigoengine.EnsureChannelDir(s.baseDir, provider, name)
+	if err := os.WriteFile(path, []byte(body.SystemPrompt), 0644); err != nil {
+		writeError(w, "Cannot write system prompt: "+err.Error(), "server_error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "system_prompt": body.SystemPrompt})
+}
+
+// **********************************************************************
 // GET /api/health - Server-Status
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -878,7 +1036,7 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(mem)
 
 	case http.MethodPut:
-		var mem MemoryBlock
+		var mem sigoengine.MemoryBlock
 		if err := json.NewDecoder(r.Body).Decode(&mem); err != nil {
 			writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
 			return
@@ -1114,7 +1272,27 @@ func main() {
 		breakers:     make(map[string]*sigoengine.EnhancedCircuitBreaker),
 		systemPrompt: loadSystemPrompt(),
 		usage:        make(map[string]*ModelUsageStats),
+		baseDir:      "/var/sigoREST",
 	}
+
+	// /var/sigoREST anlegen falls nicht vorhanden
+	if _, err := os.Stat(srv.baseDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(srv.baseDir, 0755); err != nil {
+			sigoengine.LogWarn("Konnte /var/sigoREST nicht anlegen", map[string]interface{}{"error": err.Error()})
+		}
+	}
+
+	// Kanal-Registry initialisieren
+	registry := sigoengine.NewChannelRegistry(filepath.Join(srv.baseDir, "channels.json"))
+	registry.DiscoverFromEnv()
+	if err := registry.LoadState(); err != nil {
+		sigoengine.LogWarn("Kanal-Status konnte nicht geladen werden", map[string]interface{}{"error": err.Error()})
+	}
+	srv.channelManager = sigoengine.NewChannelManager(registry)
+
+	// Health-Monitor starten
+	channelHealthInterval := 30 * time.Second
+	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, channelHealthInterval)
 
 	// Ollama Auto-Discovery
 	ollamaEndpoint := "http://localhost:11434"
@@ -1149,6 +1327,8 @@ func main() {
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
 	mux.HandleFunc("/api/shortcodes", srv.handleShortcodes)
+	mux.HandleFunc("/api/channels/", srv.handleChannelRouter)
+	mux.HandleFunc("/api/channels", srv.handleChannels)
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.HandleFunc("/api/memory", srv.handleMemory)
 	mux.HandleFunc("/api/system-prompt", srv.handleSystemPrompt)
