@@ -24,6 +24,21 @@ import (
 	"sigorest/sigoengine"
 )
 
+func providerForModelCLI(model string) string {
+	id := sigoengine.ResolveModelName(model)
+	if m, ok := sigoengine.GetModelByID(id); ok {
+		switch {
+		case strings.HasPrefix(m.APIKeyEnv, "MAMMOUTH"):
+			return "mammouth"
+		case strings.HasPrefix(m.APIKeyEnv, "MOONSHOT"):
+			return "moonshot"
+		case strings.HasPrefix(m.APIKeyEnv, "ZAI"):
+			return "zai"
+		}
+	}
+	return "mammouth"
+}
+
 func main() {
 	var (
 		model        = flag.String("m", "gpt41", "Modell (Shortcode oder vollständiger Name)")
@@ -40,6 +55,8 @@ func main() {
 		showInfo     = flag.Bool("i", false, "Modell-Info anzeigen")
 		logLevel     = flag.String("v", "info", "Log-Level: debug|info|warn|error")
 		showVersion  = flag.Bool("V", false, "Version anzeigen")
+		channel      = flag.String("c", "", "Kanal wählen (z.B. mammouth-0)")
+		sessionDir   = flag.String("session-dir", sigoengine.DefaultSessionBaseDir, "Verzeichnis für Sessions")
 	)
 	flag.BoolVar(showVersion, "version", false, "Version anzeigen")
 	flag.Parse()
@@ -75,7 +92,19 @@ func main() {
 		return
 	}
 
-	cfg, err := sigoengine.LoadConfig(*model)
+	// Kanal-Registry für CLI
+	registry := sigoengine.NewChannelRegistry("")
+	registry.DiscoverFromEnv()
+	channelManager := sigoengine.NewChannelManager(registry)
+
+	provider := providerForModelCLI(*model)
+	ch, err := channelManager.Resolve(provider, *channel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Fehler: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg, err := sigoengine.LoadConfigWithChannel(*model, ch)
 	if err != nil {
 		sigoengine.LogError("Konfiguration nicht geladen", err, nil)
 		os.Exit(1)
@@ -87,7 +116,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	session := sigoengine.LoadSession(*sessionID, *model)
+	session := sigoengine.LoadSessionForChannel(*sessionDir, ch.Provider, ch.Name, *sessionID, *model)
 
 	// Request aufbauen
 	messages := []map[string]interface{}{}
@@ -164,7 +193,7 @@ func main() {
 	if *sessionID != "" {
 		session.AddMessage("user", prompt)
 		session.AddMessage("assistant", responseText)
-		session.Save(*sessionID, *model)
+		session.SaveForChannel(*sessionDir, ch.Provider, ch.Name, *sessionID, *model)
 	}
 
 	if *jsonOut {
