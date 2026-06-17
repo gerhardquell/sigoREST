@@ -15,8 +15,23 @@ sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
 
 ```bash
 sudo mkdir -p /usr/local/slib/sigoREST/certs
-sudo cp sigoREST/models.csv /usr/local/slib/sigoREST/
 sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
+```
+
+## 2a. /var/sigoREST Datenverzeichnis anlegen
+
+Der Server speichert pro-Kanal Sessions, Memory und System-Prompts unter `/var/sigoREST`:
+
+```bash
+sudo mkdir -p /var/sigoREST
+sudo chown -R sigorest:sigorest /var/sigoREST
+sudo chmod 0755 /var/sigoREST
+```
+
+Falls der `sigorest`-Benutzer noch nicht existiert:
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin sigorest
 ```
 
 ## 3. Environment-Datei anlegen
@@ -28,6 +43,8 @@ sudo nano /usr/local/slib/sigoREST/env
 Inhalt:
 ```
 MAMMOUTH_API_KEY=dein-key-hier
+MAMMOUTH_API_KEY_0=zusätzlicher-key-0
+MAMMOUTH_API_KEY_1=zusätzlicher-key-1
 MOONSHOT_API_KEY=dein-key-hier
 ZAI_API_KEY=dein-key-hier
 ```
@@ -55,6 +72,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=sigorest
+Group=sigorest
 WorkingDirectory=/usr/local/slib/sigoREST
 EnvironmentFile=/usr/local/slib/sigoREST/env
 ExecStart=/usr/local/sbin/sigoREST \
@@ -111,6 +130,9 @@ curl -X PUT http://localhost:9080/api/memory \
 ## Hinweise
 
 - Das TLS-Zertifikat wird beim ersten Start automatisch in `/usr/local/slib/sigoREST/certs/` generiert
-- `models.csv` und `memory.json` können ohne Neuinstallation angepasst werden
+- `memory.json` kann ohne Neuinstallation angepasst werden
   (Änderungen erst nach `systemctl restart sigoREST` aktiv)
 - Die `env`-Datei enthält API-Keys → `chmod 600` ist Pflicht
+- Zusätzliche Kanäle (z.B. `MAMMOUTH_API_KEY_0`) sind standardmäßig inaktiv.
+  Aktivierung via REST: `curl -X POST http://localhost:9080/api/channels/mammouth/0/enable`
+- Kanal-Status wird unter `/var/sigoREST/channels.json` persistiert
