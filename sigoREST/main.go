@@ -39,8 +39,6 @@ import (
 	"sigorest/sigoengine"
 )
 
-const version = "1.0"
-
 // **********************************************************************
 // Embedded Default-Dateien
 
@@ -175,7 +173,7 @@ func ipMiddleware(allowedCheck func(net.IP) bool, next http.Handler) http.Handle
 // serverHeaderMiddleware fügt den Server-Header zu jeder Antwort hinzu
 func serverHeaderMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Server", fmt.Sprintf("sigoREST/%s", version))
+		w.Header().Set("Server", fmt.Sprintf("sigoREST/%s", sigoengine.Version))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -938,7 +936,7 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 	help := map[string]interface{}{
 		"name":        "sigoREST",
 		"description": "OpenAI-kompatible REST-API für KI-Modelle",
-		"version":     "1.0",
+		"version":     sigoengine.Version,
 		"endpoints": []map[string]interface{}{
 			{
 				"path":        "/v1/chat/completions",
@@ -1077,7 +1075,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("sigoREST Version %s\n", version)
+		fmt.Printf("sigoREST Version %s\n", sigoengine.Version)
 		os.Exit(0)
 	}
 

@@ -1,7 +1,7 @@
 # Binaries
 sigoREST/sigoREST
 sigoE/sigoE
-sigoE
+/sigoE
 main
 *.exe
 

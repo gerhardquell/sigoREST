@@ -24,8 +24,6 @@ import (
 	"sigorest/sigoengine"
 )
 
-const version = "1.0"
-
 func main() {
 	var (
 		model        = flag.String("m", "gpt41", "Modell (Shortcode oder vollständiger Name)")
@@ -43,10 +41,11 @@ func main() {
 		logLevel     = flag.String("v", "info", "Log-Level: debug|info|warn|error")
 		showVersion  = flag.Bool("V", false, "Version anzeigen")
 	)
+	flag.BoolVar(showVersion, "version", false, "Version anzeigen")
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("sigoE Version %s\n", version)
+		fmt.Printf("sigoE %s\n", sigoengine.Version)
 		os.Exit(0)
 	}
 
