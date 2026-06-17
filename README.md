@@ -1,21 +1,27 @@
 # sigoREST
 
 REST-Server für sigoEngine. Einheitliche OpenAI-kompatible API für ~100 parallele Verbindungen.
-IP-basierte Zugriffskontrolle, globaler Memory-Block für Prompt-Caching.
+IP-basierte Zugriffskontrolle, globaler + kanal-spezifischer Memory, Multi-Channel-Support mit Failover.
 
 ## Architektur
 
 ```
 sigorest/
 ├── sigoengine/
-│   ├── engine.go              # Shared Package (API-Call, Session, CircuitBreaker)
+│   ├── engine.go              # Shared Package (API-Call, Session, CircuitBreaker, Errors)
 │   ├── models.go              # Model-Struct + CoreModels (CLI-Fallback)
 │   ├── models_registry.go     # Registry-Logik (Lookup, Shortcode)
-│   └── provider_fetchers.go   # Provider-Fetcher (Mammouth, Moonshot, ZAI)
+│   ├── provider_fetchers.go   # Provider-Fetcher (Mammouth, Moonshot, ZAI)
+│   ├── channel.go             # Channel, ChannelRegistry, Env-Discovery
+│   ├── channel_manager.go     # Kanal-Auflösung und Failover
+│   ├── channel_health.go      # Hintergrund-Health-Monitor
+│   ├── session_memory.go      # Session-/Memory-Pfade pro Kanal
+│   ├── env.go                 # Optionale ./env Datei
+│   └── version.go             # Zentrale Versions-Konstante
 ├── cmd/sigoE/main.go          # CLI-Wrapper
 └── sigoREST/
     ├── main.go                # REST-Server
-    └── memory.json            # Globaler Memory-Block
+    └── memory.json            # Default globaler Memory-Block (embedded)
 ```
 
 ## Installation
@@ -28,9 +34,9 @@ sigorest/
 go build -o sigoREST/sigoREST ./sigoREST/
 sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
 
-# Konfiguration anlegen
-sudo mkdir -p /usr/local/slib/sigoREST/certs
-sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
+# Datenverzeichnis anlegen
+sudo mkdir -p /var/sigoREST
+sudo chown -R sigorest:sigorest /var/sigoREST
 
 # Als systemd-Service einrichten (siehe docs/systemd-install.md)
 ```
@@ -63,6 +69,8 @@ go build ./...
 | `-https-port` | `9443` | HTTPS (privates Netz 192.168.0.0/16, 10.0.0.0/8) |
 | `-cert` | `./certs/server.crt` | TLS-Zertifikat (wird beim ersten Start auto-generiert) |
 | `-key` | `./certs/server.key` | TLS-Schlüssel |
+| `-data-dir` | `/var/sigoREST` | Basisverzeichnis für Memory, System-Prompt, channels.json, Sessions |
+| `-channel-health-interval` | `30s` | Intervall für Kanal-Health-Checks |
 | `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
 | `-q` | — | Quiet Mode (nur Fehler) |
 | `-j` | — | JSON-Logs |
@@ -74,12 +82,14 @@ go build ./...
 |------|---------|--------------|
 | `-m` | `gpt41` | Modell (Shortcode oder vollständiger Name) |
 | `-s` | — | Session-ID für Gesprächsverlauf |
+| `-session-dir` | `.sessions/` | Verzeichnis für Session-Dateien |
+| `-c` | — | Kanal wählen, z.B. `mammouth-0` |
 | `-n` | `0` | Max. Tokens (0 = Modell-Default) |
 | `-T` | `-1` | Temperatur (-1 = Modell-Default) |
 | `-t` | `180` | Timeout in Sekunden |
 | `-r` | `3` | Anzahl Wiederholungsversuche |
 | `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
-| `-V` | — | **Version anzeigen** |
+| `-V` / `-version` | — | Version anzeigen |
 | `-j` | — | JSON-Ausgabe |
 | `-q` | — | Quiet Mode (nur Fehler) |
 | `-l` | — | Alle verfügbaren Modelle anzeigen |
@@ -95,9 +105,24 @@ go build ./...
 | 9443 | HTTPS | 192.168.0.0/16, 10.0.0.0/8 |
 | beide | — | IPv6 geblockt (außer ::1) |
 
-## Konfigurationsdateien
+## Konfiguration
 
-Beide Dateien: Disk hat Vorrang vor eingebetteten Defaults.
+### Environment / API-Keys
+
+sigoREST liest API-Keys in dieser Reihenfolge:
+
+1. Optionale `env`-Datei im Startverzeichnis (`./env`)
+2. Echte Environment-Variablen
+
+```bash
+MAMMOUTH_API_KEY=sk-...          # Mammoth.ai (GPT, Claude, Gemini, Grok, DeepSeek, ...)
+MAMMOUTH_API_KEY_0=sk-...        # Zusätzlicher Kanal 0
+MAMMOUTH_API_KEY_1=sk-...        # Zusätzlicher Kanal 1
+MOONSHOT_API_KEY=sk-...          # Moonshot.ai (Kimi)
+ZAI_API_KEY=sk-...               # Z.ai (GLM)
+```
+
+Indizierte Keys (`_0`, `_1`, ...) erzeugen zusätzliche Kanäle. Der unindizierte Key wird zum `default`-Kanal.
 
 ### Dynamische Modell-Discovery
 
@@ -112,7 +137,28 @@ Beim Serverstart werden Modelle automatisch von folgenden Providern geladen:
 
 Ist ein Provider nicht erreichbar, startet der Server trotzdem mit den übrigen Modellen.
 
-### memory.json
+### Datenverzeichnis (`-data-dir`)
+
+Standard: `/var/sigoREST`
+
+```text
+/var/sigoREST/
+├── channels.json                     # Persistenter Aktivierungs-Status der Kanäle
+├── memory.json                       # Globaler Memory-Block
+├── system-prompt.txt                 # Globaler System-Prompt
+├── channels/
+│   └── <provider>/
+│       └── <channel>/
+│           ├── memory.json           # Kanal-spezifischer Memory
+│           └── system-prompt.txt     # Kanal-spezifischer System-Prompt
+└── sessions/
+    └── <provider>/
+        └── <channel>/
+            └── <model>-<session>.json
+```
+
+### memory.json (global)
+
 Globaler System-Kontext für alle Anfragen (wird immer zuerst eingefügt):
 ```json
 {
@@ -121,6 +167,49 @@ Globaler System-Kontext für alle Anfragen (wird immer zuerst eingefügt):
 }
 ```
 `cache: true` → Anthropic ephemeral caching. OpenAI cached automatisch ab 1024 Tokens.
+
+## Multi-Channel Support
+
+Pro Provider können mehrere API-Key-Kanäle verwaltet werden. Jeder Kanal hat eigenen API-Key, eigenen Memory, eigene Sessions und eigenen Circuit Breaker.
+
+### Standardverhalten
+
+- Nur der unindizierte Key (`MAMMOUTH_API_KEY`) wird als `default`-Kanal aktiv geschaltet.
+- Reservekanäle (`_0`, `_1`, ...) sind inaktiv, können aber manuell oder automatisch zugeschaltet werden.
+
+### Kanäle verwalten
+
+```bash
+# Alle Kanäle anzeigen
+curl -s http://localhost:9080/api/channels
+
+# Einzelkanal anzeigen
+curl -s http://localhost:9080/api/channels/mammouth/0
+
+# Kanal aktivieren
+curl -s -X POST http://localhost:9080/api/channels/mammouth/0/enable
+
+# Kanal deaktivieren
+curl -s -X POST http://localhost:9080/api/channels/mammouth/0/disable
+
+# Kanal-Memory setzen
+curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/memory \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Kanal-spezifischer Kontext","cache":false}'
+
+# Kanal-System-Prompt setzen
+curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/system-prompt \
+  -H "Content-Type: application/json" \
+  -d '{"system_prompt":"Antworte wie ein Pirat."}'
+```
+
+### Auto-Failover
+
+Wenn ein Kanal während eines Requests fehlschlägt (Rate-Limit, Timeout, Server-Fehler), probiert sigoREST automatisch den nächsten aktiven Kanal. Auth-Fehler deaktivieren den betroffenen Kanal sofort persistent.
+
+### Health-Monitor
+
+Ein Hintergrund-Prozess prüft alle aktiven Kanäle im `-channel-health-interval`. Sind alle aktiven Kanäle eines Providers unhealthy, wird der nächste inaktive Reservekanal automatisch aktiviert.
 
 ## Client Libraries
 
@@ -176,18 +265,24 @@ console.log(response.content);
 curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-h",
+    "model": "cl46-s",
+    "channel": "mammouth-0",
     "messages": [{"role": "user", "content": "Hallo"}],
     "temperature": 0.7,
     "max_tokens": 1024,
     "session_id": "mein-projekt",
     "timeout": 120,
     "retries": 3,
-    "system_prompt": "Optional: überschreibt den globalen System-Prompt"
+    "system_prompt": "Optional: überschreibt globale + kanal-spezifische System-Prompts"
   }'
 ```
 
-`session_id`, `timeout`, `retries`, `system_prompt` sind sigoREST-Erweiterungen — alle anderen Felder sind Standard-OpenAI.
+`sigoREST`-Erweiterungen:
+- `channel` — Optionaler Kanal-FullName (z.B. `mammouth-0`). Fehlt er, wird der erste aktive Kanal verwendet.
+- `session_id` — Session-ID für isolierten Gesprächsverlauf pro Kanal.
+- `timeout` — Request-Timeout in Sekunden.
+- `retries` — Anzahl Wiederholungsversuche pro Kanal.
+- `system_prompt` — Per-Request System-Prompt (höchste Priorität).
 
 #### Vision-Unterstützung
 
@@ -213,7 +308,7 @@ curl -s http://localhost:9080/v1/chat/completions \
 
 **Technische Details:**
 - `ChatMessage.Content` ist `json.RawMessage` — Passthrough für String und Vision-Array-Format
-- Session-Speicherung extrahiert nur Text (keine Bilddaten in `.sessions/`)
+- Session-Speicherung extrahiert nur Text (keine Bilddaten in Sessions)
 - Empfohlen: JPEG mit quality 75 bei ~100 DPI (ca. 80KB pro Seite)
 - Zu große Bilder (PNG 200+ DPI, >1MB) können Proxy-Fehler (413) verursachen
 
@@ -233,13 +328,55 @@ Antwort enthält `usage`-Block (sofern Provider Token-Daten liefert):
 ```bash
 curl -s http://localhost:9080/v1/models
 ```
-OpenAI-kompatible Modell-Liste (nur Whitelist).
+OpenAI-kompatible Modell-Liste (ID + Shortcode).
 
 ### GET /api/models
 ```bash
 curl -s http://localhost:9080/api/models
 ```
 Volle Modell-Infos: Preise, Token-Limits, Temperatur-Range.
+
+### GET /api/version
+```bash
+curl -s http://localhost:9080/api/version
+```
+Gibt `{"version":"1.1","component":"sigoREST"}` zurück.
+
+### GET /api/channels
+```bash
+curl -s http://localhost:9080/api/channels
+```
+Liste aller Kanäle mit Status.
+
+### GET /api/channels/:provider/:name
+```bash
+curl -s http://localhost:9080/api/channels/mammouth/0
+```
+Detail-Status eines Kanals.
+
+### POST /api/channels/:provider/:name/enable|disable
+```bash
+curl -s -X POST http://localhost:9080/api/channels/mammouth/0/enable
+curl -s -X POST http://localhost:9080/api/channels/mammouth/0/disable
+```
+
+### GET/PUT /api/channels/:provider/:name/memory
+```bash
+curl -s http://localhost:9080/api/channels/mammouth/0/memory
+
+curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/memory \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Kanal-spezifischer Kontext","cache":false}'
+```
+
+### GET/PUT /api/channels/:provider/:name/system-prompt
+```bash
+curl -s http://localhost:9080/api/channels/mammouth/0/system-prompt
+
+curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/system-prompt \
+  -H "Content-Type: application/json" \
+  -d '{"system_prompt":"Antworte wie ein Pirat."}'
+```
 
 ### GET /ping
 ```bash
@@ -251,7 +388,7 @@ Einfacher Health-Check für Load Balancer. Antwortet mit `pong`.
 ```bash
 curl -s http://localhost:9080/api/health
 ```
-Server-Status, Anzahl Modelle, Circuit-Breaker-Zustand.
+Server-Status, Anzahl Modelle, Circuit-Breaker-Zustand pro Kanal/Modell.
 
 ### GET /api/memory
 ```bash
@@ -264,32 +401,7 @@ curl -s -X PUT http://localhost:9080/api/memory \
   -H "Content-Type: application/json" \
   -d '{"content":"Neuer Kontext","cache":true}'
 ```
-Ändert den Memory-Block zur Laufzeit und schreibt ihn auf Disk.
-
-### GET /api/usage
-```bash
-curl -s http://localhost:9080/api/usage | jq
-```
-Kumulierte Token-Statistiken seit Serverstart — pro Modell und gesamt.
-```json
-{
-  "by_model": {
-    "claude-3-5-haiku-20241022": {
-      "input_tokens": 1200,
-      "output_tokens": 340,
-      "total_tokens": 1540,
-      "requests": 5
-    }
-  },
-  "total": {
-    "input_tokens": 1200,
-    "output_tokens": 340,
-    "total_tokens": 1540,
-    "requests": 5
-  }
-}
-```
-Hinweis: Nur RAM — Reset bei Neustart.
+Ändert den globalen Memory-Block zur Laufzeit und schreibt ihn auf Disk.
 
 ### GET /api/system-prompt
 ```bash
@@ -303,7 +415,46 @@ curl -s -X PUT http://localhost:9080/api/system-prompt \
   -H "Content-Type: application/json" \
   -d '{"system_prompt":"Du bist ein hilfreicher Assistent."}'
 ```
-Globalen System-Prompt setzen und in `system-prompt.txt` speichern. Kann per Request überschrieben werden.
+Globalen System-Prompt setzen und in `system-prompt.txt` speichern. Kann per Request oder Kanal überschrieben werden.
+
+### GET /api/usage
+```bash
+curl -s http://localhost:9080/api/usage
+```
+Kumulierte Token-Statistiken seit Serverstart — pro Modell, pro Kanal und gesamt.
+```json
+{
+  "by_model": {
+    "claude-sonnet-4-6": {
+      "input_tokens": 1200,
+      "output_tokens": 340,
+      "total_tokens": 1540,
+      "requests": 5
+    }
+  },
+  "by_channel": {
+    "claude-sonnet-4-6#mammouth-0": {
+      "input_tokens": 600,
+      "output_tokens": 170,
+      "total_tokens": 770,
+      "requests": 2
+    }
+  },
+  "total": {
+    "input_tokens": 1200,
+    "output_tokens": 340,
+    "total_tokens": 1540,
+    "requests": 5
+  }
+}
+```
+Hinweis: Nur RAM — Reset bei Neustart.
+
+### GET /api/help
+```bash
+curl -s http://localhost:9080/api/help
+```
+Dokumentation aller Endpunkte als JSON.
 
 ## Client-Beispiele
 
@@ -314,7 +465,7 @@ client := openai.NewClient(
     option.WithAPIKey("dummy"),
 )
 resp, _ := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-    Model:    openai.F("claude-h"),
+    Model:    openai.F("cl46-s"),
     Messages: openai.F([]openai.ChatCompletionMessageParamUnion{
         openai.UserMessage("Hallo"),
     }),
@@ -327,16 +478,16 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:9080/v1", api_key="dummy")
 resp = client.chat.completions.create(
-    model="claude-h",
+    model="cl46-s",
     messages=[{"role": "user", "content": "Hallo"}],
-    extra_body={"session_id": "mein-projekt"},
+    extra_body={"session_id": "mein-projekt", "channel": "mammouth-0"},
 )
 print(resp.choices[0].message.content)
 ```
 
 ## Modelle
 
-Modelle werden beim Serverstart dynamisch von den Providern geladen (~84 Modelle).
+Modelle werden beim Serverstart dynamisch von den Providern geladen (~89 Modelle).
 Aktuelle Liste:
 ```bash
 curl -s http://localhost:9080/v1/models | jq '.data[].id'
@@ -348,7 +499,7 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 |-----------|--------|----------|
 | `gpt41` | gpt-4.1 | Mammouth |
 | `gpt4o` | gpt-4o | Mammouth |
-| `claude-h` | claude-3-5-haiku-20241022 | Mammouth |
+| `cl46-s` | claude-sonnet-4-6 | Mammouth |
 | `kimi` | kimi-k2.5 | Moonshot |
 | `glm51` | glm-5.1 | ZAI |
 | `ollama-gemma3` | gemma3:latest | Ollama (lokal) |
@@ -395,44 +546,46 @@ curl -s http://localhost:9080/v1/chat/completions \
 
 ## Session-Management
 
-Sessions werden als JSON-Dateien gespeichert: `.sessions/<model>-<sessionID>.json`
+Sessions werden als JSON-Dateien gespeichert:
+
+```text
+<data-dir>/sessions/<provider>/<channel>/<model>-<sessionID>.json
+```
+
 Max. 20 Nachrichten pro Session (älteste werden automatisch verworfen).
+Sessions sind pro Kanal isoliert — gleiche `session_id` auf verschiedenen Kanälen = verschiedene Dateien.
 
 ```bash
 # Session ansehen
-cat .sessions/claude-h-mein-projekt.json
+cat /var/sigoREST/sessions/mammouth/default/cl46-s-mein-projekt.json
 
 # Session löschen
-rm .sessions/claude-h-mein-projekt.json
-```
-
-## ENV-Variablen
-
-```bash
-export MAMMOUTH_API_KEY=...   # Mammoth.ai (GPT, Claude, Gemini, Grok, DeepSeek, ...)
-export MOONSHOT_API_KEY=...   # Moonshot.ai (Kimi)
-export ZAI_API_KEY=...        # Z.ai (GLM)
+rm /var/sigoREST/sessions/mammouth/default/cl46-s-mein-projekt.json
 ```
 
 ## systemd Service
 
 Für Produktiv-Umgebungen wird sigoREST als systemd-Service empfohlen:
 - Binary: `/usr/local/sbin/sigoREST`
-- Daten/Konfiguration: `/usr/local/slib/sigoREST/`
+- Daten: `/var/sigoREST/`
+- Konfiguration/Env: `/usr/local/slib/sigoREST/env`
 - CLI Client: `/usr/local/bin/sigoE`
 
 Service-File Beispiel (`/etc/systemd/system/sigorest.service`):
 ```ini
 [Unit]
 Description=sigoREST Server
-After=network.target
+# network-online.target wartet, bis DNS verfügbar ist
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/sigoREST
+ExecStart=/usr/local/sbin/sigoREST -data-dir /var/sigoREST -channel-health-interval 30s
 Restart=on-failure
 User=sigorest
 Group=sigorest
+EnvironmentFile=/usr/local/slib/sigoREST/env
 
 [Install]
 WantedBy=multi-user.target
