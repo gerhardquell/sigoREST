@@ -84,6 +84,19 @@ func checkChannel(ch *Channel, registry *ChannelRegistry) {
 			break
 		}
 	}
+
+	// Fallback auf bekannte statische Endpoints/Modelle, falls Provider-Fetch fehlgeschlagen ist
+	if endpoint == "" {
+		switch ch.Provider {
+		case "moonshot":
+			endpoint = moonshotChatEndpoint
+			modelID = "moonshot-v1-8k"
+		case "zai":
+			endpoint = zaiChatEndpoint
+			modelID = "glm-4.5"
+		}
+	}
+
 	if endpoint == "" || modelID == "" {
 		ch.LastError = "no model endpoint known for provider"
 		ch.ConsecutiveErrors++

@@ -1098,6 +1098,15 @@ func ProbeProvider(ctx context.Context, cfg *ProviderConfig) ProviderHealth {
 		case ErrTimeout:
 			health.Status = "unavailable"
 			health.Error = "timeout"
+		case ErrClientError:
+			// Ein leerer Inhalt wegen max_tokens:1 ist immer noch ein erreichbarer Provider
+			if strings.Contains(apiErr.Message, "leere Antwort") {
+				health.Status = "available"
+				health.Error = "empty_probe_response"
+			} else {
+				health.Status = "unavailable"
+				health.Error = err.Error()
+			}
 		default:
 			health.Status = "unavailable"
 			health.Error = err.Error()
