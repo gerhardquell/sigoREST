@@ -813,6 +813,19 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("pong"))
 }
 
+// GET /api/version - Versions-String
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"version":   sigoengine.Version,
+		"component": "sigoREST",
+	})
+}
+
 // **********************************************************************
 // GET /api/health - Server-Status
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -1131,6 +1144,7 @@ func main() {
 	// HTTP-Mux einmal erstellen (beide Listener nutzen dieselben Handler)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", srv.handlePing)
+	mux.HandleFunc("/api/version", srv.handleVersion)
 	mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
