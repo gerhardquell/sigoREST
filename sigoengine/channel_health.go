@@ -67,21 +67,24 @@ func runHealthChecks(manager *ChannelManager) {
 func checkChannel(ch *Channel, registry *ChannelRegistry) {
 	// Look up the first model for the provider to get the endpoint.
 	// This is a best-effort probe; if no model is known, skip the check.
-	var endpoint string
+	var endpoint, modelID string
 	for _, m := range GetAllModels() {
 		switch {
 		case ch.Provider == "mammouth" && strings.Contains(m.Endpoint, "mammouth"):
 			endpoint = m.Endpoint
+			modelID = m.ID
 		case ch.Provider == "moonshot" && strings.Contains(m.Endpoint, "moonshot"):
 			endpoint = m.Endpoint
+			modelID = m.ID
 		case ch.Provider == "zai" && strings.Contains(m.Endpoint, "z.ai"):
 			endpoint = m.Endpoint
+			modelID = m.ID
 		}
 		if endpoint != "" {
 			break
 		}
 	}
-	if endpoint == "" {
+	if endpoint == "" || modelID == "" {
 		ch.LastError = "no model endpoint known for provider"
 		ch.ConsecutiveErrors++
 		return
@@ -89,7 +92,7 @@ func checkChannel(ch *Channel, registry *ChannelRegistry) {
 
 	cfg := &ProviderConfig{
 		Endpoint: endpoint,
-		Model:    ch.Provider,
+		Model:    modelID,
 		APIKey:   ch.APIKey,
 		Type:     "mammoth",
 	}
