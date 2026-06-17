@@ -26,9 +26,19 @@ func (m *ChannelManager) Registry() *ChannelRegistry {
 
 // Resolve picks a channel for a provider.
 // If requested is empty, returns the first active channel in order.
-// If requested is set, returns that channel only if it exists and is active.
+// If requested is a full name like "mammouth-0", resolves via FullName.
+// Otherwise treats requested as the channel name within the provider.
 func (m *ChannelManager) Resolve(provider, requested string) (*Channel, error) {
 	if requested != "" {
+		// Try full name first, e.g. "mammouth-0"
+		if ch, ok := m.registry.GetChannelByFullName(requested); ok {
+			if !ch.Active {
+				return nil, NewError(ErrChannelInactive, "requested channel is inactive", nil,
+					map[string]interface{}{"channel": requested})
+			}
+			return ch, nil
+		}
+
 		ch, ok := m.registry.GetChannel(provider, requested)
 		if !ok {
 			return nil, NewError(ErrConfigNotFound, "channel not found", nil,

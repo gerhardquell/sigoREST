@@ -31,10 +31,16 @@ func TestChannelManager_Resolve(t *testing.T) {
 		t.Fatal("expected error for inactive channel 0")
 	}
 
+	// Full name resolution
+	ch, err = mgr.Resolve("mammouth", "mammouth-default")
+	if err != nil || ch.Name != "default" {
+		t.Fatalf("expected default channel via full name, got %+v, err=%v", ch, err)
+	}
+
 	reg.SetActive("mammouth", "0", true)
-	ch, err = mgr.Resolve("mammouth", "0")
+	ch, err = mgr.Resolve("mammouth", "mammouth-0")
 	if err != nil || ch.Name != "0" {
-		t.Fatalf("expected channel 0, got %+v, err=%v", ch, err)
+		t.Fatalf("expected channel 0 via full name, got %+v, err=%v", ch, err)
 	}
 }
 
