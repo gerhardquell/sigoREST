@@ -356,6 +356,7 @@ type ChatRequest struct {
 	Timeout      int           `json:"timeout"`       // sigoREST-Erweiterung
 	Retries      int           `json:"retries"`       // sigoREST-Erweiterung
 	SystemPrompt string        `json:"system_prompt"` // per-Request Override
+	Channel      string        `json:"channel"`       // optionaler Kanal, z.B. "mammouth-0"
 }
 
 type ChatChoice struct {
@@ -385,6 +386,32 @@ type ErrorResponse struct {
 		Type    string `json:"type"`
 		Code    string `json:"code"`
 	} `json:"error"`
+}
+
+// providerForModel returns the provider name for a given model ID/shortcode.
+func (s *Server) providerForModel(modelID string) string {
+	s.mu.RLock()
+	info, ok := s.models[modelID]
+	s.mu.RUnlock()
+	if ok {
+		switch {
+		case strings.Contains(info.Endpoint, "mammouth"):
+			return "mammouth"
+		case strings.Contains(info.Endpoint, "moonshot"):
+			return "moonshot"
+		case strings.Contains(info.Endpoint, "z.ai"):
+			return "zai"
+		}
+	}
+	// Fallback by model name heuristics
+	switch {
+	case strings.Contains(modelID, "kimi"):
+		return "moonshot"
+	case strings.Contains(modelID, "GLM"):
+		return "zai"
+	default:
+		return "mammouth"
+	}
 }
 
 // **********************************************************************
@@ -428,12 +455,26 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	globalSystemPrompt := s.systemPrompt
 	s.mu.RUnlock()
 
-	// Config aus ModelInfo aufbauen
-	cfg := &sigoengine.ProviderConfig{
-		Endpoint: modelInfo.Endpoint,
-		Model:    modelID,
-		APIKey:   os.Getenv(modelInfo.APIKey),
+	// Provider und Kanal bestimmen
+	provider := s.providerForModel(modelID)
+	ch, err := s.channelManager.Resolve(provider, req.Channel)
+	if err != nil {
+		apiErr := sigoengine.ClassifyError(err)
+		httpStatus := http.StatusBadRequest
+		if apiErr.Type == sigoengine.ErrConfigNotFound {
+			httpStatus = http.StatusNotFound
+		}
+		writeError(w, err.Error(), apiErr.Type, httpStatus)
+		return
 	}
+
+	// Config mit Kanal-Key aufbauen
+	cfg, err := sigoengine.LoadConfigWithChannel(modelID, ch)
+	if err != nil {
+		writeError(w, err.Error(), "config_error", http.StatusInternalServerError)
+		return
+	}
+	cfg.Endpoint = modelInfo.Endpoint
 
 	// Provider-Ping: scheitert → sofortiger Fehler, kein API-Call
 	if err := sigoengine.PingProvider(modelInfo.Endpoint); err != nil {
@@ -467,15 +508,25 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Messages aufbauen: Memory zuerst, dann user-Messages
 	messages := []map[string]interface{}{}
 
-	// Memory-Block als System-Message (immer zuerst)
+	// Globaler Memory-Block als System-Message (immer zuerst)
 	if mem.Content != "" {
 		memMsg := map[string]interface{}{
 			"role":    "system",
 			"content": mem.Content,
 		}
-		// Anthropic prompt caching (nur für Anthropic-Modelle via anthropic-Typ)
-		// Für Mammoth/OpenAI: automatisches Caching bei >=1024 Tokens
 		messages = append(messages, memMsg)
+	}
+
+	// Kanal-spezifischer Memory-Block
+	channelMemPath := sigoengine.ChannelMemoryPath(s.baseDir, ch.Provider, ch.Name)
+	if data, err := os.ReadFile(channelMemPath); err == nil {
+		var channelMem sigoengine.MemoryBlock
+		if err := json.Unmarshal(data, &channelMem); err == nil && channelMem.Content != "" {
+			messages = append(messages, map[string]interface{}{
+				"role":    "system",
+				"content": channelMem.Content,
+			})
+		}
 	}
 
 	// System-Prompt: Request-Wert hat Vorrang vor globalem Default
@@ -492,7 +543,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Session-History laden und einbauen
 	if req.SessionID != "" {
-		session := sigoengine.LoadSession(req.SessionID, req.Model)
+		session := sigoengine.LoadSessionForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
 		for _, m := range session.History {
 			messages = append(messages, map[string]interface{}{
 				"role": m.Role, "content": m.Content,
@@ -543,20 +594,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		apiRequest["max_completion_tokens"] = req.MaxTokens
 	}
 
-	// Circuit Breaker pro Modell mit Enhanced Configuration
-	s.mu.Lock()
-	if _, exists := s.breakers[req.Model]; !exists {
-		config := &sigoengine.CircuitBreakerConfig{
-			Threshold:   5,                // 5 Fehler in 60s
-			Window:      60 * time.Second, // 60s Zeitfenster
-			Cooldown:    10 * time.Second, // 10s Cooldown (statt 5min)
-			HalfOpenMax: 3,                // Max 3 Requests in Half-Open
-		}
-		s.breakers[req.Model] = sigoengine.NewEnhancedCircuitBreaker(config)
-	}
-	breaker := s.breakers[req.Model]
-	s.mu.Unlock()
-
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(req.Timeout)*time.Second)
 	defer cancel()
 
@@ -571,36 +608,91 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	inputText := inputBuilder.String()
 
+	// Liste der zu probierenden Kanäle aufbauen (initial + Failover)
+	channelsToTry := []*sigoengine.Channel{ch}
+	current := ch
+	for {
+		next, ok := s.channelManager.NextActive(provider, current)
+		if !ok {
+			break
+		}
+		channelsToTry = append(channelsToTry, next)
+		current = next
+	}
+
 	// Exponential Backoff Retry
 	retryConfig := sigoengine.DefaultRetryConfig()
 	retryConfig.MaxRetries = req.Retries
 
-	err := sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
-		return breaker.Do(func() error {
-			text, u, fr, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
-			if e != nil {
-				return e
+	var lastErr error
+	for _, currentCh := range channelsToTry {
+		cfg, err := sigoengine.LoadConfigWithChannel(modelID, currentCh)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		cfg.Endpoint = modelInfo.Endpoint
+
+		// Circuit Breaker pro Kanal (Key: model#channel)
+		cbKey := fmt.Sprintf("%s#%s", req.Model, currentCh.FullName())
+		s.mu.Lock()
+		if _, exists := s.breakers[cbKey]; !exists {
+			config := &sigoengine.CircuitBreakerConfig{
+				Threshold:   5,
+				Window:      60 * time.Second,
+				Cooldown:    10 * time.Second,
+				HalfOpenMax: 3,
 			}
-			responseText = text
-			responseUsage = u
-			responseFinishReason = fr
-			if responseUsage == nil {
-				responseUsage = sigoengine.EstimateUsage(inputText, responseText)
-				sigoengine.LogDebug("Usage geschatzt", map[string]interface{}{
-					"model":         req.Model,
-					"input_tokens":  responseUsage.InputTokens,
-					"output_tokens": responseUsage.OutputTokens,
-				})
-			}
-			return nil
+			s.breakers[cbKey] = sigoengine.NewEnhancedCircuitBreaker(config)
+		}
+		breaker := s.breakers[cbKey]
+		s.mu.Unlock()
+
+		lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
+			return breaker.Do(func() error {
+				text, u, fr, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
+				if e != nil {
+					apiErr := sigoengine.ClassifyError(e)
+					if apiErr.Type == sigoengine.ErrAuthFailed {
+						currentCh.Active = false
+					}
+					return e
+				}
+				responseText = text
+				responseUsage = u
+				responseFinishReason = fr
+				if responseUsage == nil {
+					responseUsage = sigoengine.EstimateUsage(inputText, responseText)
+					sigoengine.LogDebug("Usage geschatzt", map[string]interface{}{
+						"model":         req.Model,
+						"input_tokens":  responseUsage.InputTokens,
+						"output_tokens": responseUsage.OutputTokens,
+					})
+				}
+				return nil
+			})
 		})
-	})
 
-	if err != nil {
+		if lastErr == nil {
+			break
+		}
+
+		apiErr := sigoengine.ClassifyError(lastErr)
+		if apiErr.Type == sigoengine.ErrClientError {
+			break
+		}
+		sigoengine.LogWarn("Failing over to next channel", map[string]interface{}{
+			"model":      req.Model,
+			"channel":    currentCh.FullName(),
+			"error_type": apiErr.Type,
+		})
+	}
+
+	if lastErr != nil {
 		// Fehler klassifizieren für typisierte Antwort
-		apiErr := sigoengine.ClassifyError(err)
+		apiErr := sigoengine.ClassifyError(lastErr)
 
-		sigoengine.LogError("API-Call fehlgeschlagen", err, map[string]interface{}{
+		sigoengine.LogError("API-Call fehlgeschlagen", lastErr, map[string]interface{}{
 			"model":       req.Model,
 			"error_type":  apiErr.Type,
 			"status_code": apiErr.StatusCode,
@@ -641,10 +733,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Session speichern
 	if req.SessionID != "" && userPrompt != "" {
-		session := sigoengine.LoadSession(req.SessionID, req.Model)
+		session := sigoengine.LoadSessionForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
 		session.AddMessage("user", userPrompt)
 		session.AddMessage("assistant", responseText)
-		session.Save(req.SessionID, req.Model)
+		session.SaveForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
 	}
 
 	// Usage akkumulieren
