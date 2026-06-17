@@ -7,7 +7,7 @@
 
 ## Zusammenfassung
 
-sigoREST erhält die Möglichkeit, pro Provider mehrere API-Key-Kanäle zu verwalten. Jeder Kanal hat seinen eigenen API-Key, optional eigenen Memory, eigene Sessions und einen eigenen Circuit Breaker. Kanäle sind manuell aktivierbar, werden standardmäßig aber nur bei Bedarf (Failover) oder durch einen Health-Monitor zugeschaltet.
+sigoREST erhält die Möglichkeit, pro Provider mehrere API-Key-Kanäle zu verwalten. Jeder Kanal hat seinen eigenen API-Key, eigenen Memory, eigene Sessions und einen eigenen Circuit Breaker. Kanäle sind manuell aktivierbar, werden standardmäßig aber nur bei Bedarf (Failover) oder durch einen Health-Monitor zugeschaltet.
 
 Die OpenAI-kompatible API (`/v1/chat/completions`) bleibt unverändert erreichbar; Kanalwahl erfolgt optional über ein neues Feld im Request-Body. Der Versions-String wird zentral in `sigoengine` verwaltet und ist über CLI (`-version`) und REST (`GET /api/version`) abrufbar.
 
@@ -165,10 +165,11 @@ type ChannelRegistry struct {
    - Wenn leer → erster aktiver Kanal.
 5. `ProviderConfig` mit Kanal-API-Key bauen.
 6. Circuit Breaker pro Kanal (Key: `model#channel`).
-7. `RetryWithBackoff` auf aktuellem Kanal ausführen.
-8. Bei retryablem Fehler: nächster aktiver Kanal, Retry zurücksetzen.
-9. Session speichern unter `/var/sigoREST/sessions/<provider>/<channel>/<model>-<session>.json`.
-10. Memory pro Kanal laden aus `/var/sigoREST/channels/<provider>/<channel>/memory.json`.
+7. Memory pro Kanal laden aus `/var/sigoREST/channels/<provider>/<channel>/memory.json`.
+8. Session-History laden aus `/var/sigoREST/sessions/<provider>/<channel>/<model>-<session>.json`.
+9. `RetryWithBackoff` auf aktuellem Kanal ausführen.
+10. Bei retryablem Fehler: nächster aktiver Kanal, Retry zurücksetzen (Schritte 5-9 wiederholen).
+11. Session speichern unter `/var/sigoREST/sessions/<provider>/<channel>/<model>-<session>.json`.
 
 ### Failover-Regeln
 
