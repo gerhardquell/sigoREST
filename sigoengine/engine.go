@@ -1089,9 +1089,9 @@ func ProbeProvider(ctx context.Context, cfg *ProviderConfig) ProviderHealth {
 
 		switch apiErr.Type {
 		case ErrAuthFailed:
-			// Auth-Fehler bedeutet der Server ist erreichbar
-			health.Status = "available"
-			health.Error = "auth_check_required"
+			// Auth-Fehler bedeutet der Server ist erreichbar, aber der Key ist ungültig
+			health.Status = "auth_failed"
+			health.Error = err.Error()
 		case ErrRateLimit:
 			health.Status = "available"
 			health.Error = "rate_limited"

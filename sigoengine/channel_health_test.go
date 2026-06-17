@@ -2,6 +2,8 @@ package sigoengine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -73,5 +75,35 @@ func TestStartHealthMonitor_Interval(t *testing.T) {
 	ch0, _ := registry.GetChannel("testprovider", "0")
 	if !ch0.Active {
 		t.Fatal("expected reserve channel to be auto-enabled by monitor")
+	}
+}
+
+func TestCheckChannel_AuthFailureDeactivatesChannel(t *testing.T) {
+	dir := t.TempDir()
+	registry := NewChannelRegistry(filepath.Join(dir, "channels.json"))
+
+	registry.AddChannel(&Channel{
+		Provider: "mammouth",
+		Name:     "default",
+		APIKey:   "invalid-key",
+		Active:   true,
+		Order:    0,
+		Healthy:  true,
+	})
+
+	manager := NewChannelManager(registry)
+	runHealthChecks(manager)
+
+	ch, _ := registry.GetChannel("mammouth", "default")
+	if ch.Active {
+		t.Fatal("expected channel to be deactivated after auth failure")
+	}
+	if ch.Healthy {
+		t.Fatal("expected channel to be unhealthy after auth failure")
+	}
+
+	// Persistenz prüfen
+	if _, err := os.Stat(filepath.Join(dir, "channels.json")); err != nil {
+		t.Fatalf("expected channels.json to be written: %v", err)
 	}
 }

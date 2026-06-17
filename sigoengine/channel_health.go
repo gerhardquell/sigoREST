@@ -126,8 +126,7 @@ func checkChannel(ch *Channel, registry *ChannelRegistry) {
 	ch.LastError = health.Error
 	ch.ConsecutiveErrors++
 
-	apiErr := ClassifyError(NewError(health.Error, health.Error, nil, nil))
-	if apiErr.Type == ErrAuthFailed {
+	if health.Status == "auth_failed" {
 		LogWarn("Disabling channel due to auth failure", map[string]interface{}{
 			"provider": ch.Provider,
 			"channel":  ch.Name,
