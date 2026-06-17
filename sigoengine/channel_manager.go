@@ -32,6 +32,10 @@ func (m *ChannelManager) Resolve(provider, requested string) (*Channel, error) {
 	if requested != "" {
 		// Try full name first, e.g. "mammouth-0"
 		if ch, ok := m.registry.GetChannelByFullName(requested); ok {
+			if ch.Provider != provider {
+				return nil, NewError(ErrConfigNotFound, "channel provider does not match model provider", nil,
+					map[string]interface{}{"channel_provider": ch.Provider, "model_provider": provider})
+			}
 			if !ch.Active {
 				return nil, NewError(ErrChannelInactive, "requested channel is inactive", nil,
 					map[string]interface{}{"channel": requested})

@@ -80,6 +80,7 @@ type Server struct {
 	systemPrompt   string                                        // globaler Default-Prompt (leer = kein Prompt)
 	usageMu        sync.RWMutex
 	usage          map[string]*ModelUsageStats // model-id → Stats
+	usageByChannel map[string]*ModelUsageStats // model-id#provider-channel → Stats
 	channelManager *sigoengine.ChannelManager
 	baseDir        string
 }
@@ -87,14 +88,16 @@ type Server struct {
 // **********************************************************************
 // Server-Konfiguration (Flags)
 var (
-	httpPort    = flag.Int("http-port", 9080, "HTTP-Port für localhost")
-	httpsPort   = flag.Int("https-port", 9443, "HTTPS-Port für privates Netz")
-	certFile    = flag.String("cert", "./certs/server.crt", "TLS-Zertifikat")
-	keyFile     = flag.String("key", "./certs/server.key", "TLS-Schlüssel")
-	logLevel    = flag.String("v", "info", "Log-Level: debug|info|warn|error")
-	quiet       = flag.Bool("q", false, "Quiet Mode")
-	jsonLogs    = flag.Bool("j", false, "JSON-Logs")
-	showVersion = flag.Bool("version", false, "Version anzeigen")
+	httpPort              = flag.Int("http-port", 9080, "HTTP-Port für localhost")
+	httpsPort             = flag.Int("https-port", 9443, "HTTPS-Port für privates Netz")
+	certFile              = flag.String("cert", "./certs/server.crt", "TLS-Zertifikat")
+	keyFile               = flag.String("key", "./certs/server.key", "TLS-Schlüssel")
+	logLevel              = flag.String("v", "info", "Log-Level: debug|info|warn|error")
+	quiet                 = flag.Bool("q", false, "Quiet Mode")
+	jsonLogs              = flag.Bool("j", false, "JSON-Logs")
+	showVersion           = flag.Bool("version", false, "Version anzeigen")
+	dataDir               = flag.String("data-dir", "/var/sigoREST", "Basisverzeichnis für Kanäle, Sessions, Memory, System-Prompts")
+	channelHealthInterval = flag.Duration("channel-health-interval", 30*time.Second, "Intervall für Kanal-Health-Checks")
 )
 
 // **********************************************************************
@@ -309,14 +312,15 @@ func loadModelsFromProviders() map[string]ModelInfo {
 // **********************************************************************
 // Memory-Block laden
 
-// loadMemory liest memory.json (Disk hat Vorrang vor embedded)
-func loadMemory() sigoengine.MemoryBlock {
+// loadMemory liest memory.json aus dem Datenverzeichnis (Disk hat Vorrang vor embedded)
+func loadMemory(dataDir string) sigoengine.MemoryBlock {
 	var jsonContent []byte
 
-	data, err := os.ReadFile("./memory.json")
+	path := filepath.Join(dataDir, "memory.json")
+	data, err := os.ReadFile(path)
 	if err == nil {
 		jsonContent = data
-		sigoengine.LogInfo("memory.json von Disk geladen")
+		sigoengine.LogInfo("memory.json von Disk geladen", map[string]interface{}{"path": path})
 	} else {
 		jsonContent = []byte(defaultMemoryJSON)
 		sigoengine.LogInfo("memory.json (embedded default) verwendet")
@@ -329,10 +333,11 @@ func loadMemory() sigoengine.MemoryBlock {
 	return mem
 }
 
-// loadSystemPrompt liest system-prompt.txt von Disk (optional).
+// loadSystemPrompt liest system-prompt.txt aus dem Datenverzeichnis (optional).
 // Gibt leeren String zurück wenn Datei nicht existiert.
-func loadSystemPrompt() string {
-	data, err := os.ReadFile("./system-prompt.txt")
+func loadSystemPrompt(dataDir string) string {
+	path := filepath.Join(dataDir, "system-prompt.txt")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -529,8 +534,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// System-Prompt: Request-Wert hat Vorrang vor globalem Default
+	// System-Prompt: Request-Wert hat Vorrang vor Kanal-System-Prompt, Kanal vor globalem Default
 	effectiveSystemPrompt := globalSystemPrompt
+	channelPromptPath := sigoengine.ChannelSystemPromptPath(s.baseDir, ch.Provider, ch.Name)
+	if data, err := os.ReadFile(channelPromptPath); err == nil {
+		if prompt := strings.TrimSpace(string(data)); prompt != "" {
+			effectiveSystemPrompt = prompt
+		}
+	}
 	if req.SystemPrompt != "" {
 		effectiveSystemPrompt = req.SystemPrompt
 	}
@@ -654,7 +665,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				if e != nil {
 					apiErr := sigoengine.ClassifyError(e)
 					if apiErr.Type == sigoengine.ErrAuthFailed {
-						currentCh.Active = false
+						if err := s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false); err != nil {
+							sigoengine.LogWarn("Konnte Kanal nach Auth-Fehler nicht deaktivieren", map[string]interface{}{
+								"provider": currentCh.Provider,
+								"channel":  currentCh.Name,
+								"error":    err.Error(),
+							})
+						}
 					}
 					return e
 				}
@@ -757,6 +774,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		stats.OutputTokens += int64(responseUsage.OutputTokens)
 		stats.TotalTokens += int64(responseUsage.TotalTokens)
 		stats.Requests++
+
+		channelKey := fmt.Sprintf("%s#%s", modelID, ch.FullName())
+		channelStats, ok := s.usageByChannel[channelKey]
+		if !ok {
+			channelStats = &ModelUsageStats{}
+			s.usageByChannel[channelKey] = channelStats
+		}
+		channelStats.InputTokens += int64(responseUsage.InputTokens)
+		channelStats.OutputTokens += int64(responseUsage.OutputTokens)
+		channelStats.TotalTokens += int64(responseUsage.TotalTokens)
+		channelStats.Requests++
 		s.usageMu.Unlock()
 	}
 
@@ -1139,7 +1167,7 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 
 		// Auf Disk persistieren
 		data, _ := json.MarshalIndent(mem, "", "  ")
-		if err := os.WriteFile("./memory.json", data, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(s.baseDir, "memory.json"), data, 0644); err != nil {
 			sigoengine.LogWarn("Memory auf Disk nicht gespeichert", map[string]interface{}{"error": err.Error()})
 		}
 
@@ -1174,7 +1202,7 @@ func (s *Server) handleSystemPrompt(w http.ResponseWriter, r *http.Request) {
 		s.systemPrompt = body.SystemPrompt
 		s.mu.Unlock()
 
-		if err := os.WriteFile("./system-prompt.txt", []byte(body.SystemPrompt), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(s.baseDir, "system-prompt.txt"), []byte(body.SystemPrompt), 0644); err != nil {
 			sigoengine.LogWarn("system-prompt.txt speichern fehlgeschlagen", map[string]interface{}{"error": err.Error()})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1213,6 +1241,7 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 					"session_id":  "Optional: Session-ID für Gesprächsverlauf",
 					"timeout":     "Optional: Timeout in Sekunden (default: 180)",
 					"retries":     "Optional: Anzahl Retries (default: 3)",
+					"channel":     "Optional: Kanal-FullName z.B. 'mammouth-0'",
 				},
 				"example": `curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -1249,6 +1278,66 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
   -d '{"content":"Antworte immer auf Deutsch.","cache":true}'`,
 			},
 			{
+				"path":        "/api/version",
+				"method":      "GET",
+				"description": "Versions-String von sigoREST",
+				"example":     "curl -s http://localhost:9080/api/version",
+			},
+			{
+				"path":        "/api/channels",
+				"method":      "GET",
+				"description": "Liste aller Kanäle mit Status",
+				"example":     "curl -s http://localhost:9080/api/channels",
+			},
+			{
+				"path":        "/api/channels/:provider/:name",
+				"method":      "GET",
+				"description": "Detail-Status eines Kanals",
+				"example":     "curl -s http://localhost:9080/api/channels/mammouth/0",
+			},
+			{
+				"path":        "/api/channels/:provider/:name/enable",
+				"method":      "POST",
+				"description": "Kanal aktivieren",
+				"example":     "curl -s -X POST http://localhost:9080/api/channels/mammouth/0/enable",
+			},
+			{
+				"path":        "/api/channels/:provider/:name/disable",
+				"method":      "POST",
+				"description": "Kanal deaktivieren",
+				"example":     "curl -s -X POST http://localhost:9080/api/channels/mammouth/0/disable",
+			},
+			{
+				"path":        "/api/channels/:provider/:name/memory",
+				"method":      "GET/PUT",
+				"description": "Kanal-spezifischen Memory lesen/schreiben",
+				"example": `curl -s -X PUT http://localhost:9080/api/channels/mammouth/default/memory \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Kanal-spezifischer Kontext","cache":false}'`,
+			},
+			{
+				"path":        "/api/channels/:provider/:name/system-prompt",
+				"method":      "GET/PUT",
+				"description": "Kanal-spezifischen System-Prompt lesen/schreiben",
+				"example": `curl -s -X PUT http://localhost:9080/api/channels/mammouth/default/system-prompt \
+  -H "Content-Type: application/json" \
+  -d '{"system_prompt":"Antworte immer auf Deutsch."}'`,
+			},
+			{
+				"path":        "/api/usage",
+				"method":      "GET",
+				"description": "Token-Verbrauch pro Modell und pro Kanal",
+				"example":     "curl -s http://localhost:9080/api/usage | jq",
+			},
+			{
+				"path":        "/api/system-prompt",
+				"method":      "GET/PUT",
+				"description": "Globalen System-Prompt lesen/schreiben",
+				"example": `curl -s -X PUT http://localhost:9080/api/system-prompt \
+  -H "Content-Type: application/json" \
+  -d '{"system_prompt":"Antworte immer auf Deutsch."}'`,
+			},
+			{
 				"path":        "/api/help",
 				"method":      "GET",
 				"description": "Diese Hilfe-Dokumentation",
@@ -1256,12 +1345,15 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"features": map[string]string{
-			"circuit_breaker":    "Automatische Fehlerisolation nach 5 Fehlern in 60s",
-			"retry":              "Exponential Backoff: 500ms → 1s → 2s → max 5s",
-			"session_management": "JSON-basierte Sessions in .sessions/",
-			"ip_access_control":  "HTTP: localhost, HTTPS: privates Netz",
-			"ollama_discovery":   "Auto-Discovery lokaler Ollama-Modelle",
-			"memory_block":       "Globaler System-Prompt für alle Anfragen",
+			"circuit_breaker":      "Automatische Fehlerisolation nach 5 Fehlern in 60s",
+			"retry":                "Exponential Backoff: 500ms → 1s → 2s → max 5s",
+			"session_management":   "JSON-basierte Sessions pro Kanal",
+			"ip_access_control":    "HTTP: localhost, HTTPS: privates Netz",
+			"ollama_discovery":     "Auto-Discovery lokaler Ollama-Modelle",
+			"memory_block":         "Globaler + kanal-spezifischer Memory",
+			"system_prompt":        "Globaler + kanal-spezifischer + per-Request System-Prompt",
+			"multi_channel":        "Mehrere API-Key-Kanäle pro Provider mit Failover",
+			"channel_health_monitor": "Automatische Health-Checks und Reserve-Zuschaltung",
 		},
 		"error_types": map[string]string{
 			"rate_limit":   "HTTP 429 - Zu viele Anfragen, Retry-After Header gesetzt",
@@ -1296,11 +1388,16 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		cp := *v
 		snapshot[k] = &cp
 	}
+	snapshotByChannel := make(map[string]*ModelUsageStats, len(s.usageByChannel))
+	for k, v := range s.usageByChannel {
+		cp := *v
+		snapshotByChannel[k] = &cp
+	}
 	s.usageMu.RUnlock()
 
-	// Gesamt-Summe berechnen
+	// Gesamt-Summe über alle Kanäle berechnen
 	var total ModelUsageStats
-	for _, v := range snapshot {
+	for _, v := range snapshotByChannel {
 		total.InputTokens += v.InputTokens
 		total.OutputTokens += v.OutputTokens
 		total.TotalTokens += v.TotalTokens
@@ -1309,8 +1406,9 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"by_model": snapshot,
-		"total":    total,
+		"by_model":   snapshot,
+		"by_channel": snapshotByChannel,
+		"total":      total,
 	})
 }
 
@@ -1337,6 +1435,12 @@ func jsonEscapeString(s string) string {
 func main() {
 	flag.Parse()
 
+	// Env-Datei im Startverzeichnis laden (optional, Fallback auf echte Env)
+	if err := sigoengine.LoadEnvFile("./env"); err != nil {
+		fmt.Fprintf(os.Stderr, "Fehler beim Laden der env-Datei: %v\n", err)
+		os.Exit(1)
+	}
+
 	if *showVersion {
 		fmt.Printf("sigoREST Version %s\n", sigoengine.Version)
 		os.Exit(0)
@@ -1359,18 +1463,19 @@ func main() {
 
 	// Server-State initialisieren
 	srv := &Server{
-		models:       loadModelsFromProviders(),
-		memory:       loadMemory(),
-		breakers:     make(map[string]*sigoengine.EnhancedCircuitBreaker),
-		systemPrompt: loadSystemPrompt(),
-		usage:        make(map[string]*ModelUsageStats),
-		baseDir:      "/var/sigoREST",
+		models:         loadModelsFromProviders(),
+		memory:         loadMemory(*dataDir),
+		breakers:       make(map[string]*sigoengine.EnhancedCircuitBreaker),
+		systemPrompt:   loadSystemPrompt(*dataDir),
+		usage:          make(map[string]*ModelUsageStats),
+		usageByChannel: make(map[string]*ModelUsageStats),
+		baseDir:        *dataDir,
 	}
 
-	// /var/sigoREST anlegen falls nicht vorhanden
+	// Datenverzeichnis anlegen falls nicht vorhanden
 	if _, err := os.Stat(srv.baseDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(srv.baseDir, 0755); err != nil {
-			sigoengine.LogWarn("Konnte /var/sigoREST nicht anlegen", map[string]interface{}{"error": err.Error()})
+			sigoengine.LogWarn("Konnte Datenverzeichnis nicht anlegen", map[string]interface{}{"error": err.Error(), "path": srv.baseDir})
 		}
 	}
 
@@ -1383,8 +1488,7 @@ func main() {
 	srv.channelManager = sigoengine.NewChannelManager(registry)
 
 	// Health-Monitor starten
-	channelHealthInterval := 30 * time.Second
-	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, channelHealthInterval)
+	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, *channelHealthInterval)
 
 	// Ollama Auto-Discovery
 	ollamaEndpoint := "http://localhost:11434"

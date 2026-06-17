@@ -79,3 +79,22 @@ func TestChannelManager_NextActive(t *testing.T) {
 		t.Fatal("expected no next channel after 1")
 	}
 }
+
+func TestChannelManager_ResolveProviderMismatch(t *testing.T) {
+	os.Setenv("MAMMOUTH_API_KEY", "default-key")
+	os.Setenv("MOONSHOT_API_KEY", "moon-key")
+	defer func() {
+		os.Unsetenv("MAMMOUTH_API_KEY")
+		os.Unsetenv("MOONSHOT_API_KEY")
+	}()
+
+	reg := NewChannelRegistry("")
+	reg.DiscoverFromEnv()
+	mgr := NewChannelManager(reg)
+
+	// mammouth-default requested for moonshot provider should fail
+	_, err := mgr.Resolve("moonshot", "mammouth-default")
+	if err == nil {
+		t.Fatal("expected provider mismatch error")
+	}
+}

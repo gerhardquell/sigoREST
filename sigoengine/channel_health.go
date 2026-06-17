@@ -48,7 +48,7 @@ func runHealthChecks(manager *ChannelManager) {
 				continue
 			}
 			hasActive = true
-			checkChannel(ch)
+			checkChannel(ch, registry)
 			if ch.Healthy {
 				allActiveUnhealthy = false
 			}
@@ -64,7 +64,7 @@ func runHealthChecks(manager *ChannelManager) {
 	}
 }
 
-func checkChannel(ch *Channel) {
+func checkChannel(ch *Channel, registry *ChannelRegistry) {
 	// Look up the first model for the provider to get the endpoint.
 	// This is a best-effort probe; if no model is known, skip the check.
 	var endpoint string
@@ -116,6 +116,12 @@ func checkChannel(ch *Channel) {
 			"provider": ch.Provider,
 			"channel":  ch.Name,
 		})
-		ch.Active = false
+		if err := registry.SetActive(ch.Provider, ch.Name, false); err != nil {
+			LogWarn("Could not persist channel deactivation", map[string]interface{}{
+				"provider": ch.Provider,
+				"channel":  ch.Name,
+				"error":    err.Error(),
+			})
+		}
 	}
 }

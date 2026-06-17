@@ -6,10 +6,6 @@
 
 package sigoengine
 
-import (
-	"os"
-)
-
 // LoadConfigWithChannel lädt die Konfiguration für ein Modell unter
 // Verwendung eines bestimmten Kanals. Wenn ch nil ist, wird der Default-
 // Kanal verwendet (Rückwärtskompatibilität).
@@ -37,7 +33,7 @@ func LoadConfigWithChannel(model string, ch *Channel) (*ProviderConfig, error) {
 			map[string]interface{}{"requested": model, "resolved": fullName})
 	}
 
-	apiKey := os.Getenv(m.APIKeyEnv)
+	apiKey := GetEnvWithFile(m.APIKeyEnv)
 	if ch != nil && ch.APIKey != "" {
 		apiKey = ch.APIKey
 	}

@@ -148,7 +148,7 @@ var knownProviders = []struct {
 func (r *ChannelRegistry) DiscoverFromEnv() {
 	for _, p := range knownProviders {
 		// Default channel
-		if key := os.Getenv(p.EnvVar); key != "" {
+		if key := GetEnvWithFile(p.EnvVar); key != "" {
 			r.AddChannel(&Channel{
 				Provider: p.Provider,
 				Name:     "default",
@@ -162,7 +162,7 @@ func (r *ChannelRegistry) DiscoverFromEnv() {
 		// Indexed channels
 		for i := 0; ; i++ {
 			envName := fmt.Sprintf("%s_%d", p.EnvVar, i)
-			key := os.Getenv(envName)
+			key := GetEnvWithFile(envName)
 			if key == "" {
 				break
 			}

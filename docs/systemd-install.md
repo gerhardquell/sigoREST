@@ -11,19 +11,12 @@ go build -o sigoREST/sigoREST ./sigoREST/
 sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
 ```
 
-## 2. Bibliotheksverzeichnis anlegen
+## 2. Bibliotheks-/Datenverzeichnis anlegen
 
 ```bash
 sudo mkdir -p /usr/local/slib/sigoREST/certs
-sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
-```
-
-## 2a. /var/sigoREST Datenverzeichnis anlegen
-
-Der Server speichert pro-Kanal Sessions, Memory und System-Prompts unter `/var/sigoREST`:
-
-```bash
 sudo mkdir -p /var/sigoREST
+sudo cp sigoREST/memory.json /var/sigoREST/
 sudo chown -R sigorest:sigorest /var/sigoREST
 sudo chmod 0755 /var/sigoREST
 ```
@@ -33,6 +26,8 @@ Falls der `sigorest`-Benutzer noch nicht existiert:
 ```bash
 sudo useradd -r -s /usr/sbin/nologin sigorest
 ```
+
+`sigoREST` lädt `memory.json` und `system-prompt.txt` aus dem via `-data-dir` konfigurierten Verzeichnis (default `/var/sigoREST`). Kanal-Sessions, Kanal-Memory und `channels.json` landen ebenfalls dort.
 
 ## 3. Environment-Datei anlegen
 
@@ -79,6 +74,8 @@ EnvironmentFile=/usr/local/slib/sigoREST/env
 ExecStart=/usr/local/sbin/sigoREST \
     -http-port 9080 \
     -https-port 9443 \
+    -data-dir /var/sigoREST \
+    -channel-health-interval 30s \
     -cert /usr/local/slib/sigoREST/certs/server.crt \
     -key  /usr/local/slib/sigoREST/certs/server.key \
     -v info
@@ -129,10 +126,8 @@ curl -X PUT http://localhost:9080/api/memory \
 
 ## Hinweise
 
-- Das TLS-Zertifikat wird beim ersten Start automatisch in `/usr/local/slib/sigoREST/certs/` generiert
-- `memory.json` kann ohne Neuinstallation angepasst werden
+- `memory.json` liegt in `/var/sigoREST/` und kann dort angepasst werden
   (Änderungen erst nach `systemctl restart sigoREST` aktiv)
-- Die `env`-Datei enthält API-Keys → `chmod 600` ist Pflicht
 - Zusätzliche Kanäle (z.B. `MAMMOUTH_API_KEY_0`) sind standardmäßig inaktiv.
   Aktivierung via REST: `curl -X POST http://localhost:9080/api/channels/mammouth/0/enable`
-- Kanal-Status wird unter `/var/sigoREST/channels.json` persistiert
+- Der Health-Monitor prüft alle aktiven Kanäle im `-channel-health-interval` und schaltet bei Bedarf Reservekanäle zu

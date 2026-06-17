@@ -61,6 +61,12 @@ func main() {
 	flag.BoolVar(showVersion, "version", false, "Version anzeigen")
 	flag.Parse()
 
+	// Env-Datei im Startverzeichnis laden (optional, Fallback auf echte Env)
+	if err := sigoengine.LoadEnvFile("./env"); err != nil {
+		fmt.Fprintf(os.Stderr, "Fehler beim Laden der env-Datei: %v\n", err)
+		os.Exit(1)
+	}
+
 	if *showVersion {
 		fmt.Printf("sigoE %s\n", sigoengine.Version)
 		os.Exit(0)
