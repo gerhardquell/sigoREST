@@ -29,6 +29,27 @@ func LoadConfigWithChannel(model string, ch *Channel) (*ProviderConfig, error) {
 	fullName := ResolveModelName(model)
 	m, exists := GetModelByID(fullName)
 	if !exists {
+		// Fallback für dynamisch geladene Modelle (z.B. glm-4.5 via Z.ai-Fetch),
+		// die nicht in der statischen Registry (CSV/CoreModels) stehen. Config wird
+		// aus dem Kanal gebaut; der Endpoint wird vom Aufrufer (main.go) über das
+		// dynamische modelInfo gesetzt. Der Modellname wird 1:1 durchgereicht, damit
+		// Casing und Form zum Provider passen (Z.ai erwartet z.B. lowercase "glm-4.5").
+		// Type "mammoth" = OpenAI-kompatibles Bearer-Auth; alle aktuellen Provider
+		// (mammouth/moonshot/zai) proxen im OpenAI-Style, siehe CallAPI.
+		if ch != nil && ch.APIKey != "" {
+			LogDebug("Registry-Miss, nutze Channel-Only Config", map[string]interface{}{
+				"model":    model,
+				"provider": ch.Provider,
+				"channel":  ch.FullName(),
+			})
+			return &ProviderConfig{
+				Endpoint: "", // main.go überschreibt mit modelInfo.Endpoint
+				Model:    model,
+				APIKey:   ch.APIKey,
+				Type:     "mammoth",
+				Headers:  make(map[string]string),
+			}, nil
+		}
 		return nil, NewError(ErrConfigNotFound, "Model not found in registry", nil,
 			map[string]interface{}{"requested": model, "resolved": fullName})
 	}

@@ -566,3 +566,122 @@ Schutz: systemd `network-online.target` (nicht `network.target`!) **plus**
    bleibt schlanker Proxy ohne Tool-Call-Repair).
 
 **Status:** ✅ Erfolgreich abgeschlossen
+
+---
+
+## Session 2026-06-18: glm-500 — Registry-Gap nach Multi-Channel-Migration
+
+**Zielsetzung:**
+Sigils Übersetzer (Block Translator, s. [[project_sigil_block_translator]]) warf
+beim Zugriff auf sigoREST `HTTP 500 Internal Server Error`. Konkret: Aufruf des
+Modells `glm-4.5` schlug fehl. Ziel: Root cause finden, Fix implementieren,
+Daemon neustarten, verifizieren.
+
+**Diagnose-Verlauf:**
+
+1. **Symptom eingegrenzt.** Server lief (PID 1737, systemd `sigorest`),
+   `/api/health` OK, 89 Modelle. Also kein Server-Ausfall, sondern client- oder
+   routing-seitig. Gerhard klärte: Fehler liegt **server-seitig** am
+   Provider-Call, nicht am Sigil-Client.
+
+2. **Syslog gelesen.** Server loggte wiederholt:
+   `HTTP request failed endpoint=https://api.z.ai/api/paas/v4/chat/completions
+   model=GLM-4.5 error=Post "...": context deadline exceeded`. Also: Server
+   empfing Request, resolved zu Z.ai, aber Upstream-Call timeoutte → 500.
+
+3. **Z.ai erreichbar.** Direkter `curl` auf den Z.ai-Endpoint: HTTP 401 in
+   0,87 s (Auth nötig, aber Endpoint da), DNS + Ping (267 ms IPv6) ok. Damit
+   kein DNS-/Netz-Ausfall — der echte Chat-Call scheitert.
+
+4. **Reproduziert.** `curl` auf `localhost:9080/v1/chat/completions` mit
+   `model: "glm-4.5"` (lowercase, wie `/v1/models` es liefert):
+   `CONFIG_NOT_FOUND: Model not found in registry`, `config_error`, HTTP 500.
+   Damit war der 500 reproduzierbar **ohne** Upstream-Beteiligung.
+
+5. **Zwei-Map-Disconnect gefunden.** sigoREST hält **zwei getrennte**
+   Modell-Maps vor:
+   - `s.models` (Server, dynamisch via `loadModelsFromProviders()` von
+     Mammoth/Moonshot/Z.ai) → speist `/v1/models`, liefert lowercase `glm-4.5`.
+   - `modelsByID` (typisierte Registry in `models_registry.go`, 1× via
+     `registryOnce` aus CSV → `CoreModels`) → `LoadConfigWithChannel` nutzt
+     `GetModelByID`.
+   `/v1/models` listet also glm, aber `LoadConfigWithChannel` findet es nicht.
+
+6. **CSV verschwunden.** Bei der Multi-Channel-Migration (17. Jun) wurde
+   `/usr/local/slib/sigoREST/models.csv` nach `olds/` verschoben
+   (`channels.json` übernahm die Key-Verwaltung). Seitdem fällt die Registry auf
+   `CoreModels` zurück — die keine glm-Einträge enthält → `GetModelByID` fail.
+
+7. **Case-Mismatch als zweiter Teil.** Die alte CSV hatte `GLM-4.5` (groß),
+   `/v1/models` liefert `glm-4.5` (klein). `GetModelByID` ist case-sensitiv.
+   Selbst mit restoreter CSV hätte Sigils kleingeschriebener Modellname nicht
+   gematcht. Zudem erwartet Z.ai lowercase — uppercase `cfg.Model="GLM-4.5"`
+   war vermutlich Mit-Ursache des früheren `context deadline exceeded`.
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Channel-Only Fallback in `LoadConfigWithChannel`** | Bei Registry-Miss + vorhandenem Channel-Key Config aus Channel (APIKey) + Modellname (1:1-Passthrough) + Type `mammoth` bauen. Endpoint setzt main.go via `modelInfo.Endpoint`. Macht Server wirklich CSV-frei — wie CLAUDE.md verspricht. |
+| **Modellname 1:1 durchreichen** | Casing/Form stammt vom dynamischen Fetch und passt zum Provider (Z.ai will lowercase). Kein Registry-Lookup, der case-sensitiv fehlschlagen kann. |
+| **Type `"mammoth"` hartcodiert** | Entspricht bestehendem Verhalten (Original L49 setzte für alle Registry-Modelle `Type:"mammoth"`). Alle aktuellen Provider (mammouth/moonshot/zai) proxen OpenAI-Style (Bearer), siehe `CallAPI`. |
+| **Nicht gewählt: CSV restore + case-insensitiv** | Schneller Fix, aber CSV bliebe Wartungslast und widerspräche der Multi-Channel-Migration. |
+| **Nicht gewählt: Registry aus dynamischem Fetch füllen** | Sauberer, aber größere Änderung (neue Export-Funktion, Thread-Safety, Casing-Konsistenz). Für später offen. |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoengine/loadconfig_channel.go` | Fallback-Zweig in `LoadConfigWithChannel`: wenn `GetModelByID` miss + `ch != nil && ch.APIKey != ""` → `ProviderConfig{Endpoint:"", Model:model, APIKey:ch.APIKey, Type:"mammoth"}`. Debug-Log `Registry-Miss, nutze Channel-Only Config`. Sonst unverändert (bestehende Registry-Modelle wie claude/gpt via CSV unberührt). |
+
+**Testing & Verifikation:**
+
+```bash
+# Build + Vet
+go vet ./sigoengine/     # clean
+go build -o sigoREST/sigoREST ./sigoREST/   # BUILD OK
+
+# Unit-Tests (Regression)
+go test ./sigoengine/    # ok sigorest/sigoengine 0.381s
+
+# Binary installieren + Daemon neustarten
+cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+sudo systemctl restart sigorest     # neue PID 318828
+
+# Live-Test: glm-4.5 (lowercase, wie /v1/models)
+curl -s http://localhost:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.5","messages":[{"role":"user","content":"sag nur OK"}],"timeout":60}'
+# → {"id":"chatcmpl-...","model":"glm-4.5","choices":[{"message":{"content":"OK."}}],"usage":{"total_tokens":38}}
+# real 0m1,222s  — kein 500 mehr, Z.ai antwortet korrekt.
+```
+
+**Bekannter Folgewert (nicht behoben):** Uppercase `GLM-4.5` liefert weiter
+HTTP 400 `model_not_found`, weil der `s.models`-Lookup in `main.go` (L442)
+case-sensitiv ist. Sigil zieht die Modellliste frisch aus `/v1/models`
+(lowercase), nach einem Modell-Refresh in den Übersetzer-Einstellungen also
+kein Problem. Optional nachträglich: `s.models`-Lookup case-insensitiv machen.
+
+**Erkenntnisse & Learnings:**
+
+1. **CLAUDE.md-Versprechen vs. Code-Realität.** "Server nutzt
+   [CSV/Registry] nicht" (CLAUDE.md L150) stimmte seit der Multi-Channel-
+   Migration nicht mehr — `LoadConfigWithChannel` fragt sehr wohl die
+   typisierte Registry. Doku hinkte Code hinterher. Fix erfüllt das Versprechen
+   erst wirklich.
+
+2. **Zwei Maps, eine Wahrheit.** `s.models` (dynamisch, für `/v1/models`) und
+   `modelsByID` (statisch, für Config) können divergieren. Ein Modell, das
+   gelistet aber nicht konfigurierbar ist, ist ein **Rezept für 500er**.
+   Künftige Modell-Quellen müssen beide Maps speisen — oder Config darf nicht
+   von der statischen Map abhängen (dieser Fix geht den zweiten Weg).
+
+3. **Casing ist Vertrag.** Provider-Modell-IDs sind lowercase (`glm-4.5`).
+   Modellnamen dürfen nicht beim Durchreichen "aufgehübscht" werden. Case-
+   sensitive Lookups an Provider-Grenzen sind Fail-Fallen.
+
+4. **Diagnose-Pfad zählt.** Syslog → Upstream erreichbar? → reproduzierbarer
+   Minimal-Call → Code-Path zurückverfolgt. Fünf Schritte, kein Raten.
+
+**Status:** ✅ Erfolgreich abgeschlossen (Build grün, Tests grün, Live-Call
+`glm-4.5` → `OK.` in 1,2 s). Commit ausstehend.
