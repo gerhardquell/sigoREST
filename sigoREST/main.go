@@ -393,10 +393,30 @@ type ErrorResponse struct {
 	} `json:"error"`
 }
 
+// lookupModel sucht case-insensitiv nach ID (Map-Key) oder Shortcode.
+// Aufrufer muss s.mu (RLock) halten. Liefert ModelInfo + kanonische ID.
+// Provider-Modell-IDs sind überwiegend lowercase; Sigil/CLI können aber
+// andere Casing mitschicken (z.B. "GLM-4.5"), die ansonsten am exakten
+// Map-Key-Lookup scheitern würden.
+func (s *Server) lookupModel(query string) (ModelInfo, string, bool) {
+	q := strings.ToLower(query)
+	for id, info := range s.models {
+		if strings.ToLower(id) == q {
+			return info, id, true
+		}
+	}
+	for _, info := range s.models {
+		if strings.ToLower(info.Shortcode) == q {
+			return info, info.ID, true
+		}
+	}
+	return ModelInfo{}, "", false
+}
+
 // providerForModel returns the provider name for a given model ID/shortcode.
 func (s *Server) providerForModel(modelID string) string {
 	s.mu.RLock()
-	info, ok := s.models[modelID]
+	info, _, ok := s.lookupModel(modelID)
 	s.mu.RUnlock()
 	if ok {
 		switch {
@@ -408,11 +428,12 @@ func (s *Server) providerForModel(modelID string) string {
 			return "zai"
 		}
 	}
-	// Fallback by model name heuristics
+	// Fallback by model name heuristics (case-insensitiv)
+	lower := strings.ToLower(modelID)
 	switch {
-	case strings.Contains(modelID, "kimi"):
+	case strings.Contains(lower, "kimi"):
 		return "moonshot"
-	case strings.Contains(modelID, "GLM"):
+	case strings.Contains(lower, "glm"):
 		return "zai"
 	default:
 		return "mammouth"
@@ -434,22 +455,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Modell-Validierung (ID oder Shortcode)
+	// Modell-Validierung (ID oder Shortcode, case-insensitiv)
 	modelID := req.Model
 
-	// Prüfe ob es ein Shortcode ist und resolven
+	// Case-insensitiv nach ID oder Shortcode suchen
 	s.mu.RLock()
-	modelInfo, exists := s.models[modelID]
-	if !exists {
-		// Versuche Shortcode zu resolven
-		for _, info := range s.models {
-			if info.Shortcode == modelID {
-				modelID = info.ID
-				modelInfo = info
-				exists = true
-				break
-			}
-		}
+	modelInfo, resolvedID, exists := s.lookupModel(modelID)
+	if exists {
+		modelID = resolvedID
 	}
 	if !exists {
 		s.mu.RUnlock()
