@@ -685,3 +685,84 @@ kein Problem. Optional nachträglich: `s.models`-Lookup case-insensitiv machen.
 
 **Status:** ✅ Erfolgreich abgeschlossen (Build grün, Tests grün, Live-Call
 `glm-4.5` → `OK.` in 1,2 s). Commit ausstehend.
+
+---
+
+## Session 2026-06-18 (Fortsetzung): Case-insensitiver Modell-Lookup
+
+**Zielsetzung:**
+Der vorherige Fix (Channel-Only Fallback) hatte den `config_error`-500 behoben,
+aber der `s.models`-Lookup in `main.go` blieb case-sensitiv. Uppercase
+`GLM-4.5` lieferte weiter HTTP 400 `model_not_found`, weil der Map-Key-Lookup
+streng auf lowercase `glm-4.5` matcht. Ziel: Lookup case-insensitiv machen,
+damit beliebige Casing aus Sigil/CLI nicht mehr scheitert.
+
+**Was erreicht wurde:**
+
+1. **Neue Helper `lookupModel` in `sigoREST/main.go`**
+   - Sucht case-insensitiv nach ID (Map-Key) **und** Shortcode
+   - Liefert `ModelInfo` + kanonische ID zurück (Aufrufer hält `s.mu` RLock)
+   - Zwei Phasen: erst ID-Match über alle Keys, dann Shortcode-Match
+
+2. **Beide Lookup-Sites umgestellt**
+   - `handleChatCompletions`: ersetzt direkten `s.models[modelID]`-Zugriff +
+     manuelle Shortcode-Schleife durch `lookupModel`
+   - `providerForModel`: nutzt ebenfalls `lookupModel`
+
+3. **Heuristic-Fallback case-insensitiv**
+   - `providerForModel`-Fallback (`kimi`→moonshot, `glm`→zai) auf
+     `strings.ToLower(modelID)` umgestellt — war vorher `Contains(modelID,"GLM")`
+     (case-sensitiv, hätte `glm` verfehlt)
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Helper statt Inline-Normalisierung** | Eine Stelle für Lookup-Logik, beide Sites profitieren. Vermeidet driften zwischen Chat-Handler und `providerForModel`. |
+| **Kanonische ID zurückgeben** | Downstream-Code (Circuit-Breaker-Key, Logging, API-Request) bekommt konsistente Form, unabhängig vom Input-Casing. |
+| **Aufrufer hält Lock, nicht Helper** | `handleChatCompletions` hält RLock ohnehin über mehrere Reads (memory, systemPrompt). Helper ohne eigene Lock-Logik = kein Deadlock-Risiko, klare Kontrakt. |
+| **Shortcode case-insensitiv mit** | Shortcodes wie `glm45` könnten ebenfalls variiert werden; gleiche Robustheit. |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoREST/main.go` | `lookupModel` Helper (case-insensitiv ID+Shortcode), `providerForModel` + `handleChatCompletions` darauf umgestellt, Heuristic-Fallback `strings.ToLower`. +30/-17. |
+
+**Testing & Verifikation:**
+
+```bash
+go vet ./sigoREST/       # clean
+go build ./sigoREST/     # BUILD OK
+go test ./sigoengine/    # ok (cached)
+
+# Binary tauschen (Daemon läuft → unlink + cp)
+rm -f /usr/local/sbin/sigoREST
+cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+sudo systemctl restart sigorest     # PID 385201
+
+# Drei Casing-Varianten, alle → "OK"
+curl ... -d '{"model":"glm-4.5",...}'   # lowercase → OK
+curl ... -d '{"model":"GLM-4.5",...}'   # UPPERCASE → OK (vorher 400)
+curl ... -d '{"model":"glm45",...}'     # shortcode → OK
+```
+
+**Erkenntnisse & Learnings:**
+
+1. **Lookup-Grenzen sind Vertrag-Grenzen.** Jede Map, die Eingaben von außen
+   (Client, CLI) entgegennimmt, sollte case-insensitiv matchen — Provider-
+   Modell-IDs sind lowercase, Clients senden aber oft anders. Case-sensitive
+   Lookups an Systemgrenzen sind Fail-Fallen (gleiche Lektion wie im
+   vorherigen Fix, diesmal an der `s.models`-Schicht).
+
+2. **`cp` über laufendes Binary scheitert (ETXTBSY).** Daemon hält Inode offen.
+   Workaround: `rm -f` (unlink) + `cp` — der laufende Prozess behält seinen
+   Inode, der neue Start holt sich die frische Datei. Sauberer als Service
+   stoppen vor dem Kopieren.
+
+3. **Zwei Fixes, eine Wurzel.** Beide 2026-06-18er Fixes drehen sich um
+   Casing/Quelle-Mismatch an Provider-Grenzen: Config-Lookup (Registry vs.
+   Channel) und Modell-Lookup (Map-Key vs. Input). Symptom war derselbe 500er,
+   Ursache lag in zwei verschiedenen Schichten.
+
+**Status:** ✅ Erfolgreich abgeschlossen und gepusht (Commit `7704998`).
