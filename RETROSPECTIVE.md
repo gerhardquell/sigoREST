@@ -766,3 +766,92 @@ curl ... -d '{"model":"glm45",...}'     # shortcode → OK
    Ursache lag in zwei verschiedenen Schichten.
 
 **Status:** ✅ Erfolgreich abgeschlossen und gepusht (Commit `7704998`).
+
+---
+
+## Session 2026-06-24: Multi-Channel-Bugfixes und Live-Verifikation
+
+**Zielsetzung:**
+Offene Bugs in der bestehenden Multi-Channel-Implementierung identifizieren, beheben, commiten, pushen und am laufenden Server verifizieren.
+
+**Was erreicht wurde:**
+
+1. **Inspektion der Kanal-Infrastruktur**
+   - `sigoengine/channel.go`, `channel_manager.go`, `channel_health.go`, `loadconfig_channel.go`, `session_memory.go`
+   - `sigoREST/main.go` Endpoints: `/api/channels`, `/api/channels/:provider/:name/enable|disable`, Kanal-Memory/System-Prompt
+   - Ergebnis: Feature ist weitgehend implementiert, aber drei konkrete Bugs gefunden.
+
+2. **Bugfix: Session + Usage nach Failover unter falschem Kanal** (`sigoREST/main.go`)
+   - Problem: Bei Kanal-Failover wurde Session und Usage unter dem ursprünglich gewählten Kanal `ch` gespeichert, nicht unter dem tatsächlich erfolgreichen Kanal.
+   - Lösung: Session einmal vor dem Failover-Loop laden, `successfulCh` tracken, Session und Usage unter diesem speichern.
+
+3. **Bugfix: Index-Lücken in `DiscoverFromEnv`** (`sigoengine/channel.go`)
+   - Problem: `MAMMOUTH_API_KEY_0` + `MAMMOUTH_API_KEY_2` ohne `_1` → `_2` wurde nie registriert.
+   - Lösung: Scan 0..99, jeder gesetzte Key wird registriert.
+   - Test `TestChannelRegistry_DiscoverFromEnv_Gaps` hinzugefügt.
+
+4. **Bugfix: Health-Monitor kannte Server-Modelle nicht** (`sigoengine/channel_health.go` + `sigoREST/main.go`)
+   - Problem: `checkChannel` nutzte `sigoengine.GetAllModels()` (CLI-Registry), nicht die vom Server dynamisch geladenen Modelle.
+   - Lösung: `SetChannelModelResolver` eingeführt; Server registriert Resolver auf `srv.models`.
+
+5. **Build, Test, Commit, Push**
+   - `go build ./...` und `go test ./...` grün.
+   - Commit `4fbe8b5` gepusht nach `origin main`.
+
+6. **Server gestartet und Chat-Completion getestet**
+   - `./sigoREST/sigoREST -v debug` läuft im Hintergrund.
+   - 89 Modelle geladen.
+   - `/api/health` → `status: ok`.
+   - Chat-Completion mit `gpt-5.2-chat` → `Hallo Gerhard! 👋`.
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Session vor Failover-Loop laden** | Verhindert, dass die erfolgreiche Antwort unter einem leeren/anderen Kanal-Session-File landet. Die geladene Historie wird vollständig unter dem erfolgreichen Kanal persistiert. |
+| **Scan statt Break bei `DiscoverFromEnv`** | Einfacher und robuster als komplizierte Gap-Erkennung. 100 Slots decken realistische Setups ab. |
+| **Server-Modell-Resolver statt Registry-Merge** | Health-Check bleibt im `sigoengine`-Package, Server injiziert seine Sicht auf die Modelle. Keine Vermischung von Server-State mit Shared-Package-Registry. |
+
+**Code-Änderungen:**
+
+| Datei | Änderung |
+|-------|----------|
+| `sigoREST/main.go` | `successfulCh` Tracking; Session-Load vor Loop; Usage-Key unter erfolgreichem Kanal; Server setzt `SetChannelModelResolver`. |
+| `sigoengine/channel.go` | `DiscoverFromEnv` scannt 0..99; Lücken werden übersprungen. |
+| `sigoengine/channel_health.go` | `SetChannelModelResolver` + Resolver-Nutzung in `checkChannel`. |
+| `sigoengine/channel_test.go` | `TestChannelRegistry_DiscoverFromEnv_Gaps` hinzugefügt. |
+| `RETROSPECTIVE.md` | Dieser Eintrag. |
+
+**Testing & Verifikation:**
+
+```bash
+# Build + Tests
+go build ./...
+go test ./...
+
+# Commit + Push
+git add sigoREST/main.go sigoengine/channel.go sigoengine/channel_health.go sigoengine/channel_test.go
+git commit -m "fix(channel): Bugs bei Multi-Channel-Failover behoben ..."
+git push origin main
+
+# Server starten
+./sigoREST/sigoREST -v debug
+
+# Health + Chat
+curl -s http://localhost:9080/api/health
+curl -s http://localhost:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.2-chat","messages":[{"role":"user","content":"Sag Hallo"}]}'
+```
+
+**Erkenntnisse & Learnings:**
+
+1. **Failover-State muss explizit getrackt werden.** Wer den erfolgreichen Kanal nicht merkt, speichert unter dem falschen Namen — ein klassischer Bug bei Retry/Failover-Logik.
+
+2. **Env-Variablen mit Indizes sind sparse.** Ein einfacher "break bei leer"-Scan verliert Kanäle. Feste Range mit `continue` ist robuster.
+
+3. **Health-Checks brauchen die gleiche Modell-Sicht wie der Produktiv-Code.** CLI-Registry ≠ Server-Registry. Ohne Resolver würde der Monitor mit veralteten oder fehlenden Endpoints arbeiten.
+
+4. **Subagent-Spawn schlug fehl** (`400 invalid thinking`), daher direkte Bearbeitung. Bei zukünftigen parallelen Aufgaben lohnt sich ein erneuter Versuch oder Delegation von reinen Lese/Review-Tasks.
+
+**Status:** ✅ Erfolgreich abgeschlossen, gepusht und live verifiziert.
