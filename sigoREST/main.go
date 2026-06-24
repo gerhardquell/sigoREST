@@ -565,9 +565,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Session-History laden und einbauen
+	// Session-History laden und einbauen (wird bei Erfolg unter dem tatsächlich
+	// genutzten Kanal gespeichert, damit Failover die Session nicht splittet).
+	var session *sigoengine.Session
 	if req.SessionID != "" {
-		session := sigoengine.LoadSessionForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
+		session = sigoengine.LoadSessionForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
 		for _, m := range session.History {
 			messages = append(messages, map[string]interface{}{
 				"role": m.Role, "content": m.Content,
@@ -624,6 +626,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var responseText string
 	var responseUsage *sigoengine.UsageData
 	var responseFinishReason string
+	var successfulCh *sigoengine.Channel
 
 	// Input-Text fur Fallback-Schatzung sammeln
 	var inputBuilder strings.Builder
@@ -704,6 +707,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if lastErr == nil {
+			successfulCh = currentCh
 			break
 		}
 
@@ -761,12 +765,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Session speichern
-	if req.SessionID != "" && userPrompt != "" {
-		session := sigoengine.LoadSessionForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
+	// Session speichern (unter dem Kanal, der tatsächlich geantwortet hat)
+	if req.SessionID != "" && userPrompt != "" && successfulCh != nil {
 		session.AddMessage("user", userPrompt)
 		session.AddMessage("assistant", responseText)
-		session.SaveForChannel(s.baseDir, ch.Provider, ch.Name, req.SessionID, req.Model)
+		session.SaveForChannel(s.baseDir, successfulCh.Provider, successfulCh.Name, req.SessionID, req.Model)
 	}
 
 	// Usage akkumulieren
@@ -788,7 +791,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		stats.TotalTokens += int64(responseUsage.TotalTokens)
 		stats.Requests++
 
-		channelKey := fmt.Sprintf("%s#%s", modelID, ch.FullName())
+		channelKey := fmt.Sprintf("%s#%s", modelID, successfulCh.FullName())
 		channelStats, ok := s.usageByChannel[channelKey]
 		if !ok {
 			channelStats = &ModelUsageStats{}
@@ -1499,6 +1502,30 @@ func main() {
 		sigoengine.LogWarn("Kanal-Status konnte nicht geladen werden", map[string]interface{}{"error": err.Error()})
 	}
 	srv.channelManager = sigoengine.NewChannelManager(registry)
+
+	// Health-Monitor soll die vom Server geladenen Modelle verwenden, nicht
+	// nur die CLI-Registry in sigoengine.
+	sigoengine.SetChannelModelResolver(func(provider string) (string, string) {
+		srv.mu.RLock()
+		defer srv.mu.RUnlock()
+		for _, info := range srv.models {
+			switch provider {
+			case "mammouth":
+				if strings.Contains(info.Endpoint, "mammouth") {
+					return info.Endpoint, info.ID
+				}
+			case "moonshot":
+				if strings.Contains(info.Endpoint, "moonshot") {
+					return info.Endpoint, info.ID
+				}
+			case "zai":
+				if strings.Contains(info.Endpoint, "z.ai") {
+					return info.Endpoint, info.ID
+				}
+			}
+		}
+		return "", ""
+	})
 
 	// Health-Monitor starten
 	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, *channelHealthInterval)

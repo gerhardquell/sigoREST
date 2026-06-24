@@ -159,12 +159,14 @@ func (r *ChannelRegistry) DiscoverFromEnv() {
 			})
 		}
 
-		// Indexed channels
-		for i := 0; ; i++ {
+		// Indexed channels: scan a reasonable range and register every key that
+		// is set, so gaps like _0 + _2 without _1 still work.
+		const maxIndexedChannels = 100
+		for i := 0; i < maxIndexedChannels; i++ {
 			envName := fmt.Sprintf("%s_%d", p.EnvVar, i)
 			key := GetEnvWithFile(envName)
 			if key == "" {
-				break
+				continue
 			}
 			name := fmt.Sprintf("%d", i)
 			r.AddChannel(&Channel{

@@ -12,6 +12,16 @@ import (
 	"time"
 )
 
+// channelModelResolver kann vom Server gesetzt werden, damit der Health-Monitor
+// die tatsächlich geladenen Modelle (nicht nur die CLI-Registry) sieht.
+var channelModelResolver func(provider string) (endpoint, modelID string)
+
+// SetChannelModelResolver erlaubt dem Server, eine Funktion zu registrieren,
+// die pro Provider ein Endpoint/Modell-Paar für Health-Checks liefert.
+func SetChannelModelResolver(fn func(provider string) (endpoint, modelID string)) {
+	channelModelResolver = fn
+}
+
 // StartHealthMonitor starts a goroutine that periodically health-checks all
 // active channels. It activates inactive reserve channels when all active
 // channels for a provider become unhealthy. It disables channels on auth errors.
@@ -66,22 +76,29 @@ func runHealthChecks(manager *ChannelManager) {
 
 func checkChannel(ch *Channel, registry *ChannelRegistry) {
 	// Look up the first model for the provider to get the endpoint.
-	// This is a best-effort probe; if no model is known, skip the check.
+	// Server can inject its own model map; otherwise fall back to the CLI
+	// registry and known static endpoints.
 	var endpoint, modelID string
-	for _, m := range GetAllModels() {
-		switch {
-		case ch.Provider == "mammouth" && strings.Contains(m.Endpoint, "mammouth"):
-			endpoint = m.Endpoint
-			modelID = m.ID
-		case ch.Provider == "moonshot" && strings.Contains(m.Endpoint, "moonshot"):
-			endpoint = m.Endpoint
-			modelID = m.ID
-		case ch.Provider == "zai" && strings.Contains(m.Endpoint, "z.ai"):
-			endpoint = m.Endpoint
-			modelID = m.ID
-		}
-		if endpoint != "" {
-			break
+	if channelModelResolver != nil {
+		endpoint, modelID = channelModelResolver(ch.Provider)
+	}
+
+	if endpoint == "" || modelID == "" {
+		for _, m := range GetAllModels() {
+			switch {
+			case ch.Provider == "mammouth" && strings.Contains(m.Endpoint, "mammouth"):
+				endpoint = m.Endpoint
+				modelID = m.ID
+			case ch.Provider == "moonshot" && strings.Contains(m.Endpoint, "moonshot"):
+				endpoint = m.Endpoint
+				modelID = m.ID
+			case ch.Provider == "zai" && strings.Contains(m.Endpoint, "z.ai"):
+				endpoint = m.Endpoint
+				modelID = m.ID
+			}
+			if endpoint != "" {
+				break
+			}
 		}
 	}
 
