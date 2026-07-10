@@ -1,113 +1,76 @@
-# sigoclient - Experimenteller Common Lisp Client
+# sigoclient v2 — Modernisierter Common Lisp Client für sigoREST
 
-⚠️ **EXPERIMENTELL** - Dieser Client ist minimalistisch und für Tests gedacht.
-
-## Überblick
-
-Ein einfacher Common Lisp Client für sigoREST. Benutzt:
-- `drakma` für HTTP Requests
-- `yason` für JSON Parsing
-- `babel` für Zeichenkodierung
+**Aktualisiert Juli 2026** — Jetzt mit Unterstützung aktueller Modelle und **echtem Streaming**.
 
 ## Installation
 
 ```bash
-# Benötigte Pakete installieren (Debian/Ubuntu)
+# Benötigte Quicklisp-Pakete (einmalig)
+(ql:quickload '(:drakma :yason :babel :flexi-streams))
+
+# Oder via apt (Debian/Ubuntu)
 sudo apt-get install cl-drakma cl-yason cl-babel
 ```
 
-## Verwendung
+## Schnellstart
 
 ```lisp
-;; Lade den Client
-(load "sigoclient.lisp")
+(load "/u/go-projekte/sigoREST/clients/clisp-exp/sigoclient.lisp")
 (use-package :sigoclient)
 
-;; Optional: URL anpassen
-(setf *base-url* "http://127.0.0.1:9080")
+;; Einfacher Chat (kompatibel zur alten API)
+(chat "cl5-s" "Hallo Gerhard! Wie geht's?")
 
-;; Ping Test
-(ping)  ; => T oder NIL
+;; Mit Session (Kontext bleibt erhalten)
+(chat "cl5-s" "Wie heiße ich?" :session-id "gerhard-test")
 
-;; Health Check
-(health)  ; => ((:STATUS . "ok") (:AVAILABLE--MODELS . 39) ...)
-
-;; Einfacher Chat
-(chat "kimi" "Hallo!")
-; => "Hallo! Wie kann ich dir helfen?"
-
-;; Mit System-Prompt
-(chat "kimi" "Erkläre Go"
-      :system-prompt "Du bist ein Go-Experte.")
-
-;; Mit Session
-(chat "kimi" "Mein Name ist Gerhard"
-      :session-id "test-session")
-
-;; Nächste Nachricht mit gleicher Session
-(chat "kimi" "Wie heiße ich?"
-      :session-id "test-session")
-; => "Du hast gesagt, dein Name ist Gerhard."
-
-;; Modelle auflisten
-(list-models)  ; => Array von Modell-Informationen
-
-;; Memory verwalten
-(set-memory "Antworte immer auf Deutsch.")
-(get-memory)  ; => ((:CONTENT . "Antworte...") (:CACHE . T))
+;; Streaming (echtes SSE)
+(let ((stream (chat-stream "cl5-s" "Schreibe ein Haiku über Common Lisp.")))
+  (loop for chunk = (funcall stream)
+        while chunk
+        when (stringp chunk)
+          do (format t "~A" chunk)
+        when (eq chunk :done)
+          do (terpri) (return)))
 ```
 
-## Beispiel ausführen
+## Neue Features (v2)
 
-```bash
-cd /u/go-projekte/sigoREST/clients/clisp-exp/examples
-sbcl --load basic.lisp
-```
+- **Aktuelle Modelle**: `cl5-s`, `cl48-o`, `kimi-k2.7`, `ollama-*` etc.
+- **Echtes Streaming**: `chat-stream` gibt einen Iterator zurück, der SSE-Events parst
+- Bessere Fehlerbehandlung und Logging
+- Saubere Trennung zwischen synchronem `chat` und asynchronem Streaming
+- Vollständig kompatibel mit dem neuen sigoREST-Server (inkl. Memory, Channels, Circuit-Breaker-Status)
 
 ## API
 
-### Globale Variable
+### Kernfunktionen
 
-- `*base-url*` - Basis-URL des Servers (default: "http://127.0.0.1:9080")
+- `(ping)` → `T` / `NIL`
+- `(health)` → ALIST mit Status und Modellanzahl
+- `(list-models)` → Liste aller Modelle
+- `(chat model message &key system-prompt session-id temperature max-tokens)` → String-Antwort
+- `(chat-stream model message &key ...)` → Closure/Iterator für Streaming
+- `(get-memory)` / `(set-memory content &optional cache)`
 
-### Funktionen
+### Streaming-Beispiel (idiomatisch)
 
-| Funktion | Parameter | Beschreibung |
-|----------|-----------|--------------|
-| `ping` | - | Prüft Server-Verfügbarkeit |
-| `health` | - | Gibt Health-Status zurück |
-| `list-models` | - | Listet alle Modelle auf |
-| `chat` | model message &key system-prompt session-id temperature max-tokens | Sendet Chat-Anfrage |
-| `get-memory` | - | Liest globalen Memory-Block |
-| `set-memory` | content &optional cache | Setzt globalen Memory-Block |
-
-### Chat Keywords
-
-- `:system-prompt` - System-Kontext
-- `:session-id` - Session für Konversationskontinuität
-- `:temperature` - Temperatur (0.0-2.0)
-- `:max-tokens` - Maximale Tokens
+```lisp
+(let ((stream (chat-stream "cl5-s" "Erkläre Quantencomputing in einem Haiku.")))
+  (loop for token = (funcall stream)
+        until (eq token :done)
+        when (stringp token)
+          do (format t "~A" token)))
+```
 
 ## Hinweise
 
-⚠️ Dieser Client ist **experimentell**:
-- Keine komplexe Fehlerbehandlung
-- Keine Timeouts pro Request
-- Einfache API ohne Strukturen
-- Gut für Prototyping und Tests
-
-Für Produktiv-Einsatz empfehlen wir den **Python**, **Go** oder **JavaScript** Client.
-
-## Unterschied zum vollständigen Client
-
-| Feature | exp. CLISP | Andere Clients |
-|---------|-----------|----------------|
-| Strukturen | ❌ Keine | ✅ Ja |
-| Error Handling | Minimal | Vollständig |
-| Timeout pro Request | ❌ Nein | ✅ Ja |
-| Methoden-Chaining | ❌ Nein | ✅ Ja |
-| Production-Ready | ⚠️ Experimentell | ✅ Ja |
-
----
+- Der Client ist weiterhin **experimentell**, aber deutlich robuster als v1.
+- Streaming verwendet echte SSE-Parsing (keine reine Simulation mehr).
+- Für Produktion empfehlen wir weiterhin den Python- oder Go-Client.
+- `quicklisp` wird empfohlen für einfachere Abhängigkeitsverwaltung.
 
 **Lisp forever!** 🧙‍♂️
+```
+
+**Siehe auch:** `RETROSPECTIVE.md` für detaillierte Entwicklungsgeschichte dieser Modernisierung.

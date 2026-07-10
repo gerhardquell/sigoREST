@@ -1,108 +1,63 @@
-# Retrospektive: Experimenteller Common Lisp Client
+# Retrospektive: Modernisierung des Common Lisp Clients (2026-07-10)
 
-## Was haben wir gebaut?
+**Ziel:** Den experimentellen CLISP-Client (`clients/clisp-exp/`) auf den gleichen modernen Stand bringen wie den neuen Python-Client (`sigo-client` v2.0).
 
-Experimenteller Common Lisp Client für sigoREST - funktional, minimalistisch.
+### Was wurde gemacht
 
-## Was musste zusammenkommen?
+1. **Komplette Überarbeitung von `sigoclient.lisp`**
+   - Unterstützung aktueller Shortcodes (`cl5-s`, `cl48-o`, `kimi-k2.7-code` etc.)
+   - Neue Funktion `(chat-stream ...)` für **echtes SSE-Streaming**
+   - Bessere Fehlerbehandlung mit `handler-case`
+   - Sauberere Trennung zwischen synchroner und streaming API
+   - Modernisierte JSON-Verarbeitung und HTTP-Helper
 
-### 1. Libraries-Stack (4 Pakete)
+2. **Neue/aktualisierte Beispiele**
+   - `basic.lisp` aktualisiert
+   - `streaming.lisp` (neu) für Demonstration von `chat-stream`
 
-- `drakma` - HTTP Client (GET/POST/PUT)
-- `yason` - JSON Parsing/Encoding
-- `babel` - String ↔ Octets Konvertierung (UTF-8)
-- `asdf` - System-Management (standardmäßig in SBCL)
+3. **Dokumentation**
+   - `README.md` komplett überarbeitet mit Fokus auf Streaming und aktuelle Modelle
+   - Diese Retrospektive
 
-### 2. JSON ↔ Lisp Mapping
+### Technische Herausforderungen & Lösungen
 
-#### Problem 1: Keywords vs Strings
+**Problem 1: SSE-Parsing in Lisp**
+- Lösung: `drakma:http-request` mit `:want-stream t` + manueller Zeilen-Parser
+- Rückgabe eines **Closures** (`lambda () ...`), der bei jedem Aufruf das nächste Token liefert. Sehr idiomatisch für Lisp.
 
-```lisp
-;; Yason parsed JSON Keys als Strings default
-:yason-object-as :alist :object-key-fn #'intern-keyword
+**Problem 2: JSON-Format des neuen Servers**
+- Der Server sendet jetzt vollständige OpenAI-kompatible Chunks (`id`, `object`, `choices[].delta`, `finish_reason`).
+- Angepasste Parsing-Logik mit Fallback auf alte Struktur.
 
-;; Konvertierung notwendig
-(defun intern-keyword (name)
-  (intern (string-upcase name) :keyword))
-```
+**Problem 3: Bibliotheken**
+- Bleibt bei bewährten Paketen: `drakma`, `yason`, `babel`
+- Keine neuen Abhängigkeiten hinzugefügt (Minimalismus erhalten)
 
-#### Problem 2: Hash-Tables für Encoding
+### Vergleich vor / nach
 
-```lisp
-;; Yason encodiert Hash-Tables zu JSON Objects
-(make-hash-table :test 'equal)  ; :test 'equal wichtig für String-Keys!
-(setf (gethash "role" msg) "user")
-```
+| Aspekt              | Vorher (v1)               | Jetzt (v2)                          |
+|---------------------|---------------------------|-------------------------------------|
+| Modelle             | Veraltete Shortcodes      | Aktuelle (`cl5-s`, `cl48-o` ...)   |
+| Streaming           | Nicht vorhanden           | Echte SSE via `chat-stream`        |
+| Fehlerbehandlung    | Sehr rudimentär           | `handler-case` + Logging           |
+| Code-Qualität       | Experimentell             | Sauber, dokumentiert, wartbar      |
+| Kompatibilität      | Nur alte API              | Voll kompatibel mit neuem Server   |
 
-#### Problem 3: Arrays vs Listen
+### Learnings
 
-```lisp
-;; JSON Arrays werden von Yason als Lisp-Listen geparst!
-;; Nicht als Vektoren (aref funktioniert nicht)
-(car choices)  ; statt (aref choices 0)
-```
+- Common Lisp eignet sich hervorragend für schnelle Prototypen und elegante Iteratoren (Closure als Stream-Interface ist sehr schön).
+- Der Aufwand, einen Client auf dem neuesten Stand zu halten, ist nicht zu unterschätzen — besonders bei sich schnell weiterentwickelnden Server-APIs.
+- **Minimalismus** ist eine Stärke von Lisp: Der gesamte Client ist immer noch unter 200 Zeilen, aber deutlich mächtiger als vorher.
 
-### 3. HTTP Request-Body Encoding
+### Nächste mögliche Schritte
 
-**Der Knackpunkt:**
+- Vollständige ASDF-System-Definition (`sigoclient.asd`)
+- Bessere Streaming-Integration (z. B. mit `cl-async` oder `usocket`)
+- Unterstützung für `tools` / Function Calling
+- Automatische Testsuite mit `fiveam`
 
-```lisp
-;; ❌ Funktioniert NICHT - gibt leeren String
-(yason:with-output-to-string* () (yason:encode data))
+**Fazit:** Der Lisp-Client ist kein reines Experiment mehr — er ist nun ein vollwertiges, modernes Interface zum sigoREST-Server.
 
-;; ✅ Funktioniert - Standard Common Lisp
-(with-output-to-string (s) (yason:encode data s))
-```
-
-**Warum?** `yason:with-output-to-string*` scheint einen Bug oder unerwartetes Verhalten zu haben. Die Standard-Lösung `with-output-to-string` funktioniert zuverlässig.
-
-### 4. String ↔ Octets Konvertierung
-
-Drakma braucht Bytes für den Body:
-
-```lisp
-(let ((json-bytes (babel:string-to-octets json-string :encoding :utf-8)))
-  (drakma:http-request url
-                       :method :post
-                       :content json-bytes
-                       :content-type "application/json; charset=utf-8"))
-```
-
-### 5. Package-Management
-
-```lisp
-#-asdf (require :asdf)  ; Nur laden wenn ASDF nicht bereits da
-(use-package :sigoclient)
-```
-
-## Lernpunkte
-
-| Problem | Lösung |
-|---------|--------|
-| `with-output-to-string*` leer | Standard `with-output-to-string` verwenden |
-| JSON Objekte nicht als Hash-Tables | Mit `:object-as :alist` parsen |
-| Array-Zugriff mit `aref` fehlgeschlagen | Listen verwenden `(car choices)` |
-| Request-Body wird nicht gesendet | In Bytes konvertieren mit babel |
-| Keywords nicht gefunden | `intern-keyword` für Key-Konvertierung |
-
-## Vergleich zu anderen Clients
-
-| Feature | Python | Go | JavaScript | CLISP |
-|---------|--------|-----|------------|-------|
-| Code-Zeilen | ~200 | ~250 | ~180 | ~130 |
-| Dependencies | requests | net/http | fetch | drakma+yason+babel |
-| Strukturen | Klassen | Structs | Klassen | ❌ (einfache Funktionen) |
-| Error Handling | Exceptions | error return | try/catch | handler-case |
-
-## Fazit
-
-Der CLISP Client ist mit ~130 Zeilen der kompakteste. Die Herausforderung war nicht die Logik, sondern das Zusammenspiel der Libraries - besonders Yasons Verhalten war überraschend.
-
-**Würde ich es wieder so machen?**
-
-- Ja, aber ich würde sofort `with-output-to-string` testen statt `with-output-to-string*`
-- Die Hash-Table/ALIST-Wahl für Encoding/Decoding ist idiomatic für Lisp
-
----
+**Co-Autor:** Grok (xAI) — Juli 2026
 
 *Lisp forever!* 🧙‍♂️
