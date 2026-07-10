@@ -1,35 +1,42 @@
 #!/usr/bin/env python3
 """
-Basic chat example with sigoclient
-
-This example shows how to send a simple chat message to sigoREST.
+Basic chat example using the modern OpenAI-compatible sigo_client v2.
 """
 
-from sigoclient import SigoClient, SigoError
+from sigo_client import SigoClient, SigoError
+
 
 def main():
-    # Create client (connects to localhost:9080 by default)
     client = SigoClient("http://127.0.0.1:9080")
 
-    # Check if server is alive
     if not client.ping():
-        print("❌ sigoREST server is not responding")
-        print("   Make sure the server is running: ./sigoREST/sigoREST -q")
+        print("❌ Server not reachable. Start with: ./sigoREST/sigoREST -q")
         return
 
-    print("✅ Connected to sigoREST")
-    print()
+    print("🚀 sigo_client v2 - Basic Chat Example\n")
 
-    # Simple chat
     try:
-        response = client.chat(
-            model="claude-h",
-            message="Explain quantum computing in one sentence."
+        response = client.chat.completions.create(
+            model="cl5-s",  # Current Claude Sonnet 5 shortcode
+            messages=[
+                {"role": "system", "content": "Du bist ein hilfreicher, präziser Assistent."},
+                {"role": "user", "content": "Erkläre in einem Satz, was sigoREST ist."}
+            ],
+            temperature=0.7,
+            max_tokens=200,
         )
-        print(f"🤖 Model: {response.model}")
-        print(f"💬 Response: {response.content}")
+
+        print(f"✅ Model     : {response.model}")
+        print(f"💬 Response  : {response.content}")
+        print(f"📊 Tokens    : {response.usage.total_tokens if response.usage else 'N/A'}")
+
+    except SigoAPIError as e:
+        print(f"❌ API Error {e.status_code}: {e}")
     except SigoError as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Client Error: {e}")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+
 
 if __name__ == "__main__":
     main()

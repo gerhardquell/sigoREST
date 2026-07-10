@@ -1,0 +1,51 @@
+[project]
+name = "sigo-client"
+version = "2.0.0"
+description = "Modern Python client for sigoREST - OpenAI-compatible AI gateway with sync/async support"
+authors = [{ name = "Gerhard Quell", email = "gquell@skequell.de" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.28.0",
+    "pydantic>=2.0.0",
+    "typing-extensions>=4.0.0",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/gquell/sigoREST"
+Documentation = "https://github.com/gquell/sigoREST/blob/main/clients/python/README.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "ruff>=0.6.0", "mypy>=1.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["sigo_client*"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sigo_client"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

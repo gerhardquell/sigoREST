@@ -40,6 +40,88 @@ import (
 	"sigorest/sigoengine"
 )
 
+// writeSSEEvent schreibt einen OpenAI-kompatiblen SSE-Event
+func writeSSEEvent(w http.ResponseWriter, eventType string, data interface{}) {
+	w.Write([]byte("event: " + eventType + "\n"))
+	if data != nil {
+		jsonData, _ := json.Marshal(data)
+		w.Write([]byte("data: " + string(jsonData) + "\n"))
+	} else {
+		w.Write([]byte("data: [DONE]\n"))
+	}
+	w.Write([]byte("\n"))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// writeStreamingResponse sendet die Antwort als Server-Sent Events (echtes Streaming)
+func (s *Server) writeStreamingResponse(w http.ResponseWriter, model string, content string, finishReason string, usage *ChatUsage) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // nginx nicht puffern
+
+	// Erstes Chunk mit Role (OpenAI-Format)
+	writeSSEEvent(w, "message_start", map[string]interface{}{
+		"id":    "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		"object": "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model": model,
+		"choices": []interface{}{map[string]interface{}{
+			"delta": map[string]string{"role": "assistant"},
+			"index": 0,
+		}},
+	})
+
+	// Content in Delta-Chunks senden (wortweise für bessere UX)
+	words := strings.Fields(content)
+	for i, word := range words {
+		delta := map[string]interface{}{
+			"delta": map[string]string{
+				"content": word + " ",
+			},
+			"index": 0,
+		}
+		writeSSEEvent(w, "message_delta", map[string]interface{}{
+			"id":      "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   model,
+			"choices": []interface{}{delta},
+		})
+		// kleine Verzögerung für realistisches Streaming-Gefühl
+		if i%3 == 0 {
+			time.Sleep(8 * time.Millisecond)
+		}
+	}
+
+	// Abschluss-Chunk
+	writeSSEEvent(w, "message_stop", map[string]interface{}{
+		"id":            "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		"object":        "chat.completion.chunk",
+		"created":       time.Now().Unix(),
+		"model":         model,
+		"choices": []interface{}{map[string]interface{}{
+			"delta":        map[string]interface{}{},
+			"index":        0,
+			"finish_reason": finishReason,
+		}},
+	})
+
+	// Usage-Event
+	if usage != nil {
+		writeSSEEvent(w, "usage", map[string]interface{}{
+			"prompt_tokens":     usage.PromptTokens,
+			"completion_tokens": usage.CompletionTokens,
+			"total_tokens":      usage.TotalTokens,
+		})
+	}
+
+	// Finale DONE-Nachricht
+	writeSSEEvent(w, "done", nil)
+}
+
 // **********************************************************************
 // Embedded Default-Dateien
 
@@ -362,6 +444,7 @@ type ChatRequest struct {
 	Retries      int           `json:"retries"`       // sigoREST-Erweiterung
 	SystemPrompt string        `json:"system_prompt"` // per-Request Override
 	Channel      string        `json:"channel"`       // optionaler Kanal, z.B. "mammouth-0"
+	Stream       bool          `json:"stream"`        // OpenAI streaming flag (new)
 }
 
 type ChatChoice struct {
@@ -472,6 +555,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	mem := s.memory
 	globalSystemPrompt := s.systemPrompt
 	s.mu.RUnlock()
+
+	// Streaming-Modus erkennen (OpenAI-Standard)
+	isStreaming := req.Stream
 
 	// Provider und Kanal bestimmen
 	provider := s.providerForModel(modelID)
@@ -804,7 +890,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.usageMu.Unlock()
 	}
 
-	// OpenAI-kompatible Antwort
+	// OpenAI-kompatible Antwort (normal oder Streaming)
 	resp := ChatResponse{
 		ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 		Object:  "chat.completion",
@@ -818,8 +904,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Usage: chatUsage,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if isStreaming {
+		// Real SSE Streaming (OpenAI-kompatibel)
+		s.writeStreamingResponse(w, req.Model, responseText, responseFinishReason, chatUsage)
+		return // wichtig: kein weiterer Output
+	} else {
+		// Klassische JSON-Antwort (volle Abwärtskompatibilität)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
 }
 
 // **********************************************************************
@@ -1258,6 +1351,7 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 					"timeout":     "Optional: Timeout in Sekunden (default: 180)",
 					"retries":     "Optional: Anzahl Retries (default: 3)",
 					"channel":     "Optional: Kanal-FullName z.B. 'mammouth-0'",
+					"stream":      "Optional: true für Server-Sent Events Streaming (OpenAI-kompatibel)",
 				},
 				"example": `curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \

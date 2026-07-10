@@ -41,18 +41,18 @@ Die OpenAI-kompatible API (`/v1/chat/completions`) bleibt unverändert erreichba
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      sigoREST Server                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ /api/version │  │ /api/channels│  │ /v1/chat/...     │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-│                         │                                    │
-│                         ▼                                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │ /api/version │  │ /api/channels│  │ /v1/chat/...     │   │
+│  └──────────────┘  └──────────────┘  └──────────────────┘   │
+│                         │                                   │
+│                         ▼                                   │
 │              ┌─────────────────────┐                        │
 │              │   ChannelManager    │                        │
 │              │  - Resolve channel  │                        │
 │              │  - Failover logic   │                        │
 │              │  - Health monitor   │                        │
 │              └─────────────────────┘                        │
-│                         │                                    │
+│                         │                                   │
 │              ┌──────────┴──────────┐                        │
 │              ▼                     ▼                        │
 │      ChannelRegistry           ProviderConfig               │

@@ -222,14 +222,27 @@ Offizielle Clients für verschiedene Programmiersprachen:
 | **JavaScript** | [`clients/javascript/`](clients/javascript/) | Kopiere `client.js` |
 | **Common Lisp** | [`clients/clisp-exp/`](clients/clisp-exp/) | Experimentell |
 
-### Python-Beispiel
-```python
-from sigoclient import SigoClient
+### Python (v2 – modern)
 
-client = SigoClient("http://127.0.0.1:9080")
-response = client.chat("kimi", "Hello!")
+```python
+from sigo_client import SigoClient
+
+client = SigoClient()
+
+# Normal
+response = client.chat.completions.create(
+    model="cl5-s",
+    messages=[{"role": "user", "content": "Hallo"}]
+)
 print(response.content)
+
+# Streaming (echtes SSE)
+stream = client.chat.completions.create(..., stream=True)
+for chunk in stream:
+    print(chunk.content, end="", flush=True)
 ```
+
+> Siehe [`clients/python/README.md`](clients/python/README.md) für Async, detaillierte Dokumentation und Beispiele.
 
 ### Go-Beispiel
 ```go
@@ -245,8 +258,11 @@ const response = await client.chat('kimi', 'Hello!');
 console.log(response.content);
 ```
 
-### Common Lisp-Beispiel (experimentell)
+### Common Lisp-Beispiel
 ```lisp
+;; Voraussetzung quickload ist installiert
+(ql:quickload :drakma)
+(ql:quickload :yason)
 (load "clients/clisp-exp/sigoclient.lisp")
 (use-package :sigoclient)
 

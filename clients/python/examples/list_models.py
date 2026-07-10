@@ -1,55 +1,52 @@
 #!/usr/bin/env python3
 """
-List available models example
-
-This example shows how to get information about available models.
+List all available models using the modern sigo_client.
 """
 
-from sigoclient import SigoClient
+from sigo_client import SigoClient
+
 
 def main():
     client = SigoClient("http://127.0.0.1:9080")
 
     if not client.ping():
-        print("❌ sigoREST server is not responding")
+        print("❌ sigoREST server is not responding on http://127.0.0.1:9080")
+        print("   Start it with: ./sigoREST/sigoREST -q")
         return
 
-    print("📋 Available Models\n")
+    print("📋 sigoREST Models (v2 client)\n")
+    print(f"✅ Connected | Server Status: OK\n")
 
-    # Get health info
     health = client.health()
-    print(f"Server Status: {health.get('status', 'unknown')}")
-    print(f"Available Models: {health.get('available_models', 0)}")
-    print(f"Memory Set: {health.get('memory_set', False)}")
-    print()
+    print(f"Available Models : {health.available_models}")
+    print(f"Memory configured: {health.memory_set}")
+    print("-" * 60)
 
-    # List all models
     models = client.list_models()
 
-    # Group by provider (simple heuristic)
-    providers = {}
+    # Group by family
+    from collections import defaultdict
+    groups = defaultdict(list)
+
     for model in models:
-        if "mammoth" in model.id.lower():
-            provider = "Mammoth.ai"
-        elif "moonshot" in model.id.lower() or model.id.startswith("kimi"):
-            provider = "Moonshot"
-        elif "z.ai" in model.id.lower():
-            provider = "Z.ai"
-        elif model.id.startswith("ollama-"):
-            provider = "Ollama (Local)"
+        if "claude" in model.id.lower() or model.shortcode.startswith("cl"):
+            groups["Claude"].append(model)
+        elif any(x in model.id.lower() for x in ["kimi", "moonshot"]):
+            groups["Moonshot / Kimi"].append(model)
+        elif "ollama" in model.id.lower():
+            groups["Ollama (Local)"].append(model)
         else:
-            provider = "Other"
+            groups["Other"].append(model)
 
-        if provider not in providers:
-            providers[provider] = []
-        providers[provider].append(model)
-
-    for provider, model_list in sorted(providers.items()):
-        print(f"\n--- {provider} ---")
-        print(f"{'ID':<30} {'Shortcode':<15} {'Input':>8} {'Output':>8}")
+    for group_name, model_list in sorted(groups.items()):
+        print(f"\n🔹 {group_name} ({len(model_list)} models)")
+        print(f"{'Shortcode':<12} {'ID':<35} {'Input':>6} {'Output':>6}")
         print("-" * 65)
-        for m in sorted(model_list, key=lambda x: x.shortcode):
-            print(f"{m.id:<30} {m.shortcode:<15} ${m.input_cost:>6.2f} ${m.output_cost:>6.2f}")
+        for m in sorted(model_list, key=lambda x: x.shortcode or x.id):
+            short = m.shortcode or m.id.split('/')[-1][-8:]
+            print(f"{short:<12} {m.id:<35} ${m.input_cost:>5.2f} ${m.output_cost:>5.2f}")
+        print()
+
 
 if __name__ == "__main__":
     main()
