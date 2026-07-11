@@ -162,7 +162,7 @@ Standard: `/var/sigoREST`
 Globaler System-Kontext für alle Anfragen (wird immer zuerst eingefügt):
 ```json
 {
-  "content": "Antworte immer auf Deutsch. Du sprichst mit Gerhard.",
+  "content": "Antworte immer auf Deutsch. Du sprichst mit Gerhard, einem erfahrenen Software-Entwickler.",
   "cache": true
 }
 ```
