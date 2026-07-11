@@ -1139,6 +1139,9 @@ func isContextLimitError(errText string) bool {
 	return false
 }
 
+// defaultHTTPClient wird von CallAPI wiederverwendet, um Connection-Pooling zu ermöglichen.
+var defaultHTTPClient = &http.Client{}
+
 // **********************************************************************
 // CallAPI führt einen HTTP-Call zu einem AI-Provider durch
 func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interface{},
@@ -1149,7 +1152,15 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 
 	LogDebug("Making API request", logF)
 
-	client := &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
+	// Deadline aus ctx nutzen; falls nicht vorhanden, timeoutSec anwenden.
+	if timeoutSec > 0 {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+			defer cancel()
+		}
+	}
+
 	jsonData, _ := json.Marshal(request)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Endpoint, bytes.NewBuffer(jsonData))
@@ -1169,7 +1180,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 		req.Header.Set(k, v)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := defaultHTTPClient.Do(req)
 	if err != nil {
 		LogError("HTTP request failed", err, logF)
 		return "", nil, "", NewError(ErrAPIFailed, "HTTP request failed", err, logF)
@@ -1269,6 +1280,56 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 
 	LogError("Unexpected response format", nil, logF)
 	return "", nil, "", NewError(ErrUnexpectedFormat, "Unexpected response format", nil, logF)
+}
+
+// **********************************************************************
+// CallAPIStream führt einen Streaming-HTTP-Call zu einem OpenAI-kompatiblen
+// Provider durch. Der zurückgegebene io.ReadCloser muss vom Aufrufer
+// geschlossen werden. Timeout/Deadline kommen aus ctx.
+func CallAPIStream(ctx context.Context, cfg *ProviderConfig, request map[string]interface{}) (io.ReadCloser, error) {
+	logF := map[string]interface{}{"endpoint": cfg.Endpoint, "model": cfg.Model, "stream": true}
+	LogDebug("Making streaming API request", logF)
+
+	request["stream"] = true
+
+	jsonData, err := json.Marshal(request)
+	if err != nil {
+		return nil, NewError(ErrAPIFailed, "Failed to marshal request", err, logF)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, NewError(ErrAPIFailed, "Failed to create HTTP request", err, logF)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if cfg.Type == "anthropic" {
+		req.Header.Set("x-api-key", cfg.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	} else if cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	}
+	for k, v := range cfg.Headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := defaultHTTPClient.Do(req)
+	if err != nil {
+		return nil, NewError(ErrAPIFailed, "HTTP request failed", err, logF)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		logF["status_code"] = resp.StatusCode
+		logF["body"] = string(body)
+		LogError("HTTP error", nil, logF)
+		apiErr := classifyHTTPError(resp.StatusCode, string(body), nil)
+		return nil, apiErr
+	}
+
+	return resp.Body, nil
 }
 
 // extractUsage liest Token-Verbrauch aus Provider-Response

@@ -124,7 +124,7 @@ func checkChannel(ch *Channel, registry *ChannelRegistry) {
 		Endpoint: endpoint,
 		Model:    modelID,
 		APIKey:   ch.APIKey,
-		Type:     "mammoth",
+		Type:     providerTypeForHealthCheck(ch.Provider, endpoint),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -155,5 +155,19 @@ func checkChannel(ch *Channel, registry *ChannelRegistry) {
 				"error":    err.Error(),
 			})
 		}
+	}
+}
+
+// providerTypeForHealthCheck bestimmt den ProviderConfig.Type anhand von
+// Provider-Name und Endpoint. Mammouth/Moonshot/Z.ai nutzen OpenAI-Style
+// Bearer-Auth (intern "mammoth"), Anthropic x-api-key, Ollama keinen Key.
+func providerTypeForHealthCheck(provider, endpoint string) string {
+	switch {
+	case provider == "anthropic" || strings.Contains(endpoint, "anthropic"):
+		return "anthropic"
+	case provider == "ollama" || strings.Contains(endpoint, ":11434"):
+		return "ollama"
+	default:
+		return "mammoth"
 	}
 }

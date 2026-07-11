@@ -1,11 +1,9 @@
-"""Modern httpx-based client for sigoREST with OpenAI compatibility."""
-
 import json
+import time
 from typing import Any, Dict, Iterator, List, Optional, Union, AsyncIterator
 
 import httpx
 from pydantic import ValidationError
-
 from .models import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -181,8 +179,6 @@ class SigoClient(BaseSigoClient):
                     "messages": messages,
                     "retries": retries,
                 }
-                if stream:
-                    payload["stream"] = True
                 if temperature is not None:
                     payload["temperature"] = temperature
                 if max_tokens is not None:
@@ -210,7 +206,7 @@ class SigoClient(BaseSigoClient):
                         content = data["choices"][0].get("message", {}).get("content", "")
                         return ChatCompletion(
                             id=data.get("id", "chatcmpl-sigo"),
-                            created=data.get("created", int(__import__('time').time())),
+                            created=data.get("created", int(time.time())),
                             model=data.get("model", model),
                             choices=[
                                 ChatCompletionChoice(
@@ -226,12 +222,7 @@ class SigoClient(BaseSigoClient):
 
             def _create_stream(self, model, messages, temperature=None, max_tokens=None,
                              session_id=None, timeout=None, retries=3) -> Iterator["ChatCompletionChunk"]:
-                """
-                Real SSE streaming using httpx.
-                The server now supports text/event-stream when "stream": true is sent.
-                """
-                import time
-
+                """Real SSE streaming using httpx. Requires server-side streaming support."""
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -248,61 +239,33 @@ class SigoClient(BaseSigoClient):
                     payload["timeout"] = timeout
 
                 url = self.client._build_url("/v1/chat/completions")
-                try:
-                    with self.client.client.stream(
-                        "POST",
-                        url,
-                        json=payload,
-                        headers={"Accept": "text/event-stream"},
-                        timeout=timeout or self.client.timeout,
-                    ) as response:
-                        response.raise_for_status()
+                with self.client.client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers={"Accept": "text/event-stream"},
+                    timeout=timeout or self.client.timeout,
+                ) as response:
+                    response.raise_for_status()
 
-                        for line in response.iter_lines():
-                            line = line.decode("utf-8").strip()
-                            if not line or line.startswith(":"):
+                    for line in response.iter_lines():
+                        line = line.strip()
+                        if not line or line.startswith(":"):
+                            continue
+                        if line.startswith("data: "):
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk_data = json.loads(data_str)
+                                yield ChatCompletionChunk(
+                                    id=chunk_data.get("id", f"chatcmpl-{int(time.time())}"),
+                                    created=chunk_data.get("created", int(time.time())),
+                                    model=chunk_data.get("model", model),
+                                    choices=chunk_data.get("choices", []),
+                                )
+                            except json.JSONDecodeError:
                                 continue
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    chunk_data = json.loads(data_str)
-                                    # Convert to our model
-                                    yield ChatCompletionChunk(
-                                        id=chunk_data.get("id", f"chatcmpl-{int(time.time())}"),
-                                        created=chunk_data.get("created", int(time.time())),
-                                        model=chunk_data.get("model", model),
-                                        choices=chunk_data.get("choices", []),
-                                    )
-                                except json.JSONDecodeError:
-                                    continue
-                except Exception as e:
-                    # Fallback to simulated streaming if real SSE fails
-                    completion = self.create(
-                        model=model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        session_id=session_id,
-                        timeout=timeout,
-                        retries=retries,
-                        stream=False,
-                    )
-                    full_text = getattr(completion, 'content', str(completion))
-                    for word in full_text.split():
-                        yield ChatCompletionChunk(
-                            id="fallback-stream",
-                            created=int(time.time()),
-                            model=model,
-                            choices=[{"delta": {"content": word + " "}}],
-                        )
-                    yield ChatCompletionChunk(
-                        id="fallback-stream",
-                        created=int(time.time()),
-                        model=model,
-                        choices=[{"delta": {}, "finish_reason": "stop"}],
-                    )
 
 
 # Async variant
@@ -408,8 +371,6 @@ class AsyncSigoClient(BaseSigoClient):
                     "messages": messages,
                     "retries": retries,
                 }
-                if stream:
-                    payload["stream"] = True
                 if temperature is not None: payload["temperature"] = temperature
                 if max_tokens is not None: payload["max_tokens"] = max_tokens
                 if session_id: payload["session_id"] = session_id
@@ -428,7 +389,7 @@ class AsyncSigoClient(BaseSigoClient):
                         content = data["choices"][0].get("message", {}).get("content", "")
                         return ChatCompletion(
                             id=data.get("id", "chatcmpl-sigo"),
-                            created=data.get("created", int(__import__('time').time())),
+                            created=data.get("created", int(time.time())),
                             model=data.get("model", model),
                             choices=[ChatCompletionChoice(
                                 index=0,
@@ -442,14 +403,7 @@ class AsyncSigoClient(BaseSigoClient):
 
             async def _create_stream(self, model, messages, temperature=None, max_tokens=None,
                              session_id=None, timeout=None, retries=3) -> AsyncIterator["ChatCompletionChunk"]:
-                """
-                Real async SSE streaming using httpx.AsyncClient.
-                Mirrors the sync implementation but uses async streaming and sleep.
-                """
-                import asyncio
-                import json
-                import time
-
+                """Real async SSE streaming using httpx.AsyncClient."""
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -466,63 +420,33 @@ class AsyncSigoClient(BaseSigoClient):
                     payload["timeout"] = timeout
 
                 url = self.client._build_url("/v1/chat/completions")
-                try:
-                    async with self.client.client.stream(
-                        "POST",
-                        url,
-                        json=payload,
-                        headers={"Accept": "text/event-stream"},
-                        timeout=timeout or self.client.timeout,
-                    ) as response:
-                        response.raise_for_status()
+                async with self.client.client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers={"Accept": "text/event-stream"},
+                    timeout=timeout or self.client.timeout,
+                ) as response:
+                    response.raise_for_status()
 
-                        async for line in response.aiter_lines():
-                            line = line.strip()
-                            if not line or line.startswith(":"):
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line or line.startswith(":"):
+                            continue
+                        if line.startswith("data: "):
+                            data_str = line[6:].strip()
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                chunk_data = json.loads(data_str)
+                                choices = chunk_data.get("choices", [])
+                                if not isinstance(choices, list):
+                                    choices = []
+                                yield ChatCompletionChunk(
+                                    id=chunk_data.get("id", f"chatcmpl-async-{int(time.time())}"),
+                                    created=chunk_data.get("created", int(time.time())),
+                                    model=chunk_data.get("model", model),
+                                    choices=choices,
+                                )
+                            except json.JSONDecodeError:
                                 continue
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    chunk_data = json.loads(data_str)
-                                    # Ensure choices is always a list of dicts for the model
-                                    choices = chunk_data.get("choices", [])
-                                    if not isinstance(choices, list):
-                                        choices = []
-                                    yield ChatCompletionChunk(
-                                        id=chunk_data.get("id", f"chatcmpl-async-{int(time.time())}"),
-                                        created=chunk_data.get("created", int(time.time())),
-                                        model=chunk_data.get("model", model),
-                                        choices=choices,
-                                    )
-                                except json.JSONDecodeError:
-                                    continue
-                except Exception as e:
-                    # Fallback to simulated async streaming
-                    import asyncio
-                    completion = await self.create(
-                        model=model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        session_id=session_id,
-                        timeout=timeout,
-                        retries=retries,
-                        stream=False,
-                    )
-                    full_text = getattr(completion, 'content', str(completion))
-                    for word in full_text.split():
-                        yield ChatCompletionChunk(
-                            id="fallback-async",
-                            created=int(time.time()),
-                            model=model,
-                            choices=[{"delta": {"content": word + " "}}],
-                        )
-                        await asyncio.sleep(0.02)
-                    yield ChatCompletionChunk(
-                        id="fallback-async",
-                        created=int(time.time()),
-                        model=model,
-                        choices=[{"delta": {}, "finish_reason": "stop"}],
-                    )
