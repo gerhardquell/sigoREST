@@ -4,6 +4,89 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-07-11: Entfernen des Fake-Streamings + Echtes Provider-SSE für alle OpenAI-kompatiblen Clients
+
+**Zielsetzung:**
+Der Server und die Clients hatten zwar bereits SSE-Endpunkte, aber der Server sammelte die vollständige Antwort ein und splittete sie wortweise mit künstlichen 8-ms-Verzögerungen („Fake-Streaming“). Ziel war die Umstellung auf echtes, provider-durchgereichtes SSE-Streaming für alle OpenAI-kompatiblen Provider. Anthropic wurde bewusst ausgeschlossen (Kostengründe).
+
+**Was erreicht wurde:**
+
+### 1. Server-seitiges echtes Streaming
+
+- `sigoengine/engine.go`:
+  - Neuer gemeinsamer `defaultHTTPClient` (`http.Client{}`) für Connection Reuse.
+  - `CallAPI` berücksichtigt bereits gesetzte Deadlines und wendet `timeoutSec` nur an, wenn der Kontext noch keine Deadline hat.
+  - Neue `CallAPIStream()`-Funktion: setzt `stream=true`, `Accept: text/event-stream` und liefert `io.ReadCloser` mit dem Provider-Response-Body.
+
+- `sigoREST/main.go`:
+  - Entfernung der Fake-Streaming-Hilfsfunktionen (`writeSSEEvent`, `writeStreamingResponse`).
+  - Neue `streamProviderResponse()` leitet den Provider-Stream 1:1 an den Client weiter, puffert Zeilen, extrahiert parallel den Text für Session/Memory und sendet abschließend `data: [DONE]`.
+  - Handler wählt bei `stream=true` und OpenAI-kompatiblen Providern den `CallAPIStream`-Pfad; Anthropic und Fehlerfälle laufen weiterhin über `CallAPI` mit Retry.
+
+### 2. Clients auf echtes SSE umgestellt
+
+| Client | Änderung |
+|--------|----------|
+| **Python** | Fake-Streaming-Fallback komplett entfernt; sync + async nutzen `httpx.stream()` / `aiter_lines()` gegen `text/event-stream`. |
+| **Go** | Neue Typen `ChatCompletionChunk`, `ChatCompletionChunkChoice`, `ChatCompletionChunkDelta`; neue `ChatStream()`-Methode mit SSE-Zeilenparser; Leerzeilen werden korrekt als Event-Trenner behandelt. |
+| **JavaScript** | Neue `chatStream()`-Methode als AsyncGenerator; liest `response.body.getReader()` und parst SSE-Zeilen. |
+| **C++** | Neue Chunk-Modelle in `models.hpp`; `chatCompletionStream()` mit Callback und CURL-Write-Callback-Parsing. |
+| **Common Lisp** | `chat-stream()` fordert jetzt explizit `Accept: text/event-stream` an. |
+
+### 3. Weitere Verbesserungen
+
+- `sigoengine/channel_health.go`: dynamische Provider-Typ-Erkennung für Health-Checks (`anthropic`, `ollama`, `mammoth`) statt hartkodiertem `"mammoth"`.
+- C++ Client: `curl_easy_getinfo` vor `curl_easy_cleanup` ausgeführt (Use-after-free vermieden).
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Provider-Stream direkt durchreichen** | Keine künstlichen Verzögerungen mehr; echte First-Token-Latenz. |
+| **Anthropic ausgeschlossen** | Anwender hat explizit festgelegt, dass Anthropic aufgrund der Kosten nicht für Streaming genutzt wird. |
+| **Shared `http.Client`** | Verhindert Connection-Pool-Überlastung bei ~100 parallelen Verbindungen. |
+| **Keine externen SSE-Bibliotheken** | Clients parsen SSE selbst, um Abhängigkeiten minimal zu halten. |
+
+**Testing & Verifikation:**
+
+```bash
+# Server bauen & starten
+go build -o sigoREST/sigoREST ./sigoREST/
+./sigoREST/sigoREST -v debug
+
+# curl
+curl -s -N -X POST http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"model":"cl5-s","messages":[{"role":"user","content":"zähle von 1 bis 3"}],"stream":true}'
+
+# Clients (jeweils getestet)
+# Python: SigoClient().chat.completions.create(stream=True)
+# Go:     client.ChatStream(ctx, "cl5-s", "...")
+# JS:     for await (const ch of client.chatStream("cl5-s", "..."))
+# C++:    client.chatCompletionStream("cl5-s", msgs, callback)
+```
+
+Alle getesteten Clients lieferten für das Prompt "zähle von 1 bis 3" das erwartete Ergebnis `1, 2, 3`.
+
+**Code-Änderungen (Zusammenfassung):**
+
+- `sigoengine/engine.go`: Shared HTTP-Client, Deadline-Handling, `CallAPIStream()`
+- `sigoengine/channel_health.go`: Dynamische Provider-Typ-Erkennung
+- `sigoREST/main.go`: Echtes Provider-SSE-Streaming
+- `clients/python/src/sigo_client/client.py`: Entfernung Fake-Streaming, echtes SSE
+- `clients/go/client.go`: `ChatStream()` + Chunk-Typen + SSE-Parser
+- `clients/javascript/client.js`: `chatStream()` AsyncGenerator
+- `clients/cpp/core/include/sigorest/{client.hpp,models.hpp}`: Streaming-API + Chunk-Modelle
+- `clients/cpp/core/src/client.cpp`: `chatCompletionStream()` Implementierung
+- `clients/clisp-exp/sigoclient.lisp`: `Accept: text/event-stream` in `chat-stream`
+
+**Git:**
+
+Branch `feat/real-sse-streaming` erstellt, gepusht, PR #1 eröffnet, gemergt (Squash) und gelöscht. Server nach dem Merge auf `main` neu gebaut und gestartet.
+
+---
+
 ## Session 2026-07-10: Modernisierung des Python-Clients + Echter SSE-Streaming-Support
 
 **Zielsetzung:**
