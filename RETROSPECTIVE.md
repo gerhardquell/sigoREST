@@ -4,6 +4,80 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-07-11: Doku-Sync — CN/EN-READMEs + chinese/ auf Multi-Channel-Master-Stand
+
+**Zielsetzung:**
+`README_CN.md` und `README_EN.md` hingen eine ganze Generation hinter der deutschen Master-`README.md` nach (pre-Multi-Channel-Ära). Sie fehlten sämtliche Channel-, Failover-, data-dir- und Vision-Funktionalität sowie die neuen Endpoints und Client-Libraries. Ziel war ein treuer 1:1-Spiegel des deutschen Masters in Chinesisch und Englisch plus Aktualisierung des `chinese/`-Subdirs.
+
+**Was erreicht wurde:**
+
+### 1. CN/EN komplett neu als treuer Spiegel
+
+Beide READMEs wurden von Grund auf neu übersetzt (CN 618 Zeilen, EN 616 Zeilen) und enthalten jetzt 1:1 den Master-Stand:
+
+- Architektur-Block mit allen 6 neuen `sigoengine`-Files (`channel.go`, `channel_manager.go`, `channel_health.go`, `session_memory.go`, `env.go`, `version.go`)
+- Server-Flags `-data-dir`, `-channel-health-interval`; CLI-Flags `-session-dir`, `-c`
+- env-Datei (`./env`) + indizierte API-Keys (`_0`, `_1`, …) für zusätzliche Kanäle
+- Datenverzeichnis-Layout unter `/var/sigoREST` mit `channels/`- und `sessions/`-Subdirs
+- Multi-Channel-Support, Auto-Failover, Health-Monitor
+- Alle `/api/channels/*`-Endpoints, `/api/version`, `/api/usage`, `/api/help`
+- Vision-Support, 4 Client-Libraries (Python v2 / Go / JavaScript / Common-Lisp)
+- systemd mit `network-online.target` + `EnvironmentFile` (DNS-Race-Fix)
+- ~89 Modelle, Shortcodes `cl46-s`/`gpt4o`, Version 1.1
+
+### 2. memory.json-Beispiel korrigiert
+
+Der deutsche Master zeigte das memory.json-Beispiel gekürzt (`"…mit Gerhard."`), die echte eingebettete `sigoREST/memory.json` enthält aber `"…mit Gerhard, einem erfahrenen Software-Entwickler."`. CN/EN zeigten bisher eine falsche englische Übersetzung. Korrektur: alle drei READMEs zeigen jetzt den realen deutschen Default — dokumentiert das tatsächliche Verhalten, keine erfundene Übersetzung.
+
+### 3. chinese/ Subdir aktualisiert
+
+| Datei | Änderung |
+|-------|----------|
+| `chinese/README.md` | Build-Pfad fix (`./sigoREST/sigoREST` statt `sigoREST`), Multi-Channel-Feature-Block |
+| `chinese/KEYWORDS.md` | Keywords für Multi-Channel/Failover/Health-Monitor ergänzt |
+| `chinese/PITCH.txt` | Pitch um Multi-Channel + Auto-Failover erweitert |
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Treuer Spiegel statt zielgruppen-angepasst** | Konsistenz mit Master, wartbar. Nur CN behält das China-Fokus-Intro (Zielgruppe), EN folgt dem Master ohne Intro. |
+| **memory.json als realer deutscher Default** | Dokumentation soll echtes Verhalten zeigen, keine erfundene Lokalisierung. |
+| **Subagent-Driven Development** | Zwei unabhängige README-Übersetzungen parallel via Fresh-Subagent-pro-Datei, Controller macht Spec-Review gegen Master. Effizient, kein Context-Pollution. |
+| **TODO-Archive local-only** | WIP-`.gitignore` ignoriert `TODO-*.md` bewusst → done-Archive bleiben lokale Scratch-Dateien, nicht im Repo. Bestehende tracked done-Files bleiben unangetastet. |
+
+**Testing & Verifikation:**
+
+```bash
+# Build unverändert (nur Doku)
+go build ./...   # BUILD OK
+
+# Spec-Review gegen Master: Struktur-Marker geprüft
+grep -c 'channel.go|channel_manager.go|...' README_CN.md   # 6 ✓
+grep -c 'network-online.target' README_EN.md                # 3 ✓
+grep -c 'cl46-s' README_CN.md README_EN.md                  # 6/6 ✓
+
+# GitHub-Render-Check (Playwright)
+# README.md    → memory.json-Fix live ✓
+# README_CN.md → 多渠道支持-Section rendert ✓
+# README_EN.md → Multi-Channel Support, kein About-Intro ✓
+```
+
+**Code-Änderungen (Zusammenfassung):**
+
+- `README.md`: memory.json-Beispiel auf volle Version korrigiert
+- `README_CN.md`: komplette Neuübersetzung (338 → 618 Zeilen)
+- `README_EN.md`: komplette Neuübersetzung (338 → 616 Zeilen)
+- `chinese/README.md`: Build-Pfad + Multi-Channel-Feature
+- `chinese/KEYWORDS.md`: Kanal/Failover/Health-Keywords
+- `chinese/PITCH.txt`: Pitch erweitert
+
+**Git:**
+
+Commit `43d93a7` (Doku-Sync) + `6579e50` (TODO-Archiv) direkt auf `main` gepusht. Archiv-File `TODO-20260711-docs-done.md` bleibt local (gitignored). GitHub-Render per Playwright verifiziert.
+
+---
+
 ## Session 2026-07-11: Entfernen des Fake-Streamings + Echtes Provider-SSE für alle OpenAI-kompatiblen Clients
 
 **Zielsetzung:**
