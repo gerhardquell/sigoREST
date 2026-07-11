@@ -21,12 +21,14 @@
 package sigoclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -108,6 +110,7 @@ type ChatRequest struct {
 	SessionID   string        `json:"session_id,omitempty"`
 	Timeout     *int          `json:"timeout,omitempty"`
 	Retries     int           `json:"retries,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
 }
 
 // ChatResponse represents a chat completion response
@@ -116,6 +119,34 @@ type ChatResponse struct {
 	Model        string `json:"model"`
 	SessionID    string `json:"session_id,omitempty"`
 	RawResponse  map[string]interface{}
+}
+
+// ChatCompletionChunk represents one streaming chunk from the server.
+type ChatCompletionChunk struct {
+	ID      string                     `json:"id"`
+	Object  string                     `json:"object"`
+	Created int64                      `json:"created"`
+	Model   string                     `json:"model"`
+	Choices []ChatCompletionChunkChoice `json:"choices"`
+}
+
+// ChatCompletionChunkChoice is the choice inside a streaming chunk.
+type ChatCompletionChunkChoice struct {
+	Index        int                        `json:"index"`
+	Delta        ChatCompletionChunkDelta   `json:"delta"`
+	FinishReason string                     `json:"finish_reason,omitempty"`
+}
+
+// ChatCompletionChunkDelta is the delta inside a streaming choice.
+type ChatCompletionChunkDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// StreamResult carries the final aggregated outcome of a streaming request.
+type StreamResult struct {
+	Content string
+	Model   string
 }
 
 // ModelInfo represents information about an available model
@@ -348,6 +379,91 @@ func (c *Client) Chat(ctx context.Context, model, message string, opts ...ChatOp
 			"created": result.Created,
 		},
 	}, nil
+}
+
+// ChatStream initiates a streaming chat completion and yields each SSE chunk
+// on the returned channel. The channel is closed when streaming ends or an
+// error occurs. Non-200 responses are surfaced as errors on the channel.
+func (c *Client) ChatStream(ctx context.Context, model, message string, opts ...ChatOption) (<-chan ChatCompletionChunk, error) {
+	req := &ChatRequest{
+		Model:    model,
+		Messages: []ChatMessage{{Role: "user", Content: message}},
+		Retries:  3,
+		Stream:   true,
+	}
+
+	for _, opt := range opts {
+		opt(req)
+	}
+
+	jsonBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, &Error{Message: fmt.Sprintf("failed to marshal request: %v", err)}
+	}
+
+	url := c.baseURL + "/v1/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, &Error{Message: fmt.Sprintf("failed to create request: %v", err)}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, &Error{Message: fmt.Sprintf("request failed: %v", err)}
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			Message:    string(respBody),
+			StatusCode: resp.StatusCode,
+		}
+	}
+
+	chunks := make(chan ChatCompletionChunk)
+	go func() {
+		defer close(chunks)
+		defer resp.Body.Close()
+		scanSSE(resp.Body, func(chunk ChatCompletionChunk) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case chunks <- chunk:
+				return true
+			}
+		})
+	}()
+
+	return chunks, nil
+}
+
+// scanSSE reads OpenAI-style SSE lines from r and calls yield for each chunk.
+// It stops when [DONE] is seen, yield returns false, or the reader is exhausted.
+func scanSSE(r io.Reader, yield func(ChatCompletionChunk) bool) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue // empty line separates SSE events
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			return
+		}
+		var chunk ChatCompletionChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if !yield(chunk) {
+			return
+		}
+	}
 }
 
 // GetMemory gets the global memory block

@@ -31,16 +31,17 @@
         (format *error-output* "GET error ~A: ~A~%" url e)
         nil))))
 
-(defun http-post (path data &key (stream nil))
+(defun http-post (path data &key (stream nil) (accept "application/json"))
   "Perform HTTP POST with JSON body. If :stream t, returns the stream."
   (let* ((url (format nil "~A~A" *base-url* path))
-         (json-body (with-output-to-string (s) (yason:encode data s)))
+         (json-body (with-output-to-string (s) (yason:encode-alist data s)))
          (json-bytes (babel:string-to-octets json-body :encoding :utf-8)))
     (handler-case
         (drakma:http-request url
                              :method :post
                              :content json-bytes
                              :content-type "application/json; charset=utf-8"
+                             :additional-headers `(("Accept" . ,accept))
                              :external-format-in :utf-8
                              :want-stream stream)
       (error (e)
@@ -99,16 +100,16 @@
   "Simple chat (backward compatible)"
   (let ((messages '()))
     (when system-prompt
-      (push (list :|role| "system" :|content| system-prompt) messages))
-    (push (list :|role| "user" :|content| message) messages)
+      (push `(("role" . "system") ("content" . ,system-prompt)) messages))
+    (push `(("role" . "user") ("content" . ,message)) messages)
     (setf messages (nreverse messages))
 
-    (let ((payload (list (cons "model" model)
-                          (cons "messages" messages)
-                          (cons "retries" retries))))
-      (when temperature (setf payload (append payload (list (cons "temperature" temperature)))))
-      (when max-tokens (setf payload (append payload (list (cons "max_tokens" max-tokens)))))
-      (when session-id (setf payload (append payload (list (cons "session_id" session-id)))))
+    (let ((payload `(("model" . ,model)
+                     ("messages" . ,messages)
+                     ("retries" . ,retries))))
+      (when temperature (push (cons "temperature" temperature) payload))
+      (when max-tokens (push (cons "max_tokens" max-tokens) payload))
+      (when session-id (push (cons "session_id" session-id) payload))
 
       (let* ((resp (parse-json (http-post "/v1/chat/completions" payload)))
              (choices (cdr (assoc :choices resp)))
@@ -121,19 +122,19 @@
   "Real SSE streaming. Returns a closure that yields the next token on each call."
   (let ((messages '()))
     (when system-prompt
-      (push (list :|role| "system" :|content| system-prompt) messages))
-    (push (list :|role| "user" :|content| message) messages)
+      (push `(("role" . "system") ("content" . ,system-prompt)) messages))
+    (push `(("role" . "user") ("content" . ,message)) messages)
     (setf messages (nreverse messages))
 
-    (let ((payload (list (cons "model" model)
-                          (cons "messages" messages)
-                          (cons "stream" t)
-                          (cons "retries" retries))))
-      (when temperature (setf payload (append payload (list (cons "temperature" temperature)))))
-      (when max-tokens (setf payload (append payload (list (cons "max_tokens" max-tokens)))))
-      (when session-id (setf payload (append payload (list (cons "session_id" session-id)))))
+    (let ((payload `(("model" . ,model)
+                     ("messages" . ,messages)
+                     ("stream" . t)
+                     ("retries" . ,retries))))
+      (when temperature (push (cons "temperature" temperature) payload))
+      (when max-tokens (push (cons "max_tokens" max-tokens) payload))
+      (when session-id (push (cons "session_id" session-id) payload))
 
-      (let ((stream (http-post "/v1/chat/completions" payload :stream t)))
+      (let ((stream (http-post "/v1/chat/completions" payload :stream t :accept "text/event-stream")))
         (when stream
           #'(lambda ()
               (handler-case

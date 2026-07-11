@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -25,6 +26,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -40,86 +42,69 @@ import (
 	"sigorest/sigoengine"
 )
 
-// writeSSEEvent schreibt einen OpenAI-kompatiblen SSE-Event
-func writeSSEEvent(w http.ResponseWriter, eventType string, data interface{}) {
-	w.Write([]byte("event: " + eventType + "\n"))
-	if data != nil {
-		jsonData, _ := json.Marshal(data)
-		w.Write([]byte("data: " + string(jsonData) + "\n"))
-	} else {
-		w.Write([]byte("data: [DONE]\n"))
-	}
-	w.Write([]byte("\n"))
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-}
+// streamProviderResponse leitet einen OpenAI-kompatiblen SSE-Stream vom Provider
+// an den Client durch und sammelt den Assistant-Text für Sessions.
+// Gibt den akkumulierten Text oder einen Fehler zurück.
+func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string) (string, error) {
+	defer stream.Close()
 
-// writeStreamingResponse sendet die Antwort als Server-Sent Events (echtes Streaming)
-func (s *Server) writeStreamingResponse(w http.ResponseWriter, model string, content string, finishReason string, usage *ChatUsage) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // nginx nicht puffern
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
 
-	// Erstes Chunk mit Role (OpenAI-Format)
-	writeSSEEvent(w, "message_start", map[string]interface{}{
-		"id":    "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-		"object": "chat.completion.chunk",
-		"created": time.Now().Unix(),
-		"model": model,
-		"choices": []interface{}{map[string]interface{}{
-			"delta": map[string]string{"role": "assistant"},
-			"index": 0,
-		}},
-	})
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return "", fmt.Errorf("response writer does not support flushing")
+	}
 
-	// Content in Delta-Chunks senden (wortweise für bessere UX)
-	words := strings.Fields(content)
-	for i, word := range words {
-		delta := map[string]interface{}{
-			"delta": map[string]string{
-				"content": word + " ",
-			},
-			"index": 0,
+	var responseText strings.Builder
+	scanner := bufio.NewScanner(stream)
+	// Große Chunks unterstützen (z.B. lange JSON-Zeilen)
+	const maxScanTokenSize = 1024 * 1024
+	buf := make([]byte, 4096)
+	scanner.Buffer(buf, maxScanTokenSize)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return responseText.String(), err
 		}
-		writeSSEEvent(w, "message_delta", map[string]interface{}{
-			"id":      "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"model":   model,
-			"choices": []interface{}{delta},
-		})
-		// kleine Verzögerung für realistisches Streaming-Gefühl
-		if i%3 == 0 {
-			time.Sleep(8 * time.Millisecond)
+		flusher.Flush()
+
+		// Text aus data:-Zeilen akkumulieren
+		if strings.HasPrefix(line, "data: ") {
+			dataStr := strings.TrimPrefix(line, "data: ")
+			if dataStr == "" || dataStr == "[DONE]" {
+				continue
+			}
+			var chunk map[string]interface{}
+			if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+				continue
+			}
+			if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]interface{}); ok {
+					if delta, ok := choice["delta"].(map[string]interface{}); ok {
+						if content, ok := delta["content"].(string); ok {
+							responseText.WriteString(content)
+						}
+					}
+				}
+			}
 		}
 	}
 
-	// Abschluss-Chunk
-	writeSSEEvent(w, "message_stop", map[string]interface{}{
-		"id":            "chatcmpl-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-		"object":        "chat.completion.chunk",
-		"created":       time.Now().Unix(),
-		"model":         model,
-		"choices": []interface{}{map[string]interface{}{
-			"delta":        map[string]interface{}{},
-			"index":        0,
-			"finish_reason": finishReason,
-		}},
-	})
-
-	// Usage-Event
-	if usage != nil {
-		writeSSEEvent(w, "usage", map[string]interface{}{
-			"prompt_tokens":     usage.PromptTokens,
-			"completion_tokens": usage.CompletionTokens,
-			"total_tokens":      usage.TotalTokens,
-		})
+	if err := scanner.Err(); err != nil {
+		return responseText.String(), err
 	}
 
-	// Finale DONE-Nachricht
-	writeSSEEvent(w, "done", nil)
+	// Sicherstellen, dass [DONE] gesendet wird
+	fmt.Fprintln(w, "data: [DONE]")
+	fmt.Fprintln(w)
+	flusher.Flush()
+
+	return responseText.String(), nil
 }
 
 // **********************************************************************
@@ -738,6 +723,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	retryConfig.MaxRetries = req.Retries
 
 	var lastErr error
+	var streamed bool
 	for _, currentCh := range channelsToTry {
 		cfg, err := sigoengine.LoadConfigWithChannel(modelID, currentCh)
 		if err != nil {
@@ -761,36 +747,46 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		breaker := s.breakers[cbKey]
 		s.mu.Unlock()
 
-		lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
-			return breaker.Do(func() error {
-				text, u, fr, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
+		// Echtes Streaming nur für OpenAI-kompatible Provider.
+		// Anthropic wird als normale JSON-Antwort behandelt (kein Fake-Streaming).
+		if isStreaming && cfg.Type != "anthropic" {
+			lastErr = breaker.Do(func() error {
+				stream, e := sigoengine.CallAPIStream(ctx, cfg, apiRequest)
 				if e != nil {
-					apiErr := sigoengine.ClassifyError(e)
-					if apiErr.Type == sigoengine.ErrAuthFailed {
-						if err := s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false); err != nil {
-							sigoengine.LogWarn("Konnte Kanal nach Auth-Fehler nicht deaktivieren", map[string]interface{}{
-								"provider": currentCh.Provider,
-								"channel":  currentCh.Name,
-								"error":    err.Error(),
-							})
-						}
-					}
+					return e
+				}
+				text, e := s.streamProviderResponse(w, stream, req.Model)
+				if e != nil {
 					return e
 				}
 				responseText = text
-				responseUsage = u
-				responseFinishReason = fr
-				if responseUsage == nil {
-					responseUsage = sigoengine.EstimateUsage(inputText, responseText)
-					sigoengine.LogDebug("Usage geschatzt", map[string]interface{}{
-						"model":         req.Model,
-						"input_tokens":  responseUsage.InputTokens,
-						"output_tokens": responseUsage.OutputTokens,
-					})
-				}
+				streamed = true
 				return nil
 			})
-		})
+		} else {
+			lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
+				return breaker.Do(func() error {
+					text, u, fr, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
+					if e != nil {
+						apiErr := sigoengine.ClassifyError(e)
+						if apiErr.Type == sigoengine.ErrAuthFailed {
+							if err := s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false); err != nil {
+								sigoengine.LogWarn("Konnte Kanal nach Auth-Fehler nicht deaktivieren", map[string]interface{}{
+									"provider": currentCh.Provider,
+									"channel":  currentCh.Name,
+									"error":    err.Error(),
+								})
+							}
+						}
+						return e
+					}
+					responseText = text
+					responseUsage = u
+					responseFinishReason = fr
+					return nil
+				})
+			})
+		}
 
 		if lastErr == nil {
 			successfulCh = currentCh
@@ -851,6 +847,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Usage schätzen falls Provider keine liefert
+	if responseUsage == nil {
+		responseUsage = sigoengine.EstimateUsage(inputText, responseText)
+	}
+
 	// Session speichern (unter dem Kanal, der tatsächlich geantwortet hat)
 	if req.SessionID != "" && userPrompt != "" && successfulCh != nil {
 		session.AddMessage("user", userPrompt)
@@ -859,38 +860,40 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Usage akkumulieren
-	var chatUsage *ChatUsage
-	if responseUsage != nil {
-		chatUsage = &ChatUsage{
-			PromptTokens:     responseUsage.InputTokens,
-			CompletionTokens: responseUsage.OutputTokens,
-			TotalTokens:      responseUsage.TotalTokens,
-		}
-		s.usageMu.Lock()
-		stats, ok := s.usage[modelID]
-		if !ok {
-			stats = &ModelUsageStats{}
-			s.usage[modelID] = stats
-		}
-		stats.InputTokens += int64(responseUsage.InputTokens)
-		stats.OutputTokens += int64(responseUsage.OutputTokens)
-		stats.TotalTokens += int64(responseUsage.TotalTokens)
-		stats.Requests++
+	chatUsage := &ChatUsage{
+		PromptTokens:     responseUsage.InputTokens,
+		CompletionTokens: responseUsage.OutputTokens,
+		TotalTokens:      responseUsage.TotalTokens,
+	}
+	s.usageMu.Lock()
+	stats, ok := s.usage[modelID]
+	if !ok {
+		stats = &ModelUsageStats{}
+		s.usage[modelID] = stats
+	}
+	stats.InputTokens += int64(responseUsage.InputTokens)
+	stats.OutputTokens += int64(responseUsage.OutputTokens)
+	stats.TotalTokens += int64(responseUsage.TotalTokens)
+	stats.Requests++
 
-		channelKey := fmt.Sprintf("%s#%s", modelID, successfulCh.FullName())
-		channelStats, ok := s.usageByChannel[channelKey]
-		if !ok {
-			channelStats = &ModelUsageStats{}
-			s.usageByChannel[channelKey] = channelStats
-		}
-		channelStats.InputTokens += int64(responseUsage.InputTokens)
-		channelStats.OutputTokens += int64(responseUsage.OutputTokens)
-		channelStats.TotalTokens += int64(responseUsage.TotalTokens)
-		channelStats.Requests++
-		s.usageMu.Unlock()
+	channelKey := fmt.Sprintf("%s#%s", modelID, successfulCh.FullName())
+	channelStats, ok := s.usageByChannel[channelKey]
+	if !ok {
+		channelStats = &ModelUsageStats{}
+		s.usageByChannel[channelKey] = channelStats
+	}
+	channelStats.InputTokens += int64(responseUsage.InputTokens)
+	channelStats.OutputTokens += int64(responseUsage.OutputTokens)
+	channelStats.TotalTokens += int64(responseUsage.TotalTokens)
+	channelStats.Requests++
+	s.usageMu.Unlock()
+
+	// Bei echtem Streaming wurde die Antwort bereits geschrieben.
+	if streamed {
+		return
 	}
 
-	// OpenAI-kompatible Antwort (normal oder Streaming)
+	// OpenAI-kompatible JSON-Antwort (non-streaming oder Anthropic-streaming)
 	resp := ChatResponse{
 		ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 		Object:  "chat.completion",
@@ -904,15 +907,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Usage: chatUsage,
 	}
 
-	if isStreaming {
-		// Real SSE Streaming (OpenAI-kompatibel)
-		s.writeStreamingResponse(w, req.Model, responseText, responseFinishReason, chatUsage)
-		return // wichtig: kein weiterer Output
-	} else {
-		// Klassische JSON-Antwort (volle Abwärtskompatibilität)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // **********************************************************************

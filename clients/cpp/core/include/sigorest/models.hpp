@@ -16,6 +16,25 @@ struct ChatChoice {
     std::string finish_reason;
 };
 
+struct ChatChunkDelta {
+    std::string role;
+    std::string content;
+};
+
+struct ChatChunkChoice {
+    int index = 0;
+    ChatChunkDelta delta;
+    std::string finish_reason;
+};
+
+struct ChatCompletionChunk {
+    std::string id;
+    std::string object;
+    long long created = 0;
+    std::string model;
+    std::vector<ChatChunkChoice> choices;
+};
+
 struct ChatUsage {
     int prompt_tokens = 0;
     int completion_tokens = 0;

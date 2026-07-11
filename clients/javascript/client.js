@@ -205,6 +205,123 @@ export class SigoClient {
   }
 
   /**
+   * Stream a chat completion request using Server-Sent Events.
+   *
+   * Yields chunk objects of shape:
+   *   { id, object, created, model, choices: [{ index, delta, finish_reason }] }
+   *
+   * @param {string} model - Model shortcode or full ID
+   * @param {string} message - The user message
+   * @param {object} options - Same options as chat()
+   * @returns {AsyncGenerator<object>}
+   */
+  async *chatStream(model, message, options = {}) {
+    const messages = [];
+    if (options.systemPrompt) {
+      messages.push({ role: 'system', content: options.systemPrompt });
+    }
+    messages.push({ role: 'user', content: message });
+
+    const payload = {
+      model,
+      messages,
+      retries: options.retries ?? 3,
+      stream: true,
+    };
+
+    if (options.temperature !== undefined) {
+      payload.temperature = options.temperature;
+    }
+    if (options.maxTokens !== undefined) {
+      payload.max_tokens = options.maxTokens;
+    }
+    if (options.sessionId !== undefined) {
+      payload.session_id = options.sessionId;
+    }
+    if (options.timeout !== undefined) {
+      payload.timeout = Math.floor(options.timeout / 1000);
+    }
+
+    const url = `${this.baseUrl}/v1/chat/completions`;
+    const controller = new AbortController();
+    const timeoutMs = options.timeout || this.timeout;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        let errorData = null;
+        try {
+          errorData = await response.json();
+          if (errorData.error && errorData.error.message) {
+            errorMessage = errorData.error.message;
+          }
+        } catch {
+          // ignore
+        }
+        throw new SigoAPIError(errorMessage, response.status, errorData);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete last line
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(':')) continue;
+          if (!trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6).trim();
+          if (data === '[DONE]') return;
+          try {
+            yield JSON.parse(data);
+          } catch {
+            // malformed chunk; skip
+          }
+        }
+      }
+
+      // process any trailing line
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ')) {
+        const data = trimmed.slice(6).trim();
+        if (data !== '[DONE]') {
+          try {
+            yield JSON.parse(data);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error instanceof SigoAPIError) throw error;
+      if (error.name === 'AbortError') {
+        throw new SigoError(`Request to ${this.baseUrl}/v1/chat/completions timed out after ${timeoutMs}ms`);
+      }
+      throw new SigoError(`Streaming request failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Get the global memory block
    * @returns {Promise<MemoryBlock>}
    */
