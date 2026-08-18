@@ -22,6 +22,15 @@ const (
 	zaiChatEndpoint      = "https://api.z.ai/api/paas/v4/chat/completions"
 )
 
+// Provider-Model-Listen-Endpoints (GET, kostenlos — keine Token-Billing).
+// Genutzt von ProbeProviderModelList für Health-Checks, statt eines
+// Chat-Completion-"ping"-Requests der Input-Token kosten verursacht.
+const (
+	mammouthModelsEndpoint = "https://api.mammouth.ai/public/models" // key-less
+	moonshotModelsEndpoint = "https://api.moonshot.ai/v1/models"     // Bearer
+	zaiModelsEndpoint      = "https://api.z.ai/api/paas/v4/models"   // Bearer
+)
+
 // **********************************************************************
 // Moonshot — statische Parameter-Tabelle
 // Die Moonshot /v1/models API liefert nur Model-IDs, keine Preise/Limits.
@@ -54,7 +63,9 @@ var moonshotKnownModels = map[string]Model{
 		Endpoint: moonshotChatEndpoint, APIKeyEnv: "MOONSHOT_API_KEY",
 		MaxInputTokens: 256000, MaxOutputTokens: 4096,
 		InputCost: 0.6, OutputCost: 3.0,
-		MinTemperature: 0.0, MaxTemperature: 2.0,
+		// Thinking-Modell: Moonshot akzeptiert nur temperature=1.
+		// Min==Max signalisiert "fixed temperature" → main.go erzwingt den Wert.
+		MinTemperature: 1.0, MaxTemperature: 1.0,
 	},
 }
 

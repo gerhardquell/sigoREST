@@ -1059,63 +1059,78 @@ type ProviderHealth struct {
 	CircuitDetails map[string]interface{} `json:"circuit_details,omitempty"`
 }
 
-// ProbeProvider prüft die Erreichbarkeit eines Providers mit Timeout
-func ProbeProvider(ctx context.Context, cfg *ProviderConfig) ProviderHealth {
+// ProbeProviderModelList prüft die Erreichbarkeit eines Providers über seinen
+// kostenlosen Modell-Listen-Endpoint (GET /models). Im Gegensatz zu einem
+// Chat-Completion-"ping" verursacht das KEINE Token-Kosten, da keine
+// Inferenz läuft — es wird nur die Modellliste abgerufen.
+//
+// Status-Varianten:
+//   - "available":    HTTP 200, Provider + Key funktionieren
+//   - "auth_failed":  HTTP 401/403, Key ungültig (Provider aber erreichbar)
+//   - "unavailable":  Netzwerkfehler, Timeout, sonstiger HTTP-Fehler
+func ProbeProviderModelList(ctx context.Context, provider, apiKey string) ProviderHealth {
 	start := time.Now()
 	health := ProviderHealth{
-		Model:       cfg.Model,
 		LastChecked: start,
 	}
 
-	// Kurzer Probe-Request mit kleinem Timeout
+	endpoint, needsAuth := modelsEndpointForProvider(provider)
+	if endpoint == "" {
+		health.Status = "unavailable"
+		health.Error = "no models endpoint known for provider: " + provider
+		return health
+	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// Einfacher Request - wir senden einen ungültigen Prompt um schnell eine Antwort zu bekommen
-	// (entweder Fehler oder schneller Erfolg ohne viele Token)
-	probeRequest := map[string]interface{}{
-		"model":    cfg.Model,
-		"messages": []map[string]string{{"role": "user", "content": "ping"}},
-		"max_tokens": 1,
-	}
-
-	_, _, _, err := CallAPI(probeCtx, cfg, probeRequest, 5)
-	health.Latency = time.Since(start)
-
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		// Prüfe ob es ein erwarteter Fehler ist (z.B. ungültiger API-Key)
-		// oder ein Verbindungsfehler
-		apiErr := ClassifyError(err)
-
-		switch apiErr.Type {
-		case ErrAuthFailed:
-			// Auth-Fehler bedeutet der Server ist erreichbar, aber der Key ist ungültig
-			health.Status = "auth_failed"
-			health.Error = err.Error()
-		case ErrRateLimit:
-			health.Status = "available"
-			health.Error = "rate_limited"
-		case ErrTimeout:
-			health.Status = "unavailable"
-			health.Error = "timeout"
-		case ErrClientError:
-			// Ein leerer Inhalt wegen max_tokens:1 ist immer noch ein erreichbarer Provider
-			if strings.Contains(apiErr.Message, "leere Antwort") {
-				health.Status = "available"
-				health.Error = "empty_probe_response"
-			} else {
-				health.Status = "unavailable"
-				health.Error = err.Error()
-			}
-		default:
-			health.Status = "unavailable"
-			health.Error = err.Error()
-		}
-	} else {
-		health.Status = "available"
+		health.Status = "unavailable"
+		health.Error = err.Error()
+		return health
+	}
+	if needsAuth && apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
+	resp, err := defaultHTTPClient.Do(req)
+	health.Latency = time.Since(start)
+	if err != nil {
+		health.Status = "unavailable"
+		health.Error = err.Error()
+		return health
+	}
+	defer resp.Body.Close()
+	// Body verwerfen (limitiert, kein Voll-Parsen nötig)
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		health.Status = "available"
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		health.Status = "auth_failed"
+		health.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	default:
+		health.Status = "unavailable"
+		health.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
 	return health
+}
+
+// modelsEndpointForProvider liefert den GET /models-Endpoint eines Providers
+// und ob dieser Bearer-Auth benötigt. Mammouth ist key-less.
+func modelsEndpointForProvider(provider string) (string, bool) {
+	switch provider {
+	case "mammouth":
+		return mammouthModelsEndpoint, false
+	case "moonshot":
+		return moonshotModelsEndpoint, true
+	case "zai":
+		return zaiModelsEndpoint, true
+	default:
+		return "", false
+	}
 }
 
 // **********************************************************************

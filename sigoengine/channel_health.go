@@ -8,23 +8,19 @@ package sigoengine
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
-// channelModelResolver kann vom Server gesetzt werden, damit der Health-Monitor
-// die tatsächlich geladenen Modelle (nicht nur die CLI-Registry) sieht.
-var channelModelResolver func(provider string) (endpoint, modelID string)
-
-// SetChannelModelResolver erlaubt dem Server, eine Funktion zu registrieren,
-// die pro Provider ein Endpoint/Modell-Paar für Health-Checks liefert.
-func SetChannelModelResolver(fn func(provider string) (endpoint, modelID string)) {
-	channelModelResolver = fn
-}
-
-// StartHealthMonitor starts a goroutine that periodically health-checks all
-// active channels. It activates inactive reserve channels when all active
-// channels for a provider become unhealthy. It disables channels on auth errors.
+// StartHealthMonitor starts a goroutine that periodically re-evaluates channel
+// health and activates reserve channels when needed.
+//
+// LAZY Health-Modell (Fix gegen API-Kosten ohne User-Request):
+// Aktive Kanäle werden NICHT mehr aktiv per Ticker angepingt. Ihr Health-Status
+// wird aus echten User-Requests gesetzt (handleChatCompletions → MarkChannelHealth).
+// Der Ticker aktiviert nur noch Reserve-Kanäle, wenn alle aktiven unhealthy sind
+// oder gar kein aktiver Kanal existiert. Vor der Aktivierung wird die Reserve
+// per kostenlosem /models-GET (ProbeProviderModelList) geprüft — das verursacht
+// keine Token-Kosten. Auth-fehlgeschlagene Reserven werden deaktiviert.
 func StartHealthMonitor(ctx context.Context, manager *ChannelManager, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -58,14 +54,23 @@ func runHealthChecks(manager *ChannelManager) {
 				continue
 			}
 			hasActive = true
-			checkChannel(ch, registry)
+			// KEIN checkChannel mehr auf aktive Kanäle — Health kommt lazy
+			// aus User-Requests. Verwendet den vorhandenen Healthy-Status.
 			if ch.Healthy {
 				allActiveUnhealthy = false
 			}
 		}
 
-		if hasActive && allActiveUnhealthy && firstInactive != nil {
-			LogInfo("Auto-enabling reserve channel", map[string]interface{}{
+		// Reserve aktivieren, wenn alle aktiven unhealthy sind ODER gar kein
+		// aktiver Kanal existiert (z.B. nach Auth-Fail-Deaktivierung).
+		needReserve := (!hasActive || allActiveUnhealthy) && firstInactive != nil
+		if !needReserve {
+			continue
+		}
+
+		// Reserve vor Aktivierung kostenlos prüfen (/models-GET, keine Token).
+		if checkChannel(firstInactive, registry) {
+			LogInfo("Auto-enabling healthy reserve channel", map[string]interface{}{
 				"provider": provider,
 				"channel":  firstInactive.Name,
 			})
@@ -74,74 +79,18 @@ func runHealthChecks(manager *ChannelManager) {
 	}
 }
 
-func checkChannel(ch *Channel, registry *ChannelRegistry) {
-	// Look up the first model for the provider to get the endpoint.
-	// Server can inject its own model map; otherwise fall back to the CLI
-	// registry and known static endpoints.
-	var endpoint, modelID string
-	if channelModelResolver != nil {
-		endpoint, modelID = channelModelResolver(ch.Provider)
-	}
-
-	if endpoint == "" || modelID == "" {
-		for _, m := range GetAllModels() {
-			switch {
-			case ch.Provider == "mammouth" && strings.Contains(m.Endpoint, "mammouth"):
-				endpoint = m.Endpoint
-				modelID = m.ID
-			case ch.Provider == "moonshot" && strings.Contains(m.Endpoint, "moonshot"):
-				endpoint = m.Endpoint
-				modelID = m.ID
-			case ch.Provider == "zai" && strings.Contains(m.Endpoint, "z.ai"):
-				endpoint = m.Endpoint
-				modelID = m.ID
-			}
-			if endpoint != "" {
-				break
-			}
-		}
-	}
-
-	// Fallback auf bekannte statische Endpoints/Modelle, falls Provider-Fetch fehlgeschlagen ist
-	if endpoint == "" {
-		switch ch.Provider {
-		case "moonshot":
-			endpoint = moonshotChatEndpoint
-			modelID = "moonshot-v1-8k"
-		case "zai":
-			endpoint = zaiChatEndpoint
-			modelID = "glm-4.5"
-		}
-	}
-
-	if endpoint == "" || modelID == "" {
-		ch.LastError = "no model endpoint known for provider"
-		ch.ConsecutiveErrors++
-		return
-	}
-
-	cfg := &ProviderConfig{
-		Endpoint: endpoint,
-		Model:    modelID,
-		APIKey:   ch.APIKey,
-		Type:     providerTypeForHealthCheck(ch.Provider, endpoint),
-	}
-
+// checkChannel testet einen Kanal per kostenlosem /models-GET und aktualisiert
+// seinen Health-Status via MarkChannelHealth. Gibt true zurück, wenn der Kanal
+// verfügbar ("available") ist. Auth-fehlgeschlagene Kanäle werden deaktiviert.
+//
+// Wird nur für Reserve-Kanäle vor der Aktivierung gerufen — nicht für bereits
+// aktive Kanäle (deren Health lazy aus User-Requests stammt).
+func checkChannel(ch *Channel, registry *ChannelRegistry) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	health := ProbeProvider(ctx, cfg)
-	ch.LastHealthCheck = time.Now()
-	if health.Status == "available" {
-		ch.Healthy = true
-		ch.LastError = ""
-		ch.ConsecutiveErrors = 0
-		return
-	}
-
-	ch.Healthy = false
-	ch.LastError = health.Error
-	ch.ConsecutiveErrors++
+	health := ProbeProviderModelList(ctx, ch.Provider, ch.APIKey)
+	registry.MarkChannelHealth(ch.Provider, ch.Name, health.Status == "available", health.Error)
 
 	if health.Status == "auth_failed" {
 		LogWarn("Disabling channel due to auth failure", map[string]interface{}{
@@ -155,19 +104,8 @@ func checkChannel(ch *Channel, registry *ChannelRegistry) {
 				"error":    err.Error(),
 			})
 		}
+		return false
 	}
-}
 
-// providerTypeForHealthCheck bestimmt den ProviderConfig.Type anhand von
-// Provider-Name und Endpoint. Mammouth/Moonshot/Z.ai nutzen OpenAI-Style
-// Bearer-Auth (intern "mammoth"), Anthropic x-api-key, Ollama keinen Key.
-func providerTypeForHealthCheck(provider, endpoint string) string {
-	switch {
-	case provider == "anthropic" || strings.Contains(endpoint, "anthropic"):
-		return "anthropic"
-	case provider == "ollama" || strings.Contains(endpoint, ":11434"):
-		return "ollama"
-	default:
-		return "mammoth"
-	}
+	return health.Status == "available"
 }
