@@ -43,6 +43,24 @@ Drei Szenarien gegen `glm-4.5-air` (billigstes Modell, <1 Cent Quota):
 
 Nebenbei: `go build ./...` war nur Compile-Check, keine Binaries. Stray-Binary `sigoREST/sigoREST` (10,7 M, Juli) trieb umher. Makefile mit `build/sigorest/sigoe/mockprovider/test/clean`, alle Binaries in `./build/` (in `.gitignore`). `CLAUDE.md` und alle drei READMEs + `chinese/README.md` umgestellt.
 
+### 7. Pro-Kanal-Config deployed + LoadState-Bug
+
+Nach der ersten Retrospektive-Version (Commit `c6b0c49`) folgte der Produktiv-Deploy der provider-spezifischen Werte in `/var/sigoREST/channels.json` (Backup `channels.json.bak-20260818`):
+
+| Provider | min_interval_ms | max_wait_ms |
+|----------|-----------------|-------------|
+| Mammoth  | 800             | 2000        |
+| Moonshot | 500             | 1000        |
+| ZAI      | 400             | 1000        |
+
+Mammoth dichter als ZAI, weil Mammoth ohne Key läuft (aggressivere Drosselung nötig). 18 Kanäle insgesamt.
+
+Dabei fiel ein kritischer Bug auf: `persistedState` und `LoadState` speicherten nur das `active`-Flag — manuelle `channels.json`-Werte für `MinInterval`/`MaxWait` würden beim Laden ignoriert und beim nächsten `SetActive` überschrieben. Fix (Commit `d6310e2`): `persistedState` um beide Felder erweitern, `LoadState` kopiert sie in den Channel, `saveStateLocked` schreibt sie mit `omitempty`. Roundtrip wäre durch einen Persistenz-Test abgefangen worden — Lücke im TDD.
+
+Live-Beweis der Wirksamkeit: 2 parallele Requests an den expliziten Kanal `mammouth-0` zeigten 881 ms Differenz zwischen den Antworten ≈ die eingestellten 800 ms `min_interval`. Der Limiter drosselt im echten Produktivbetrieb.
+
+Operability-Erweiterung (Commit `e6a24b9`): `AllChannelStatus` exponiert jetzt `min_interval_ms`/`max_wait_ms` pro Kanal in `/api/channels` — Admin sieht die aktive Config ohne Datei-Inspektion.
+
 **Learnings:**
 
 1. **Pro-Kanal-Granularität ist der entscheidende Hebel** — nicht die Limiter-Logik selbst. Der Live-Test bewies es: ein Provider-Level-Limiter hätte bei 50 ms `max_wait` alle 5 Requests sterben lassen. Pro Kanal + Failover verwandelt den Limiter in einen Lastverteiler: volle Kanäle delegieren automatisch an freie Keys.
@@ -55,11 +73,13 @@ Nebenbei: `go build ./...` war nur Compile-Check, keine Binaries. Stray-Binary `
 
 5. **Caveman-Modus + Learning-Insights vertragen sich.** Die `★ Insight`-Blöcke zwangen zur pünktlichen Architektur-Begründung (Sentinel, Failover-Synergie) — genau dort, wo Verkürzung sonst zu unbegründeten Entscheidungen geführt hätte.
 
+6. **Persistenz-Schicht ist eigener Testpfad.** Der LoadState-Bug war kein Logikfehler, sondern ein vergessener roundtrip: Datenmodell-Felder existierten, aber die Load/Save-Schicht wurde nicht mitgeführt. TDD deckte die Limiter-Logik ab, nicht die Persistenz. Lehre: bei jedem `persistedState`-struct-Change gehört ein Roundtrip-Test dazu (setze Werte → speichere → lade neu → vergleiche). Field-Level-Tests allein reichen nicht, wenn Serialisierung im Weg ist.
+
 **Nächste mögliche Schritte:**
-- Pro-Kanal-Config in `channels.json` für Provider-spezifische Limits setzen (Mammoth dichter als ZAI).
 - Mock-Provider zu echtem Lasttest ausbauen (z. B. 100 parallele Clients, Latenz-Histogramm).
 - Rate-Limiter-Metriken in `/api/usage` oder `/api/health` exponieren (Throttle-Rate pro Kanal).
 - ggf. Token-Bucket statt Fixed-Window, falls Provider-Burst-Toleranz das nötig macht.
+- Roundtrip-Test für `channels.json`-Persistenz (setze MinInterval/MaxWait → reload → vergleiche) als Regressionsschutz für künftige `persistedState`-Änderungen.
 
 **Co-Autor**: Claude (Anthropic) — Session vom 18. August 2026.
 
