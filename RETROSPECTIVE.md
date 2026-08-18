@@ -4,6 +4,67 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-08-18: Pro-Kanal Rate-Limiter (hybrid) + zentralisiertes ./build/
+
+**Zielsetzung:**
+sigoREST stoppte Provider-APIs bei zu schnellem Request-Feuer. Gerhards These: gezieltes Bremsen (0,5–1 s zwischen Calls) macht die Gesamtperformance schneller, weil 429-Retrys entfallen. Gesucht war eine pro-Kanal-Lösung, die das bestehende Multi-Channel-Failover nicht ausbremst.
+
+**Was erreicht wurde:**
+
+### 1. Brainstorming — drei Designentscheidungen vorab
+
+Klassifiziert als *bounded* (bestehender `handleChatCompletions`-Flow wird erweitert). Drei Entscheidungen durch Gerhard:
+- **Granularität: pro Kanal (API-Key)** — nicht pro Provider. Begründung: ein Provider-Level-Limiter würde alle Failover-Keys blockieren, obwohl andere frei wären.
+- **Verhalten bei Treffer: hybrid** — kurz warten, dann 429, nicht sofort 429 und nicht endlos queue.
+- **Konfiguration: pro Kanal in `channels.json`** mit globalem Default — verschiedene Provider haben unterschiedliche Limits.
+
+### 2. RateLimiter-Komponente (TDD)
+
+`sigoengine/rate_limiter.go` neu: `RateLimiter.Acquire(ctx, key, minInterval, maxWait)` / `Release(key)`. Hybrid-Logik: innerhalb `minInterval` wartet der Request bis das Intervall verstrichen ist; würde die Wartezeit `maxWait` überschreiten, schlägt er mit `ErrRateLimited` fehl. ctx-Abbruch bricht die Wartezeit ab. `lastCall` wird unter kurzem Lock nur bei erfolgreicher Reservierung gesetzt — nicht während des Sleeps —, sodass parallele Acquires sich korrekt serialisieren.
+
+Sechs Unit-Tests vorab (TDD): Erstaufruf sofort, Warten auf `minInterval`, 429 bei `maxWait`-Überschreitung, ctx-Cancel, unabhängige Keys, Parallel-Serialisierung. Alle grün vor Einbau.
+
+### 3. Server-Einbau + Failover-Synergie
+
+Zwei Flags (`-rate-min-interval 500ms`, `-rate-max-wait 1000ms`), pro-Kanal-Override via `MinInterval`/`MaxWait` (ms) im `Channel`-Struct. `Acquire` sitzt im `channelsToTry`-Loop pro Kanal; `ErrRateLimited` → `continue` →下一个 Kanal. Erst wenn alle Kanäle eines Providers erschöpft sind, geht HTTP 429 + `Retry-After` an den Client.
+
+### 4. Mock-Provider als Testumgebung
+
+`test/mockprovider/` (neu): OpenAI-kompatibler HTTP-Server mit Fixed-Window-Rate-Limit. `New(rps)` für Tests, `NewStandalone` für Standalone-Binary (`test/cmd/mockprovider/`). Integrationstest beweist: 8 parallele Requests ohne Limiter → ≥1× 429 vom Mock; mit Limiter → 0× 429.
+
+### 5. Live-Beweis gegen echten ZAI-Provider
+
+Drei Szenarien gegen `glm-4.5-air` (billigstes Modell, <1 Cent Quota):
+- Default (500/1000 ms), 5 parallel → 5× 200, serialisiert (1–2 s), Failover sichtbar im Log.
+- Aggressiv (50 ms `max_wait`), 5 parallel → 5× 200 via Failover auf 6 ZAI-Kanäle.
+- Überlast (50 ms), 10 parallel → 6× 200 + 4× 429 — exakt passend zu 6 verfügbaren Kanälen.
+
+### 6. ./build/-Zentralisierung
+
+Nebenbei: `go build ./...` war nur Compile-Check, keine Binaries. Stray-Binary `sigoREST/sigoREST` (10,7 M, Juli) trieb umher. Makefile mit `build/sigorest/sigoe/mockprovider/test/clean`, alle Binaries in `./build/` (in `.gitignore`). `CLAUDE.md` und alle drei READMEs + `chinese/README.md` umgestellt.
+
+**Learnings:**
+
+1. **Pro-Kanal-Granularität ist der entscheidende Hebel** — nicht die Limiter-Logik selbst. Der Live-Test bewies es: ein Provider-Level-Limiter hätte bei 50 ms `max_wait` alle 5 Requests sterben lassen. Pro Kanal + Failover verwandelt den Limiter in einen Lastverteiler: volle Kanäle delegieren automatisch an freie Keys.
+
+2. **Sentinel vs. APIError — Schichtentrennung zahlt sich aus.** `ErrRateLimited` ist bewusst `errors.New`, kein `*SigoError`. Er entsteht lokal (Server-Entscheidung), nicht vom Provider. Hätte ich ihn als APIError gebaut, müsste `ClassifyError` wissen, dass lokale Limits existieren — falsche Schicht. Deshalb eigener Early-Return vor dem `apiErr.Type`-Switch.
+
+3. **TDD bei paralleler Logik ist nicht optional.** Der Parallel-Serialisierungs-Test (`TestRateLimiterConcurrentSerializes`) war der wichtigste — er hätte die naive „sleep dann setze lastCall"-Implementierung entlarvt, bei der alle Goroutines gleichzeitig aufwachen und denselben Zeitstempel setzen.
+
+4. **Build-Setup ist Dokumentation.** Die zentralisierte `./build/`-Konvention stand nirgends; `go build ./...` suggerierte fertige Binaries, wo keine waren. Gerhards „Augenblick, wo ist das Programm?" war der Trigger. Makefile + CLAUDE.md machen die Konvention explizit und reproduzierbar.
+
+5. **Caveman-Modus + Learning-Insights vertragen sich.** Die `★ Insight`-Blöcke zwangen zur pünktlichen Architektur-Begründung (Sentinel, Failover-Synergie) — genau dort, wo Verkürzung sonst zu unbegründeten Entscheidungen geführt hätte.
+
+**Nächste mögliche Schritte:**
+- Pro-Kanal-Config in `channels.json` für Provider-spezifische Limits setzen (Mammoth dichter als ZAI).
+- Mock-Provider zu echtem Lasttest ausbauen (z. B. 100 parallele Clients, Latenz-Histogramm).
+- Rate-Limiter-Metriken in `/api/usage` oder `/api/health` exponieren (Throttle-Rate pro Kanal).
+- ggf. Token-Bucket statt Fixed-Window, falls Provider-Burst-Toleranz das nötig macht.
+
+**Co-Autor**: Claude (Anthropic) — Session vom 18. August 2026.
+
+---
+
 ## Session 2026-07-11: Doku-Sync — CN/EN-READMEs + chinese/ auf Multi-Channel-Master-Stand
 
 **Zielsetzung:**
