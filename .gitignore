@@ -1,8 +1,5 @@
-# Binaries
-sigoREST/sigoREST
-sigoE/sigoE
-/sigoE
-main
+# Binaries — alle kompilierten Programme landen in ./build/
+/build/
 *.exe
 
 # Go build artifacts
@@ -26,6 +23,8 @@ certs/
 # OS
 .DS_Store
 Thumbs.db
+olds/
+TODO-*.md
 
 # Test artifacts
 *.test

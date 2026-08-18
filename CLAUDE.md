@@ -14,7 +14,7 @@ sigoREST = drei-schichtiges Go-Projekt, zwei User-Interfaces:
 - **sigoREST Server**: OpenAI-kompatibler REST-Server für parallele Verbindungen (~100)
 
 Beide nutzen **Shared Package** `sigoengine` für:
-- Model-Registry (60+ Modelle von Mammoth.ai, Moonshot.ai, Z.ai)
+- Model-Registry (60+ Modelle von Mammouth.ai, Moonshot.ai, Z.ai)
 - API-Abstraktion (OpenAI + Anthropic Formate)
 - Circuit Breaker + Retry Logic
 - Session-Management (JSON-basiert)
@@ -22,34 +22,34 @@ Beide nutzen **Shared Package** `sigoengine` für:
 
 ## Development Commands
 
-### Alle Pakete bauen
+### Alle Programme bauen (Makefile → `./build/`)
+Alle kompilierten Binaries landen im `./build/`-Verzeichnis (in `.gitignore`).
 ```bash
-go build ./...
+make build          # alle: sigoREST, sigoE, mockprovider
+make sigorest       # nur REST-Server
+make sigoe          # nur CLI
+make mockprovider   # nur Mock-Provider (für Rate-Limit-Tests)
+make test           # alle Tests
+make clean          # ./build/ entfernen
 ```
 
-### REST-Server bauen & starten
+### REST-Server starten
 ```bash
-# Server bauen
-go build -o sigoREST/sigoREST ./sigoREST/
-
-# Server starten (HTTP localhost:9080, HTTPS privates Netz:9443)
-./sigoREST/sigoREST -v debug
+# HTTP localhost:9080, HTTPS privates Netz:9443
+./build/sigoREST -v debug
 ```
 
-### CLI bauen & nutzen
+### CLI nutzen
 ```bash
-# CLI bauen
-go build -o sigoE ./cmd/sigoE/
-
 # Alle verfügbaren Modelle auflisten
-./sigoE -l
+./build/sigoE -l
 
 # Prompt senden
-echo "Hallo" | ./sigoE -m claude-h
+echo "Hallo" | ./build/sigoE -m claude-h
 
 # Mit Session
-./sigoE -m claude-h -s projekt-x "Erste Nachricht"
-./sigoE -m claude-h -s projekt-x "Zweite Nachricht"
+./build/sigoE -m claude-h -s projekt-x "Erste Nachricht"
+./build/sigoE -m claude-h -s projekt-x "Zweite Nachricht"
 ```
 
 ### Server testen
@@ -284,7 +284,7 @@ Mammoth via API). Neuen Provider → neue `Fetch*`-Funktion + Aufruf in
 
 ### REST-Server als systemd-Service installieren
 ```bash
-sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+sudo cp build/sigoREST /usr/local/sbin/sigoREST
 sudo mkdir -p /usr/local/slib/sigoREST
 sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
 # API-Keys in EnvironmentFile + Wants/After=network-online.target
@@ -297,7 +297,7 @@ sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
 ollama pull llama3.3
 
 # Server neu starten
-systemctl restart sigorest  # oder: ./sigoREST/sigoREST
+systemctl restart sigorest  # oder: ./build/sigoREST
 
 # Nutzen (auto-discovered)
 curl -s http://localhost:9080/v1/chat/completions \
@@ -308,7 +308,7 @@ curl -s http://localhost:9080/v1/chat/completions \
 ### Debugging REST-Server
 ```bash
 # Debug-Logs
-./sigoREST/sigoREST -v debug
+./build/sigoREST -v debug
 
 # Health check (Circuit Breaker Status)
 curl -s http://localhost:9080/api/health | jq
