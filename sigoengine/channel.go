@@ -217,7 +217,9 @@ func (r *ChannelRegistry) DiscoverFromEnv() {
 // persistedState is the on-disk shape of channels.json.
 type persistedState struct {
 	Providers map[string]map[string]struct {
-		Active bool `json:"active"`
+		Active      bool `json:"active"`
+		MinInterval int  `json:"min_interval_ms,omitempty"`
+		MaxWait     int  `json:"max_wait_ms,omitempty"`
 	} `json:"providers"`
 }
 
@@ -249,6 +251,8 @@ func (r *ChannelRegistry) LoadState() error {
 			for _, ch := range r.channels[provider] {
 				if ch.Name == name {
 					ch.Active = cfg.Active
+					ch.MinInterval = cfg.MinInterval
+					ch.MaxWait = cfg.MaxWait
 					if !ch.Active {
 						ch.Healthy = false
 					}
@@ -271,16 +275,22 @@ func (r *ChannelRegistry) saveStateLocked() error {
 		return nil
 	}
 	state := persistedState{Providers: make(map[string]map[string]struct {
-		Active bool `json:"active"`
+		Active      bool `json:"active"`
+		MinInterval int  `json:"min_interval_ms,omitempty"`
+		MaxWait     int  `json:"max_wait_ms,omitempty"`
 	})}
 	for provider, list := range r.channels {
 		m := make(map[string]struct {
-			Active bool `json:"active"`
+			Active      bool `json:"active"`
+			MinInterval int  `json:"min_interval_ms,omitempty"`
+			MaxWait     int  `json:"max_wait_ms,omitempty"`
 		})
 		for _, ch := range list {
 			m[ch.Name] = struct {
-				Active bool `json:"active"`
-			}{Active: ch.Active}
+				Active      bool `json:"active"`
+				MinInterval int  `json:"min_interval_ms,omitempty"`
+				MaxWait     int  `json:"max_wait_ms,omitempty"`
+			}{Active: ch.Active, MinInterval: ch.MinInterval, MaxWait: ch.MaxWait}
 		}
 		state.Providers[provider] = m
 	}
