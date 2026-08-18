@@ -42,3 +42,6 @@ __pycache__/
 
 # External symlinks
 test-translator
+
+# Playwright MCP cache
+.playwright-mcp/
