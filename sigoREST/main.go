@@ -140,16 +140,19 @@ type ModelUsageStats struct {
 // **********************************************************************
 // Server-State
 type Server struct {
-	mu             sync.RWMutex
-	memory         sigoengine.MemoryBlock
-	models         map[string]ModelInfo                          // id → ModelInfo
-	breakers       map[string]*sigoengine.EnhancedCircuitBreaker // Modell → Enhanced Circuit Breaker
-	systemPrompt   string                                        // globaler Default-Prompt (leer = kein Prompt)
-	usageMu        sync.RWMutex
-	usage          map[string]*ModelUsageStats // model-id → Stats
-	usageByChannel map[string]*ModelUsageStats // model-id#provider-channel → Stats
-	channelManager *sigoengine.ChannelManager
-	baseDir        string
+	mu              sync.RWMutex
+	memory          sigoengine.MemoryBlock
+	models          map[string]ModelInfo                          // id → ModelInfo
+	breakers        map[string]*sigoengine.EnhancedCircuitBreaker // Modell → Enhanced Circuit Breaker
+	systemPrompt    string                                        // globaler Default-Prompt (leer = kein Prompt)
+	usageMu         sync.RWMutex
+	usage           map[string]*ModelUsageStats // model-id → Stats
+	usageByChannel  map[string]*ModelUsageStats // model-id#provider-channel → Stats
+	channelManager  *sigoengine.ChannelManager
+	rateLimiter     *sigoengine.RateLimiter
+	rateMinInterval time.Duration
+	rateMaxWait     time.Duration
+	baseDir         string
 }
 
 // **********************************************************************
@@ -165,6 +168,8 @@ var (
 	showVersion           = flag.Bool("version", false, "Version anzeigen")
 	dataDir               = flag.String("data-dir", "/var/sigoREST", "Basisverzeichnis für Kanäle, Sessions, Memory, System-Prompts")
 	channelHealthInterval = flag.Duration("channel-health-interval", 30*time.Second, "Intervall für Kanal-Health-Checks")
+	rateMinInterval       = flag.Duration("rate-min-interval", 500*time.Millisecond, "Default Mindest-Abstand zwischen Calls pro Kanal (0=deaktiviert)")
+	rateMaxWait           = flag.Duration("rate-max-wait", 1000*time.Millisecond, "Default max Queue-Wartezeit bis HTTP 429 pro Kanal")
 )
 
 // **********************************************************************
@@ -580,11 +585,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.MaxTokens == 0 && modelInfo.MaxOutputTokens > 0 {
 		req.MaxTokens = modelInfo.MaxOutputTokens
 	}
-	if req.Temp == 0 {
-		if modelInfo.MinTemperature < modelInfo.MaxTemperature {
-			req.Temp = (modelInfo.MinTemperature + modelInfo.MaxTemperature) / 2.0
-		} else {
-			req.Temp = 1.0
+	// Temperatur festlegen:
+	//   - Fixed-Temp-Modelle (Min==Max, z.B. kimi-k2.5 thinking): Wert immer
+	//     erzwingen, User-Override ignorieren — sonst 400 vom Provider.
+	//   - Sonst: User-Wert oder Default-Mittelpunkt, geclampt auf [Min,Max].
+	switch {
+	case modelInfo.MinTemperature == modelInfo.MaxTemperature:
+		req.Temp = modelInfo.MinTemperature
+	case req.Temp == 0:
+		req.Temp = (modelInfo.MinTemperature + modelInfo.MaxTemperature) / 2.0
+	default:
+		if req.Temp < modelInfo.MinTemperature {
+			req.Temp = modelInfo.MinTemperature
+		} else if req.Temp > modelInfo.MaxTemperature {
+			req.Temp = modelInfo.MaxTemperature
 		}
 	}
 	if req.Timeout == 0 {
@@ -732,6 +746,34 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.Endpoint = modelInfo.Endpoint
 
+		// Rate-Limiter pro Kanal (hybrid): wartet bis minInterval seit
+		// letztem Call vergangen, spätestens nach maxWait → ErrRateLimited
+		// → Failover auf nächsten Kanal (oder HTTP 429 am Ende).
+		minInt := s.rateMinInterval
+		if currentCh.MinInterval > 0 {
+			minInt = time.Duration(currentCh.MinInterval) * time.Millisecond
+		}
+		maxW := s.rateMaxWait
+		if currentCh.MaxWait > 0 {
+			maxW = time.Duration(currentCh.MaxWait) * time.Millisecond
+		}
+		if minInt > 0 {
+			if err := s.rateLimiter.Acquire(ctx, currentCh.FullName(), minInt, maxW); err != nil {
+				if err == sigoengine.ErrRateLimited {
+					sigoengine.LogWarn("Rate-Limit: Kanal überlastet, Failover", map[string]interface{}{
+						"channel":     currentCh.FullName(),
+						"max_wait_ms": maxW.Milliseconds(),
+					})
+					lastErr = err
+					continue
+				}
+				// ctx abgebrochen oder anderer Fehler
+				lastErr = err
+				break
+			}
+			s.rateLimiter.Release(currentCh.FullName())
+		}
+
 		// Circuit Breaker pro Kanal (Key: model#channel)
 		cbKey := fmt.Sprintf("%s#%s", req.Model, currentCh.FullName())
 		s.mu.Lock()
@@ -790,8 +832,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		if lastErr == nil {
 			successfulCh = currentCh
+			// Lazy Health: erfolgreicher User-Request → Kanal healthy
+			s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, true, "")
 			break
 		}
+
+		// Lazy Health: fehlgeschlagener User-Request → Kanal unhealthy
+		s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, false, lastErr.Error())
 
 		apiErr := sigoengine.ClassifyError(lastErr)
 		if apiErr.Type == sigoengine.ErrClientError {
@@ -805,6 +852,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastErr != nil {
+		// Eigener Rate-Limiter-Fehler (sentinel, kein APIError):
+		// alle Kanäle waren innerhalb maxWait nicht frei → HTTP 429.
+		if lastErr == sigoengine.ErrRateLimited {
+			retryAfter := s.rateMaxWait.Seconds()
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			sigoengine.LogWarn("Alle Kanäle rate-limitiert", map[string]interface{}{
+				"model":       req.Model,
+				"retry_after": retryAfter,
+			})
+			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
+			writeError(w, "rate limit exceeded: all channels throttled", "rate_limit", http.StatusTooManyRequests)
+			return
+		}
+
 		// Fehler klassifizieren für typisierte Antwort
 		apiErr := sigoengine.ClassifyError(lastErr)
 
@@ -1451,14 +1514,14 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"features": map[string]string{
-			"circuit_breaker":      "Automatische Fehlerisolation nach 5 Fehlern in 60s",
-			"retry":                "Exponential Backoff: 500ms → 1s → 2s → max 5s",
-			"session_management":   "JSON-basierte Sessions pro Kanal",
-			"ip_access_control":    "HTTP: localhost, HTTPS: privates Netz",
-			"ollama_discovery":     "Auto-Discovery lokaler Ollama-Modelle",
-			"memory_block":         "Globaler + kanal-spezifischer Memory",
-			"system_prompt":        "Globaler + kanal-spezifischer + per-Request System-Prompt",
-			"multi_channel":        "Mehrere API-Key-Kanäle pro Provider mit Failover",
+			"circuit_breaker":        "Automatische Fehlerisolation nach 5 Fehlern in 60s",
+			"retry":                  "Exponential Backoff: 500ms → 1s → 2s → max 5s",
+			"session_management":     "JSON-basierte Sessions pro Kanal",
+			"ip_access_control":      "HTTP: localhost, HTTPS: privates Netz",
+			"ollama_discovery":       "Auto-Discovery lokaler Ollama-Modelle",
+			"memory_block":           "Globaler + kanal-spezifischer Memory",
+			"system_prompt":          "Globaler + kanal-spezifischer + per-Request System-Prompt",
+			"multi_channel":          "Mehrere API-Key-Kanäle pro Provider mit Failover",
 			"channel_health_monitor": "Automatische Health-Checks und Reserve-Zuschaltung",
 		},
 		"error_types": map[string]string{
@@ -1592,32 +1655,17 @@ func main() {
 		sigoengine.LogWarn("Kanal-Status konnte nicht geladen werden", map[string]interface{}{"error": err.Error()})
 	}
 	srv.channelManager = sigoengine.NewChannelManager(registry)
-
-	// Health-Monitor soll die vom Server geladenen Modelle verwenden, nicht
-	// nur die CLI-Registry in sigoengine.
-	sigoengine.SetChannelModelResolver(func(provider string) (string, string) {
-		srv.mu.RLock()
-		defer srv.mu.RUnlock()
-		for _, info := range srv.models {
-			switch provider {
-			case "mammouth":
-				if strings.Contains(info.Endpoint, "mammouth") {
-					return info.Endpoint, info.ID
-				}
-			case "moonshot":
-				if strings.Contains(info.Endpoint, "moonshot") {
-					return info.Endpoint, info.ID
-				}
-			case "zai":
-				if strings.Contains(info.Endpoint, "z.ai") {
-					return info.Endpoint, info.ID
-				}
-			}
-		}
-		return "", ""
+	srv.rateLimiter = sigoengine.NewRateLimiter()
+	srv.rateMinInterval = *rateMinInterval
+	srv.rateMaxWait = *rateMaxWait
+	sigoengine.LogInfo("Rate-Limiter aktiv", map[string]interface{}{
+		"min_interval_ms": srv.rateMinInterval.Milliseconds(),
+		"max_wait_ms":     srv.rateMaxWait.Milliseconds(),
 	})
 
-	// Health-Monitor starten
+	// Health-Monitor starten. Health-Status aktiver Kanäle wird lazy aus
+	// echten User-Requests gesetzt (handleChatCompletions → MarkChannelHealth).
+	// Der Ticker aktiviert nur noch Reserven per kostenlosem /models-Probe.
 	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, *channelHealthInterval)
 
 	// Ollama Auto-Discovery

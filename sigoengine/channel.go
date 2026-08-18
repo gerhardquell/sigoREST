@@ -28,6 +28,9 @@ type Channel struct {
 	LastHealthCheck   time.Time `json:"last_health_check,omitempty"`
 	LastError         string    `json:"last_error,omitempty"`
 	ConsecutiveErrors int       `json:"consecutive_errors"`
+	// Rate-Limit-Config pro Kanal (0 → Server-Default greift).
+	MinInterval int `json:"min_interval_ms,omitempty"` // Mindest-Abstand zwischen Calls (ms)
+	MaxWait     int `json:"max_wait_ms,omitempty"`     // max Queue-Wartezeit bis 429 (ms)
 }
 
 // FullName returns the canonical channel identifier, e.g. "mammouth-0".
@@ -130,6 +133,36 @@ func (r *ChannelRegistry) AddChannel(ch *Channel) {
 		return list[i].Order < list[j].Order
 	})
 	r.channels[ch.Provider] = list
+}
+
+// MarkChannelHealth aktualisiert den Health-Status eines Kanals thread-safe.
+// Wird aus zwei Pfaden gerufen:
+//   - handleChatCompletions (lazy): nach echtem User-Request → healthy=true
+//     bei Erfolg, healthy=false + lastErr bei Fehler.
+//   - checkChannel (Reserve-Test im Ticker): nach kostenlosem /models-Probe.
+//
+// ConsecutiveErrors wird bei healthy=true zurückgesetzt, sonst inkrementiert.
+// LastHealthCheck wird immer aktualisiert. Persistiert keinen State (active-Flag
+// bleibt unberührt); Persistenz nur via SetActive.
+func (r *ChannelRegistry) MarkChannelHealth(provider, name string, healthy bool, lastErr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ch := range r.channels[provider] {
+		if ch.Name != name {
+			continue
+		}
+		ch.LastHealthCheck = time.Now()
+		if healthy {
+			ch.Healthy = true
+			ch.LastError = ""
+			ch.ConsecutiveErrors = 0
+		} else {
+			ch.Healthy = false
+			ch.LastError = lastErr
+			ch.ConsecutiveErrors++
+		}
+		return
+	}
 }
 
 // knownProviders maps the base API-key env var names to provider names.
