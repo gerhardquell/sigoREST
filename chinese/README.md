@@ -30,8 +30,8 @@ sigoREST 是一个开源的 AI 模型统一网关，让你可以同时使用多�
 
 ```bash
 # 下载并启动服务器
-go build -o sigoREST/sigoREST ./sigoREST/
-./sigoREST/sigoREST -v debug
+make build
+./build/sigoREST -v debug
 
 # 使用 Kimi
 curl http://localhost:9080/v1/chat/completions \

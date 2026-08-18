@@ -30,9 +30,9 @@ sigorest/
 
 **sigoREST Server** (als systemd-Service):
 ```bash
-# Binary kompilieren und installieren
-go build -o sigoREST/sigoREST ./sigoREST/
-sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+# Alle Binaries landen in ./build/ (Makefile)
+make build
+sudo cp build/sigoREST /usr/local/sbin/sigoREST
 
 # Datenverzeichnis anlegen
 sudo mkdir -p /var/sigoREST
@@ -43,22 +43,27 @@ sudo chown -R sigorest:sigorest /var/sigoREST
 
 **sigoE CLI**:
 ```bash
-# Binary kompilieren und installieren
-go build -o cmd/sigoE/sigoE ./cmd/sigoE/
-sudo cp cmd/sigoE/sigoE /usr/local/bin/sigoE
+make build
+sudo cp build/sigoE /usr/local/bin/sigoE
 ```
 
 ### Entwicklung (Lokal)
 
 ```bash
-# Alle Pakete bauen
-go build ./...
+# Alle Binaries bauen → ./build/ (sigoREST, sigoE, mockprovider)
+make build
 
 # REST-Server starten
-./sigoREST/sigoREST -v debug
+./build/sigoREST -v debug
 
 # CLI nutzen
-./cmd/sigoE/sigoE -l
+./build/sigoE -l
+
+# Tests
+make test
+
+# ./build/ aufräumen
+make clean
 ```
 
 ## Server-Flags
@@ -71,6 +76,8 @@ go build ./...
 | `-key` | `./certs/server.key` | TLS-Schlüssel |
 | `-data-dir` | `/var/sigoREST` | Basisverzeichnis für Memory, System-Prompt, channels.json, Sessions |
 | `-channel-health-interval` | `30s` | Intervall für Kanal-Health-Checks |
+| `-rate-min-interval` | `500ms` | Default Mindest-Abstand zwischen Calls pro Kanal (`0`=deaktiviert) |
+| `-rate-max-wait` | `1000ms` | Default max Queue-Wartezeit bis HTTP 429 pro Kanal |
 | `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
 | `-q` | — | Quiet Mode (nur Fehler) |
 | `-j` | — | JSON-Logs |
@@ -206,6 +213,28 @@ curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/system-prompt \
 ### Auto-Failover
 
 Wenn ein Kanal während eines Requests fehlschlägt (Rate-Limit, Timeout, Server-Fehler), probiert sigoREST automatisch den nächsten aktiven Kanal. Auth-Fehler deaktivieren den betroffenen Kanal sofort persistent.
+
+### Rate-Limiter (pro Kanal, hybrid)
+
+Jeder Kanal hat einen eigenen Rate-Limiter, der zu schnelle aufeinanderfolgende Calls an denselben API-Key drosselt — Provider-Rate-Limits werden so vermieden statt im Fehlerfall repariert.
+
+- **`min_interval`** (Default `-rate-min-interval 500ms`): Mindest-Abstand zwischen zwei Calls pro Kanal.
+- **`max_wait`** (Default `-rate-max-wait 1000ms`): Wie lange ein Request maximal auf den freien Kanal wartet, bevor HTTP 429 + `Retry-After` an den Client geht.
+
+Verhalten (hybrid): ein Request, der innerhalb von `min_interval` nach dem letzten Call ankommt, wartet bis das Intervall verstrichen ist. Reicht die Wartezeit bis `max_wait`, schlägt er mit `ErrRateLimited` fehl → der Auto-Failover probiert den **nächsten Kanal**. Erst wenn alle Kanäle eines Providers erschöpft sind, erhält der Client HTTP 429. So verteilt sich ein Burst automatisch auf freie API-Keys.
+
+Pro-Kanal-Override in `channels.json` (beide Felder optional, `0`/fehlend → Server-Default):
+```json
+{
+  "provider": "mammouth",
+  "name": "0",
+  "active": true,
+  "min_interval_ms": 800,
+  "max_wait_ms": 2000
+}
+```
+
+Deaktivieren serverweit: `-rate-min-interval 0`.
 
 ### Health-Monitor
 

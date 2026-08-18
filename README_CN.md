@@ -32,9 +32,9 @@ sigorest/
 
 **sigoREST 服务器**（作为 systemd 服务）：
 ```bash
-# 编译并安装二进制文件
-go build -o sigoREST/sigoREST ./sigoREST/
-sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+# 所有二进制文件输出到 ./build/（通过 Makefile）
+make build
+sudo cp build/sigoREST /usr/local/sbin/sigoREST
 
 # 创建数据目录
 sudo mkdir -p /var/sigoREST
@@ -45,22 +45,27 @@ sudo chown -R sigorest:sigorest /var/sigoREST
 
 **sigoE CLI**：
 ```bash
-# 编译并安装二进制文件
-go build -o cmd/sigoE/sigoE ./cmd/sigoE/
-sudo cp cmd/sigoE/sigoE /usr/local/bin/sigoE
+make build
+sudo cp build/sigoE /usr/local/bin/sigoE
 ```
 
 ### 开发（本地）
 
 ```bash
-# 构建所有包
-go build ./...
+# 构建所有二进制文件 → ./build/（sigoREST、sigoE、mockprovider）
+make build
 
 # 启动 REST 服务器
-./sigoREST/sigoREST -v debug
+./build/sigoREST -v debug
 
 # 使用 CLI
-./cmd/sigoE/sigoE -l
+./build/sigoE -l
+
+# 测试
+make test
+
+# 清理 ./build/
+make clean
 ```
 
 ## 服务器参数
@@ -73,6 +78,8 @@ go build ./...
 | `-key` | `./certs/server.key` | TLS 密钥 |
 | `-data-dir` | `/var/sigoREST` | 记忆、系统提示词、channels.json、会话的基目录 |
 | `-channel-health-interval` | `30s` | 渠道健康检查间隔 |
+| `-rate-min-interval` | `500ms` | 每渠道调用间默认最小间隔（`0`=禁用） |
+| `-rate-max-wait` | `1000ms` | 每渠道触发 HTTP 429 前的默认最大排队等待时间 |
 | `-v` | `info` | 日志级别：`debug\|info\|warn\|error` |
 | `-q` | — | 静默模式（仅错误） |
 | `-j` | — | JSON 格式日志 |
@@ -208,6 +215,28 @@ curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/system-prompt \
 ### 自动故障转移
 
 如果渠道在请求期间失败（速率限制、超时、服务器错误），sigoREST 会自动尝试下一个活动渠道。身份验证错误会立即持久化停用受影响的渠道。
+
+### 速率限制器（按渠道，混合模式）
+
+每个渠道拥有独立的速率限制器，用于抑制对同一 API Key 过快连续的调用——从而规避 Provider 的速率限制，而非在出错后再修复。
+
+- **`min_interval`**（默认 `-rate-min-interval 500ms`）：每渠道两次调用之间的最小间隔。
+- **`max_wait`**（默认 `-rate-max-wait 1000ms`）：请求等待空闲渠道的最长时间，超时后向客户端返回 HTTP 429 + `Retry-After`。
+
+行为（混合模式）：在上次调用后 `min_interval` 内到达的请求会等待该间隔结束。若等待会超过 `max_wait`，则以 `ErrRateLimited` 失败，自动故障转移会尝试**下一个渠道**。仅当某 Provider 的所有渠道都耗尽时，客户端才会收到 HTTP 429。突发流量因此会自动分散到空闲的 API Key 上。
+
+在 `channels.json` 中按渠道覆盖（两个字段均可选，`0`/缺省 → 服务器默认值）：
+```json
+{
+  "provider": "mammouth",
+  "name": "0",
+  "active": true,
+  "min_interval_ms": 800,
+  "max_wait_ms": 2000
+}
+```
+
+全局禁用：`-rate-min-interval 0`。
 
 ### 健康监控
 

@@ -30,9 +30,9 @@ sigorest/
 
 **sigoREST Server** (as systemd service):
 ```bash
-# Compile and install binary
-go build -o sigoREST/sigoREST ./sigoREST/
-sudo cp sigoREST/sigoREST /usr/local/sbin/sigoREST
+# All binaries land in ./build/ (Makefile)
+make build
+sudo cp build/sigoREST /usr/local/sbin/sigoREST
 
 # Create data directory
 sudo mkdir -p /var/sigoREST
@@ -43,22 +43,27 @@ sudo chown -R sigorest:sigorest /var/sigoREST
 
 **sigoE CLI**:
 ```bash
-# Compile and install binary
-go build -o cmd/sigoE/sigoE ./cmd/sigoE/
-sudo cp cmd/sigoE/sigoE /usr/local/bin/sigoE
+make build
+sudo cp build/sigoE /usr/local/bin/sigoE
 ```
 
 ### Development (Local)
 
 ```bash
-# Build all packages
-go build ./...
+# Build all binaries → ./build/ (sigoREST, sigoE, mockprovider)
+make build
 
 # Start REST server
-./sigoREST/sigoREST -v debug
+./build/sigoREST -v debug
 
 # Use CLI
-./cmd/sigoE/sigoE -l
+./build/sigoE -l
+
+# Tests
+make test
+
+# Clean ./build/
+make clean
 ```
 
 ## Server Flags
@@ -71,6 +76,8 @@ go build ./...
 | `-key` | `./certs/server.key` | TLS key |
 | `-data-dir` | `/var/sigoREST` | Base directory for memory, system-prompt, channels.json, sessions |
 | `-channel-health-interval` | `30s` | Interval for channel health checks |
+| `-rate-min-interval` | `500ms` | Default minimum spacing between calls per channel (`0`=disabled) |
+| `-rate-max-wait` | `1000ms` | Default max queue wait before HTTP 429 per channel |
 | `-v` | `info` | Log level: `debug\|info\|warn\|error` |
 | `-q` | — | Quiet mode (errors only) |
 | `-j` | — | JSON logs |
@@ -206,6 +213,28 @@ curl -s -X PUT http://localhost:9080/api/channels/mammouth/0/system-prompt \
 ### Auto-Failover
 
 If a channel fails during a request (rate limit, timeout, server error), sigoREST automatically tries the next active channel. Auth errors immediately and persistently disable the affected channel.
+
+### Rate Limiter (per channel, hybrid)
+
+Every channel has its own rate limiter that throttles too-rapid successive calls to the same API key — provider rate limits are avoided rather than repaired after the fact.
+
+- **`min_interval`** (default `-rate-min-interval 500ms`): minimum spacing between two calls per channel.
+- **`max_wait`** (default `-rate-max-wait 1000ms`): how long a request waits for a free channel before returning HTTP 429 + `Retry-After` to the client.
+
+Behavior (hybrid): a request arriving within `min_interval` of the last call waits until the interval elapses. If that would exceed `max_wait`, it fails with `ErrRateLimited` and Auto-Failover tries the **next channel**. Only when all channels of a provider are exhausted does the client receive HTTP 429. A burst thus spreads itself automatically across free API keys.
+
+Per-channel override in `channels.json` (both fields optional, `0`/absent → server default):
+```json
+{
+  "provider": "mammouth",
+  "name": "0",
+  "active": true,
+  "min_interval_ms": 800,
+  "max_wait_ms": 2000
+}
+```
+
+Disable server-wide: `-rate-min-interval 0`.
 
 ### Health Monitor
 
