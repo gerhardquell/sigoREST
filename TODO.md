@@ -1,21 +1,27 @@
-# TODO 20260818
+# TODO 20260830
 
-## Überarbeiten
+## Ergänzung um longcat
 
-Wir wollen sigoREST überarbeiten, wenn es erforderlich ist. Mir
-ist aufgefallen, daß die apis stoppen, wenn wir Anfragen zu schnell
-schicken. Ich schlage vor, daß wir 1/2 - 1sec zwischen folgenden 
-Abfragen warten. Wahrscheinlich wird die Gesamtperformance schneller.
+Wir wollen sigoREST um longcat ergänzen.
 
-✅ Erledigt: Pro-Kanal Rate-Limiter (hybrid) implementiert, deployed
-   und live gegen echten ZAI-Provider bewiesen. Provider-spezifische
-   Werte in channels.json (Mammoth 800ms, Moonshot 500ms, ZAI 400ms).
-   Siehe Commits 5b649e3, d6310e2, e6a24b9 + Retrospektive 2026-08-18.
+## Beispiel von longcat
+```
+curl -X POST https://api.longcat.ai/openai/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_APP_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LongCat-2.0",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 1000
+  }'
+```
 
-## Testumgebung
+## API_KEYs:
 
-Lass uns eine entsprechende Testumgebung konstruieren. 
+Die Keys lauten:
+- LONGCAT_API_KEY
+- LONGCAT_API_KEY_1
+- LONGCAT_API_KEY_2
+- LONGCAT_API_KEY_3
+- LONGCAT_API_KEY_4
 
-✅ Erledigt: Mock-Provider in test/mockprovider/ (OpenAI-kompatibel,
-   Fixed-Window-Limit) + standalone Binary test/cmd/mockprovider/.
-   Integrationstest beweist Limiter schützt Mock vor 429.

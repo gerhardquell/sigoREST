@@ -173,6 +173,7 @@ var knownProviders = []struct {
 	{"MAMMOUTH_API_KEY", "mammouth"},
 	{"MOONSHOT_API_KEY", "moonshot"},
 	{"ZAI_API_KEY", "zai"},
+	{"LONGCAT_API_KEY", "longcat"},
 }
 
 // DiscoverFromEnv scans environment variables for provider API keys.

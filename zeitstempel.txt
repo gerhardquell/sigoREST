@@ -33,3 +33,5 @@ Ende: Sa 11. Jul 15:45:30 CEST 2026
 Start: Mo 20. Jul 16:26:40 CEST 2026
 Ende: Mo 20. Jul 17:52:46 CEST 2026
 zai-Start: Di 18. Aug 17:06:05 CEST 2026
+zai-Ende: Di 18. Aug 17:50:49 CEST 2026
+claude-Start: So 30. Aug 16:05:12 CEST 2026

@@ -377,6 +377,15 @@ func loadModelsFromProviders() map[string]ModelInfo {
 		}
 	}
 
+	// 4. Longcat (fällt intern auf statische Liste zurück)
+	if ms, err := sigoengine.FetchWithRetry("longcat", fetchAttempts, fetchBackoff, sigoengine.FetchLongcatModels); err != nil {
+		sigoengine.LogWarn("Longcat-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
+	} else {
+		for _, m := range ms {
+			models[m.ID] = modelInfoFromEngine(m)
+		}
+	}
+
 	sigoengine.LogInfo("Provider-Modelle geladen", map[string]interface{}{"count": len(models)})
 	return models
 }
@@ -499,6 +508,8 @@ func (s *Server) providerForModel(modelID string) string {
 			return "moonshot"
 		case strings.Contains(info.Endpoint, "z.ai"):
 			return "zai"
+		case strings.Contains(info.Endpoint, "longcat"):
+			return "longcat"
 		}
 	}
 	// Fallback by model name heuristics (case-insensitiv)
@@ -508,6 +519,8 @@ func (s *Server) providerForModel(modelID string) string {
 		return "moonshot"
 	case strings.Contains(lower, "glm"):
 		return "zai"
+	case strings.Contains(lower, "longcat"):
+		return "longcat"
 	default:
 		return "mammouth"
 	}
@@ -1083,6 +1096,41 @@ func (s *Server) handleShortcodes(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// **********************************************************************
+// GET /api/shortlist - kompakte Liste: nur Shortcode + Anbieter, ohne
+// die ID/Shortcode-Dopplung von /v1/models.
+func (s *Server) handleShortlist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	type shortEntry struct {
+		Shortcode string `json:"shortcode"`
+		Provider  string `json:"provider"`
+	}
+
+	entries := make([]shortEntry, 0, len(s.models))
+	for id, info := range s.models {
+		entries = append(entries, shortEntry{
+			Shortcode: info.Shortcode,
+			Provider:  s.providerForModel(id),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Provider != entries[j].Provider {
+			return entries[i].Provider < entries[j].Provider
+		}
+		return entries[i].Shortcode < entries[j].Shortcode
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries)
 }
 
 // **********************************************************************
@@ -1701,6 +1749,7 @@ func main() {
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
 	mux.HandleFunc("/api/shortcodes", srv.handleShortcodes)
+	mux.HandleFunc("/api/shortlist", srv.handleShortlist)
 	mux.HandleFunc("/api/channels/", srv.handleChannelRouter)
 	mux.HandleFunc("/api/channels", srv.handleChannels)
 	mux.HandleFunc("/api/health", srv.handleHealth)

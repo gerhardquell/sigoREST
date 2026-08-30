@@ -156,6 +156,7 @@ embedded (`//go:embed memory.json`), Disk hat Vorrang. Die CSV/Registry
 | `/v1/models` | GET | Modell-Liste (ID + Shortcode) |
 | `/api/models` | GET | Volle Modell-Infos (Preise, Limits) |
 | `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
+| `/api/shortlist` | GET | Nur `[{shortcode, provider}]`, keine ID/Shortcode-Dopplung (nach Provider+Shortcode sortiert) |
 | `/api/health` | GET | Server-Status + Circuit-Breaker |
 | `/api/memory` | GET/PUT | Globaler Memory-Block |
 | `/api/usage`  | GET | Token-Statistiken (RAM, Reset bei Neustart) |

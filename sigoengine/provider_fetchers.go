@@ -20,15 +20,19 @@ const (
 	mammouthChatEndpoint = "https://api.mammouth.ai/v1/chat/completions"
 	moonshotChatEndpoint = "https://api.moonshot.ai/v1/chat/completions"
 	zaiChatEndpoint      = "https://api.z.ai/api/paas/v4/chat/completions"
+	// ACHTUNG: offizielle Domain ist api.longcat.chat, nicht api.longcat.ai
+	// (TODO 20260830 nannte fälschlich .ai — per Doku-Recherche korrigiert).
+	longcatChatEndpoint = "https://api.longcat.chat/openai/v1/chat/completions"
 )
 
 // Provider-Model-Listen-Endpoints (GET, kostenlos — keine Token-Billing).
 // Genutzt von ProbeProviderModelList für Health-Checks, statt eines
 // Chat-Completion-"ping"-Requests der Input-Token kosten verursacht.
 const (
-	mammouthModelsEndpoint = "https://api.mammouth.ai/public/models" // key-less
-	moonshotModelsEndpoint = "https://api.moonshot.ai/v1/models"     // Bearer
-	zaiModelsEndpoint      = "https://api.z.ai/api/paas/v4/models"   // Bearer
+	mammouthModelsEndpoint = "https://api.mammouth.ai/public/models"     // key-less
+	moonshotModelsEndpoint = "https://api.moonshot.ai/v1/models"         // Bearer
+	zaiModelsEndpoint      = "https://api.z.ai/api/paas/v4/models"       // Bearer
+	longcatModelsEndpoint  = "https://api.longcat.chat/openai/v1/models" // Bearer
 )
 
 // **********************************************************************
@@ -74,19 +78,19 @@ var moonshotKnownModels = map[string]Model{
 // Wird verwendet wenn GET https://api.z.ai/api/paas/v4/models keinen
 // verwertbaren Response liefert.
 var zaiStaticModels = []Model{
-	{ID: "glm-4.5",        Shortcode: "glm45",   Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.5-air",    Shortcode: "glm45a",  Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.20, OutputCost: 1.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.5-flash",  Shortcode: "glm45f",  Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.5v",       Shortcode: "glm45v",  Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 65536,  MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.6",        Shortcode: "glm46",   Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.6v",       Shortcode: "glm46v",  Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.30, OutputCost: 0.90, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.7",        Shortcode: "glm47",   Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.7-flash",  Shortcode: "glm47f",  Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5", Shortcode: "glm45", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5-air", Shortcode: "glm45a", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.20, OutputCost: 1.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5-flash", Shortcode: "glm45f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5v", Shortcode: "glm45v", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 65536, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.6", Shortcode: "glm46", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.6v", Shortcode: "glm46v", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.30, OutputCost: 0.90, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.7", Shortcode: "glm47", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.7-flash", Shortcode: "glm47f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
 	{ID: "glm-4.7-flashx", Shortcode: "glm47fx", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.07, OutputCost: 0.40, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5",          Shortcode: "glm5",    Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 3.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5-turbo",    Shortcode: "glm5t",   Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5.1",        Shortcode: "glm51",   Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5v-turbo",   Shortcode: "glm5vt",  Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5", Shortcode: "glm5", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 3.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5-turbo", Shortcode: "glm5t", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.1", Shortcode: "glm51", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5v-turbo", Shortcode: "glm5vt", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
 }
 
 // **********************************************************************
@@ -357,5 +361,101 @@ func FetchZAIModels() ([]Model, error) {
 	}
 
 	LogInfo("ZAI-Modelle geladen (dynamisch)", map[string]interface{}{"count": len(result)})
+	return result, nil
+}
+
+// **********************************************************************
+// Longcat (Meituan) — statische Parameter-Tabelle
+// Die Longcat /v1/models API liefert nur {id, object, owned_by}, keine
+// Preise/Limits. Bekannte Modelle werden angereichert; unbekannte erhalten
+// sichere Defaults. Preise laut models.dev (Stand 2026-08), USD/1M tokens.
+var longcatKnownModels = map[string]Model{
+	"LongCat-2.0": {
+		ID: "LongCat-2.0", Shortcode: "longcat2",
+		Endpoint: longcatChatEndpoint, APIKeyEnv: "LONGCAT_API_KEY",
+		MaxInputTokens: 1000000, MaxOutputTokens: 131072,
+		InputCost: 0.75, OutputCost: 2.95,
+		MinTemperature: 0.0, MaxTemperature: 2.0,
+	},
+}
+
+// **********************************************************************
+// FetchLongcatModels ruft https://api.longcat.chat/openai/v1/models ab.
+// API-Key aus ENV: LONGCAT_API_KEY (Bearer Token).
+// OpenAI-Format: Response enthält nur Model-IDs, keine Preise.
+// Bekannte Modelle werden aus longcatKnownModels angereichert.
+func FetchLongcatModels() ([]Model, error) {
+	apiKey := os.Getenv("LONGCAT_API_KEY")
+	if apiKey == "" {
+		LogWarn("LONGCAT_API_KEY nicht gesetzt, verwende statische Longcat-Modelle")
+		result := make([]Model, 0, len(longcatKnownModels))
+		for _, m := range longcatKnownModels {
+			result = append(result, m)
+		}
+		return result, nil
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, longcatModelsEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("longcat: Request-Erstellung fehlgeschlagen: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("longcat: GET /v1/models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("longcat: /v1/models returned HTTP %d", resp.StatusCode)
+	}
+
+	var listResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, fmt.Errorf("longcat: invalid JSON: %w", err)
+	}
+
+	used := make(map[string]bool)
+	var result []Model
+
+	for _, item := range listResp.Data {
+		if item.ID == "" {
+			continue
+		}
+		if known, ok := longcatKnownModels[item.ID]; ok {
+			result = append(result, known)
+			used[known.Shortcode] = true
+		} else {
+			// Unbekanntes Longcat-Modell: generiere Shortcode, verwende sichere Defaults
+			sc := generateProviderShortcode(item.ID, used)
+			used[sc] = true
+			result = append(result, Model{
+				ID:              item.ID,
+				Shortcode:       sc,
+				Endpoint:        longcatChatEndpoint,
+				APIKeyEnv:       "LONGCAT_API_KEY",
+				MaxInputTokens:  128000,
+				MaxOutputTokens: 4096,
+				MinTemperature:  0.0,
+				MaxTemperature:  2.0,
+			})
+		}
+	}
+
+	// Fallback: API liefert keine Modelle → statische bekannte Liste
+	if len(result) == 0 {
+		LogWarn("Longcat /v1/models leer, verwende statische Liste")
+		for _, m := range longcatKnownModels {
+			result = append(result, m)
+		}
+	}
+
+	LogInfo("Longcat-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
 }
