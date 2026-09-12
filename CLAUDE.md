@@ -14,7 +14,7 @@ sigoREST = drei-schichtiges Go-Projekt, zwei User-Interfaces:
 - **sigoREST Server**: OpenAI-kompatibler REST-Server für parallele Verbindungen (~100)
 
 Beide nutzen **Shared Package** `sigoengine` für:
-- Model-Registry (Modelle von Mammouth.ai, Moonshot.ai, Z.ai, Longcat)
+- Model-Registry (Modelle von Mammouth.ai, Moonshot.ai, Z.ai, Longcat, cheaperinference)
 - API-Abstraktion (OpenAI + Anthropic Formate)
 - Multi-Channel-Support mit Failover + pro-Kanal Rate-Limiting + Health-Monitor
 - Circuit Breaker + Retry Logic
@@ -87,7 +87,7 @@ sigorest/
 │   ├── engine.go                #   CallAPI, CircuitBreaker, Session, Logging
 │   ├── models.go                #   Model-Typ, CoreModels (Fallback-Liste)
 │   ├── models_registry.go       #   Lookup-Maps, Laden JSON→CSV→CoreModels
-│   ├── provider_fetchers.go     #   Dynamischer Abruf Mammoth/Moonshot/ZAI/Longcat
+│   ├── provider_fetchers.go     #   Dynamischer Abruf Mammoth/Moonshot/ZAI/Longcat/cheaperinference
 │   ├── retry.go                 #   FetchWithRetry (Backoff gegen Boot-DNS-Race)
 │   ├── shortcode.go             #   Shortcode-Generierung (Familie+Version+Variante)
 │   ├── channel.go               #   Channel-Datenmodell + Registry (Multi-Channel)
@@ -118,7 +118,7 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 | `Log*()` | Thread-safes Logging (DEBUG/INFO/WARN/ERROR/FATAL) |
 | `DiscoverOllamaModels(endpoint)` | Auto-Discovery lokaler LLMs |
 | `ResolveModelName(shortcode)` | Shortcode → vollständiger Name |
-| `Fetch{Mammouth,Moonshot,ZAI,Longcat}Models()` | Dynamischer Modell-Abruf pro Provider |
+| `Fetch{Mammouth,Moonshot,ZAI,Longcat,Cheaperinference}Models()` | Dynamischer Modell-Abruf pro Provider |
 | `FetchWithRetry(name, attempts, backoff, fn)` | Retry-Wrapper mit Backoff um einen Fetcher |
 | `GenerateShortcode(id, used)` | Sprechender Shortcode aus Modellname |
 | `ChannelRegistry` / `ChannelManager` | Multi-Channel-Verwaltung + Failover-Auflösung |
@@ -158,7 +158,7 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 - HTTPS `:9443` — Privates Netz (192.168.0.0/16, 10.0.0.0/8)
 
 **Modell-Quelle (wichtig):** Der Server lädt seine Modelle beim Start
-**dynamisch** über `loadModelsFromProviders()` (Mammoth/Moonshot/ZAI/Longcat
+**dynamisch** über `loadModelsFromProviders()` (Mammoth/Moonshot/ZAI/Longcat/cheaperinference
 per HTTP) plus Ollama-Discovery — **nicht** aus einer models.csv. Nur
 `memory.json` ist embedded (`//go:embed memory.json`), Disk hat Vorrang. Die
 CSV/Registry (`models_registry.go`) ist primär für die CLI; der Server nutzt
@@ -199,7 +199,7 @@ sie nicht.
 
 ### Dynamisches Modell-Laden (Server)
 
-`loadModelsFromProviders()` ruft beim Start sequenziell vier Provider-APIs ab.
+`loadModelsFromProviders()` ruft beim Start sequenziell fünf Provider-APIs ab.
 Jeder Fetcher ist in `FetchWithRetry` gewickelt (4 Versuche, 2s/4s/8s Backoff).
 Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
 
@@ -210,12 +210,26 @@ Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
 | Moonshot (`MOONSHOT_API_KEY`) | `return nil, err` | 0 Modelle |
 | ZAI (`ZAI_API_KEY`) | `return zaiStaticModels, nil` | statische Modelle |
 | Longcat (`LONGCAT_API_KEY`) | `return longcatKnownModels, nil` | statische Modelle |
+| cheaperinference (`OMNIROUTE_API_KEY`) | `return nil, err` | 0 Modelle (kein Static-Fallback — Preise sind der Zweck) |
 
 → Wenn beim Boot nur die statischen ZAI/Longcat-Modelle erscheinen ("no such
 host" im Log): DNS war beim Start noch nicht oben. Schutz: systemd-Unit mit
 `Wants/After=network-online.target` (nicht `network.target`!) **plus** der
 Retry. Siehe `docs/systemd-install.md`. Workaround zur Laufzeit:
 `systemctl restart sigoREST`.
+
+**cheaperinference — Aggregator statt Einzel-Provider:** `GET /v1/models`
+liefert live Preise (`pricing.input_per_million`/`output_per_million`) und
+Kontextfenster (`context_length`/`max_output_tokens`) für alle Modelle mit,
+gefiltert auf `type=="text" && endpoint=="/v1/chat/completions"` (aktuell 60
+von 66, Rest sind Bild-/Video-Modelle). Kein statisches Known-Model-Mapping
+nötig wie bei ZAI/Longcat/Moonshot. IDs sind `ci-`-präfixt (z.B.
+`ci-claude-opus-5`), weil dieselben Modelle oft auch direkt über
+Mammouth/Moonshot/ZAI laufen und sonst die ID-Map kollidieren würde.
+`sigoengine.Model.UpstreamID` trägt den unpräfixten Original-Namen; in
+`handleChatCompletions` wird `cfg.Model` (nicht nur `cfg.Endpoint`) damit
+überschrieben, sonst schickt der Server `"ci-claude-opus-5"` als `model`-Feld
+raus, das die API nicht kennt.
 
 **Shortcode-Generierung:** `GenerateShortcode` (in `shortcode.go`) baut sprechende
 Kürzel: Familie (longest-prefix, z.B. `gpt`/`claude→cl`/`gemini→gem`) + Subfamily
@@ -314,7 +328,7 @@ sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 - **Go-Modul**: `sigorest` mit Go 1.26
 - **Embedded Files**: nur `memory.json` eingebettet (Disk hat Vorrang); Server-Modelle kommen dynamisch von den Providern, nicht aus einer embedded CSV
 - **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-/Longcat-Fallback-Liste (DNS-Race)
-- **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`
+- **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference)
 - **Scope-Grenze**: sigoREST bleibt schlanker Proxy, kein Agent-Harness — bewusst kein Tool-Call-Repair o.ä.
 - **IPv6**: Geblockt (außer `::1` loopback)
 - **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start
