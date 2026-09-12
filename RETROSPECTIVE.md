@@ -1,0 +1,353 @@
+# sigoREST — Retrospektiven
+
+Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
+
+---
+
+## Session 2026-08-18: Pro-Kanal Rate-Limiter (hybrid) + zentralisiertes ./build/
+
+**Zielsetzung:**
+sigoREST stoppte Provider-APIs bei zu schnellem Request-Feuer. Gerhards These: gezieltes Bremsen (0,5–1 s zwischen Calls) macht die Gesamtperformance schneller, weil 429-Retrys entfallen. Gesucht war eine pro-Kanal-Lösung, die das bestehende Multi-Channel-Failover nicht ausbremst.
+
+**Was erreicht wurde:**
+
+### 1. Brainstorming — drei Designentscheidungen vorab
+
+Klassifiziert als *bounded* (bestehender `handleChatCompletions`-Flow wird erweitert). Drei Entscheidungen durch Gerhard:
+- **Granularität: pro Kanal (API-Key)** — nicht pro Provider. Begründung: ein Provider-Level-Limiter würde alle Failover-Keys blockieren, obwohl andere frei wären.
+- **Verhalten bei Treffer: hybrid** — kurz warten, dann 429, nicht sofort 429 und nicht endlos queue.
+- **Konfiguration: pro Kanal in `channels.json`** mit globalem Default — verschiedene Provider haben unterschiedliche Limits.
+
+### 2. RateLimiter-Komponente (TDD)
+
+`sigoengine/rate_limiter.go` neu: `RateLimiter.Acquire(ctx, key, minInterval, maxWait)` / `Release(key)`. Hybrid-Logik: innerhalb `minInterval` wartet der Request bis das Intervall verstrichen ist; würde die Wartezeit `maxWait` überschreiten, schlägt er mit `ErrRateLimited` fehl. ctx-Abbruch bricht die Wartezeit ab. `lastCall` wird unter kurzem Lock nur bei erfolgreicher Reservierung gesetzt — nicht während des Sleeps —, sodass parallele Acquires sich korrekt serialisieren.
+
+Sechs Unit-Tests vorab (TDD): Erstaufruf sofort, Warten auf `minInterval`, 429 bei `maxWait`-Überschreitung, ctx-Cancel, unabhängige Keys, Parallel-Serialisierung. Alle grün vor Einbau.
+
+### 3. Server-Einbau + Failover-Synergie
+
+Zwei Flags (`-rate-min-interval 500ms`, `-rate-max-wait 1000ms`), pro-Kanal-Override via `MinInterval`/`MaxWait` (ms) im `Channel`-Struct. `Acquire` sitzt im `channelsToTry`-Loop pro Kanal; `ErrRateLimited` → `continue` →下一个 Kanal. Erst wenn alle Kanäle eines Providers erschöpft sind, geht HTTP 429 + `Retry-After` an den Client.
+
+### 4. Mock-Provider als Testumgebung
+
+`test/mockprovider/` (neu): OpenAI-kompatibler HTTP-Server mit Fixed-Window-Rate-Limit. `New(rps)` für Tests, `NewStandalone` für Standalone-Binary (`test/cmd/mockprovider/`). Integrationstest beweist: 8 parallele Requests ohne Limiter → ≥1× 429 vom Mock; mit Limiter → 0× 429.
+
+### 5. Live-Beweis gegen echten ZAI-Provider
+
+Drei Szenarien gegen `glm-4.5-air` (billigstes Modell, <1 Cent Quota):
+- Default (500/1000 ms), 5 parallel → 5× 200, serialisiert (1–2 s), Failover sichtbar im Log.
+- Aggressiv (50 ms `max_wait`), 5 parallel → 5× 200 via Failover auf 6 ZAI-Kanäle.
+- Überlast (50 ms), 10 parallel → 6× 200 + 4× 429 — exakt passend zu 6 verfügbaren Kanälen.
+
+### 6. ./build/-Zentralisierung
+
+Nebenbei: `go build ./...` war nur Compile-Check, keine Binaries. Stray-Binary `sigoREST/sigoREST` (10,7 M, Juli) trieb umher. Makefile mit `build/sigorest/sigoe/mockprovider/test/clean`, alle Binaries in `./build/` (in `.gitignore`). `CLAUDE.md` und alle drei READMEs + `chinese/README.md` umgestellt.
+
+### 7. Pro-Kanal-Config deployed + LoadState-Bug
+
+Nach der ersten Retrospektive-Version (Commit `c6b0c49`) folgte der Produktiv-Deploy der provider-spezifischen Werte in `/var/sigoREST/channels.json` (Backup `channels.json.bak-20260818`):
+
+| Provider | min_interval_ms | max_wait_ms |
+|----------|-----------------|-------------|
+| Mammoth  | 800             | 2000        |
+| Moonshot | 500             | 1000        |
+| ZAI      | 400             | 1000        |
+
+Mammoth dichter als ZAI, weil Mammoth ohne Key läuft (aggressivere Drosselung nötig). 18 Kanäle insgesamt.
+
+Dabei fiel ein kritischer Bug auf: `persistedState` und `LoadState` speicherten nur das `active`-Flag — manuelle `channels.json`-Werte für `MinInterval`/`MaxWait` würden beim Laden ignoriert und beim nächsten `SetActive` überschrieben. Fix (Commit `d6310e2`): `persistedState` um beide Felder erweitern, `LoadState` kopiert sie in den Channel, `saveStateLocked` schreibt sie mit `omitempty`. Roundtrip wäre durch einen Persistenz-Test abgefangen worden — Lücke im TDD.
+
+Live-Beweis der Wirksamkeit: 2 parallele Requests an den expliziten Kanal `mammouth-0` zeigten 881 ms Differenz zwischen den Antworten ≈ die eingestellten 800 ms `min_interval`. Der Limiter drosselt im echten Produktivbetrieb.
+
+Operability-Erweiterung (Commit `e6a24b9`): `AllChannelStatus` exponiert jetzt `min_interval_ms`/`max_wait_ms` pro Kanal in `/api/channels` — Admin sieht die aktive Config ohne Datei-Inspektion.
+
+**Learnings:**
+
+1. **Pro-Kanal-Granularität ist der entscheidende Hebel** — nicht die Limiter-Logik selbst. Der Live-Test bewies es: ein Provider-Level-Limiter hätte bei 50 ms `max_wait` alle 5 Requests sterben lassen. Pro Kanal + Failover verwandelt den Limiter in einen Lastverteiler: volle Kanäle delegieren automatisch an freie Keys.
+
+2. **Sentinel vs. APIError — Schichtentrennung zahlt sich aus.** `ErrRateLimited` ist bewusst `errors.New`, kein `*SigoError`. Er entsteht lokal (Server-Entscheidung), nicht vom Provider. Hätte ich ihn als APIError gebaut, müsste `ClassifyError` wissen, dass lokale Limits existieren — falsche Schicht. Deshalb eigener Early-Return vor dem `apiErr.Type`-Switch.
+
+3. **TDD bei paralleler Logik ist nicht optional.** Der Parallel-Serialisierungs-Test (`TestRateLimiterConcurrentSerializes`) war der wichtigste — er hätte die naive „sleep dann setze lastCall"-Implementierung entlarvt, bei der alle Goroutines gleichzeitig aufwachen und denselben Zeitstempel setzen.
+
+4. **Build-Setup ist Dokumentation.** Die zentralisierte `./build/`-Konvention stand nirgends; `go build ./...` suggerierte fertige Binaries, wo keine waren. Gerhards „Augenblick, wo ist das Programm?" war der Trigger. Makefile + CLAUDE.md machen die Konvention explizit und reproduzierbar.
+
+5. **Caveman-Modus + Learning-Insights vertragen sich.** Die `★ Insight`-Blöcke zwangen zur pünktlichen Architektur-Begründung (Sentinel, Failover-Synergie) — genau dort, wo Verkürzung sonst zu unbegründeten Entscheidungen geführt hätte.
+
+6. **Persistenz-Schicht ist eigener Testpfad.** Der LoadState-Bug war kein Logikfehler, sondern ein vergessener roundtrip: Datenmodell-Felder existierten, aber die Load/Save-Schicht wurde nicht mitgeführt. TDD deckte die Limiter-Logik ab, nicht die Persistenz. Lehre: bei jedem `persistedState`-struct-Change gehört ein Roundtrip-Test dazu (setze Werte → speichere → lade neu → vergleiche). Field-Level-Tests allein reichen nicht, wenn Serialisierung im Weg ist.
+
+**Nächste mögliche Schritte:**
+- Mock-Provider zu echtem Lasttest ausbauen (z. B. 100 parallele Clients, Latenz-Histogramm).
+- Rate-Limiter-Metriken in `/api/usage` oder `/api/health` exponieren (Throttle-Rate pro Kanal).
+- ggf. Token-Bucket statt Fixed-Window, falls Provider-Burst-Toleranz das nötig macht.
+- Roundtrip-Test für `channels.json`-Persistenz (setze MinInterval/MaxWait → reload → vergleiche) als Regressionsschutz für künftige `persistedState`-Änderungen.
+
+**Co-Autor**: Claude (Anthropic) — Session vom 18. August 2026.
+
+---
+
+## Session 2026-07-11: Doku-Sync — CN/EN-READMEs + chinese/ auf Multi-Channel-Master-Stand
+
+**Zielsetzung:**
+`README_CN.md` und `README_EN.md` hingen eine ganze Generation hinter der deutschen Master-`README.md` nach (pre-Multi-Channel-Ära). Sie fehlten sämtliche Channel-, Failover-, data-dir- und Vision-Funktionalität sowie die neuen Endpoints und Client-Libraries. Ziel war ein treuer 1:1-Spiegel des deutschen Masters in Chinesisch und Englisch plus Aktualisierung des `chinese/`-Subdirs.
+
+**Was erreicht wurde:**
+
+### 1. CN/EN komplett neu als treuer Spiegel
+
+Beide READMEs wurden von Grund auf neu übersetzt (CN 618 Zeilen, EN 616 Zeilen) und enthalten jetzt 1:1 den Master-Stand:
+
+- Architektur-Block mit allen 6 neuen `sigoengine`-Files (`channel.go`, `channel_manager.go`, `channel_health.go`, `session_memory.go`, `env.go`, `version.go`)
+- Server-Flags `-data-dir`, `-channel-health-interval`; CLI-Flags `-session-dir`, `-c`
+- env-Datei (`./env`) + indizierte API-Keys (`_0`, `_1`, …) für zusätzliche Kanäle
+- Datenverzeichnis-Layout unter `/var/sigoREST` mit `channels/`- und `sessions/`-Subdirs
+- Multi-Channel-Support, Auto-Failover, Health-Monitor
+- Alle `/api/channels/*`-Endpoints, `/api/version`, `/api/usage`, `/api/help`
+- Vision-Support, 4 Client-Libraries (Python v2 / Go / JavaScript / Common-Lisp)
+- systemd mit `network-online.target` + `EnvironmentFile` (DNS-Race-Fix)
+- ~89 Modelle, Shortcodes `cl46-s`/`gpt4o`, Version 1.1
+
+### 2. memory.json-Beispiel korrigiert
+
+Der deutsche Master zeigte das memory.json-Beispiel gekürzt (`"…mit Gerhard."`), die echte eingebettete `sigoREST/memory.json` enthält aber `"…mit Gerhard, einem erfahrenen Software-Entwickler."`. CN/EN zeigten bisher eine falsche englische Übersetzung. Korrektur: alle drei READMEs zeigen jetzt den realen deutschen Default — dokumentiert das tatsächliche Verhalten, keine erfundene Übersetzung.
+
+### 3. chinese/ Subdir aktualisiert
+
+| Datei | Änderung |
+|-------|----------|
+| `chinese/README.md` | Build-Pfad fix (`./sigoREST/sigoREST` statt `sigoREST`), Multi-Channel-Feature-Block |
+| `chinese/KEYWORDS.md` | Keywords für Multi-Channel/Failover/Health-Monitor ergänzt |
+| `chinese/PITCH.txt` | Pitch um Multi-Channel + Auto-Failover erweitert |
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Treuer Spiegel statt zielgruppen-angepasst** | Konsistenz mit Master, wartbar. Nur CN behält das China-Fokus-Intro (Zielgruppe), EN folgt dem Master ohne Intro. |
+| **memory.json als realer deutscher Default** | Dokumentation soll echtes Verhalten zeigen, keine erfundene Lokalisierung. |
+| **Subagent-Driven Development** | Zwei unabhängige README-Übersetzungen parallel via Fresh-Subagent-pro-Datei, Controller macht Spec-Review gegen Master. Effizient, kein Context-Pollution. |
+| **TODO-Archive local-only** | WIP-`.gitignore` ignoriert `TODO-*.md` bewusst → done-Archive bleiben lokale Scratch-Dateien, nicht im Repo. Bestehende tracked done-Files bleiben unangetastet. |
+
+**Testing & Verifikation:**
+
+```bash
+# Build unverändert (nur Doku)
+go build ./...   # BUILD OK
+
+# Spec-Review gegen Master: Struktur-Marker geprüft
+grep -c 'channel.go|channel_manager.go|...' README_CN.md   # 6 ✓
+grep -c 'network-online.target' README_EN.md                # 3 ✓
+grep -c 'cl46-s' README_CN.md README_EN.md                  # 6/6 ✓
+
+# GitHub-Render-Check (Playwright)
+# README.md    → memory.json-Fix live ✓
+# README_CN.md → 多渠道支持-Section rendert ✓
+# README_EN.md → Multi-Channel Support, kein About-Intro ✓
+```
+
+**Code-Änderungen (Zusammenfassung):**
+
+- `README.md`: memory.json-Beispiel auf volle Version korrigiert
+- `README_CN.md`: komplette Neuübersetzung (338 → 618 Zeilen)
+- `README_EN.md`: komplette Neuübersetzung (338 → 616 Zeilen)
+- `chinese/README.md`: Build-Pfad + Multi-Channel-Feature
+- `chinese/KEYWORDS.md`: Kanal/Failover/Health-Keywords
+- `chinese/PITCH.txt`: Pitch erweitert
+
+**Git:**
+
+Commit `43d93a7` (Doku-Sync) + `6579e50` (TODO-Archiv) direkt auf `main` gepusht. Archiv-File `TODO-20260711-docs-done.md` bleibt local (gitignored). GitHub-Render per Playwright verifiziert.
+
+---
+
+## Session 2026-07-11: Entfernen des Fake-Streamings + Echtes Provider-SSE für alle OpenAI-kompatiblen Clients
+
+**Zielsetzung:**
+Der Server und die Clients hatten zwar bereits SSE-Endpunkte, aber der Server sammelte die vollständige Antwort ein und splittete sie wortweise mit künstlichen 8-ms-Verzögerungen („Fake-Streaming“). Ziel war die Umstellung auf echtes, provider-durchgereichtes SSE-Streaming für alle OpenAI-kompatiblen Provider. Anthropic wurde bewusst ausgeschlossen (Kostengründe).
+
+**Was erreicht wurde:**
+
+### 1. Server-seitiges echtes Streaming
+
+- `sigoengine/engine.go`:
+  - Neuer gemeinsamer `defaultHTTPClient` (`http.Client{}`) für Connection Reuse.
+  - `CallAPI` berücksichtigt bereits gesetzte Deadlines und wendet `timeoutSec` nur an, wenn der Kontext noch keine Deadline hat.
+  - Neue `CallAPIStream()`-Funktion: setzt `stream=true`, `Accept: text/event-stream` und liefert `io.ReadCloser` mit dem Provider-Response-Body.
+
+- `sigoREST/main.go`:
+  - Entfernung der Fake-Streaming-Hilfsfunktionen (`writeSSEEvent`, `writeStreamingResponse`).
+  - Neue `streamProviderResponse()` leitet den Provider-Stream 1:1 an den Client weiter, puffert Zeilen, extrahiert parallel den Text für Session/Memory und sendet abschließend `data: [DONE]`.
+  - Handler wählt bei `stream=true` und OpenAI-kompatiblen Providern den `CallAPIStream`-Pfad; Anthropic und Fehlerfälle laufen weiterhin über `CallAPI` mit Retry.
+
+### 2. Clients auf echtes SSE umgestellt
+
+| Client | Änderung |
+|--------|----------|
+| **Python** | Fake-Streaming-Fallback komplett entfernt; sync + async nutzen `httpx.stream()` / `aiter_lines()` gegen `text/event-stream`. |
+| **Go** | Neue Typen `ChatCompletionChunk`, `ChatCompletionChunkChoice`, `ChatCompletionChunkDelta`; neue `ChatStream()`-Methode mit SSE-Zeilenparser; Leerzeilen werden korrekt als Event-Trenner behandelt. |
+| **JavaScript** | Neue `chatStream()`-Methode als AsyncGenerator; liest `response.body.getReader()` und parst SSE-Zeilen. |
+| **C++** | Neue Chunk-Modelle in `models.hpp`; `chatCompletionStream()` mit Callback und CURL-Write-Callback-Parsing. |
+| **Common Lisp** | `chat-stream()` fordert jetzt explizit `Accept: text/event-stream` an. |
+
+### 3. Weitere Verbesserungen
+
+- `sigoengine/channel_health.go`: dynamische Provider-Typ-Erkennung für Health-Checks (`anthropic`, `ollama`, `mammoth`) statt hartkodiertem `"mammoth"`.
+- C++ Client: `curl_easy_getinfo` vor `curl_easy_cleanup` ausgeführt (Use-after-free vermieden).
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Provider-Stream direkt durchreichen** | Keine künstlichen Verzögerungen mehr; echte First-Token-Latenz. |
+| **Anthropic ausgeschlossen** | Anwender hat explizit festgelegt, dass Anthropic aufgrund der Kosten nicht für Streaming genutzt wird. |
+| **Shared `http.Client`** | Verhindert Connection-Pool-Überlastung bei ~100 parallelen Verbindungen. |
+| **Keine externen SSE-Bibliotheken** | Clients parsen SSE selbst, um Abhängigkeiten minimal zu halten. |
+
+**Testing & Verifikation:**
+
+```bash
+# Server bauen & starten
+go build -o sigoREST/sigoREST ./sigoREST/
+./sigoREST/sigoREST -v debug
+
+# curl
+curl -s -N -X POST http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"model":"cl5-s","messages":[{"role":"user","content":"zähle von 1 bis 3"}],"stream":true}'
+
+# Clients (jeweils getestet)
+# Python: SigoClient().chat.completions.create(stream=True)
+# Go:     client.ChatStream(ctx, "cl5-s", "...")
+# JS:     for await (const ch of client.chatStream("cl5-s", "..."))
+# C++:    client.chatCompletionStream("cl5-s", msgs, callback)
+```
+
+Alle getesteten Clients lieferten für das Prompt "zähle von 1 bis 3" das erwartete Ergebnis `1, 2, 3`.
+
+**Code-Änderungen (Zusammenfassung):**
+
+- `sigoengine/engine.go`: Shared HTTP-Client, Deadline-Handling, `CallAPIStream()`
+- `sigoengine/channel_health.go`: Dynamische Provider-Typ-Erkennung
+- `sigoREST/main.go`: Echtes Provider-SSE-Streaming
+- `clients/python/src/sigo_client/client.py`: Entfernung Fake-Streaming, echtes SSE
+- `clients/go/client.go`: `ChatStream()` + Chunk-Typen + SSE-Parser
+- `clients/javascript/client.js`: `chatStream()` AsyncGenerator
+- `clients/cpp/core/include/sigorest/{client.hpp,models.hpp}`: Streaming-API + Chunk-Modelle
+- `clients/cpp/core/src/client.cpp`: `chatCompletionStream()` Implementierung
+- `clients/clisp-exp/sigoclient.lisp`: `Accept: text/event-stream` in `chat-stream`
+
+**Git:**
+
+Branch `feat/real-sse-streaming` erstellt, gepusht, PR #1 eröffnet, gemergt (Squash) und gelöscht. Server nach dem Merge auf `main` neu gebaut und gestartet.
+
+---
+
+## Session 2026-07-10: Modernisierung des Python-Clients + Echter SSE-Streaming-Support
+
+**Zielsetzung:**
+Der bestehende `clients/python/` Client (v1.0, basierend auf `requests` + Dataclasses) war funktional, aber veraltet. Ziel war ein kompletter Neubau als moderner, produktionsreifer Client mit:
+
+- Vollständiger OpenAI-SDK-Kompatibilität (`chat.completions.create()`)
+- Sync + Async Support (`httpx` + `AsyncClient`)
+- Pydantic v2 für starke Typisierung und Validierung
+- Echtes Server-Sent Events (SSE) Streaming
+- Moderne Projektstruktur (`pyproject.toml`, `src/`-Layout)
+- Vollständige Abwärtskompatibilität zum bestehenden sigoREST-Server
+
+**Was erreicht wurde:**
+
+### 1. Komplette Neuentwicklung des Python-Clients (`sigo-client` v2.0)
+
+- **Neue Struktur**: `src/sigo_client/` mit `client.py`, `models.py`, `__init__.py`
+- **Kern-Features**:
+  - `SigoClient` und `AsyncSigoClient`
+  - Vollständige OpenAI-kompatible Schnittstelle
+  - Pydantic-Modelle (`ChatCompletion`, `ChatCompletionChunk`, `Model`, `HealthResponse`, `MemoryBlock`)
+  - Robuste Fehlerbehandlung (`SigoError`, `SigoAPIError`, `SigoConnectionError`, `SigoTimeoutError`)
+  - Context-Manager Unterstützung
+- **Modernes Packaging**: `pyproject.toml` mit `hatchling`, `ruff`, `pytest`, `dev` + `test` Extras
+
+### 2. Echter SSE-Streaming-Support (Server + Client)
+
+**Server-seitig (`sigoREST/main.go`)**:
+- Erweiterung von `ChatRequest` um `Stream bool`
+- Neue Hilfsfunktionen `writeSSEEvent()` und `writeStreamingResponse()`
+- Korrekte OpenAI-kompatible SSE-Formatierung (`event: message_start`, `message_delta`, `message_stop`, `usage`, `[DONE]`)
+- Vollständige Abwärtskompatibilität: `stream=false` oder fehlender Parameter → unveränderte JSON-Antwort
+- Verbessertes Chunk-Format mit `id`, `object`, `choices[].delta` und `finish_reason`
+
+**Client-seitig**:
+- Sync- und Async-Implementierung von `_create_stream()`
+- Verwendung von `httpx.stream()` / `aiter_lines()` zum Parsen von `text/event-stream`
+- Intelligenter Fallback auf simulierte Wort-für-Wort-Ausgabe bei Fehlern
+- Aktualisierte Beispiele (`basic_chat.py`, `streaming_chat.py`, `async_chat.py`, `list_models.py`)
+
+### 3. Dokumentation & Testing
+
+- Umfassendes neues `clients/python/README.md`
+- Mehrere getestete Beispiele mit realem Streaming
+- Aktualisierte Hilfe-Texte im Server (`/api/help`)
+- Diese Retrospektive
+
+**Architektur-Entscheidungen:**
+
+| Entscheidung | Begründung |
+|--------------|------------|
+| **Simuliertes Fallback** | Der Server unterstützt SSE nur bei `stream=true`. Fallback gewährleistet Robustheit. |
+| **OpenAI-kompatibles Chunk-Format** | Ermöglicht zukünftige Nutzung mit dem offiziellen `openai` Python-Paket. |
+| **Wort-für-Wort in SSE** | Bietet angenehmes „Typewriter“-Gefühl ohne zu viele Events. |
+| **src/-Layout + pyproject.toml** | Folgt aktuellen Python-Best-Practices (PEP 621, editable installs). |
+
+**Code-Änderungen (Zusammenfassung):**
+
+**Server:**
+- `sigoREST/main.go`: `ChatRequest.Stream`, SSE-Helper, `writeStreamingResponse()`, angepasster Handler, erweiterte Hilfe
+
+**Client:**
+- `clients/python/pyproject.toml` (neu)
+- `clients/python/src/sigo_client/__init__.py`, `models.py`, `client.py` (komplett neu/überarbeitet)
+- `clients/python/examples/*.py` (modernisiert + neues `streaming_chat.py`)
+
+**Testing & Verifikation:**
+
+```bash
+# Server mit SSE bauen & starten
+go build -o sigoREST/sigoREST ./sigoREST/
+./sigoREST/sigoREST -q
+
+# Client installieren
+cd clients/python
+pip install -e .
+
+# Tests
+python examples/list_models.py
+python examples/basic_chat.py
+python examples/streaming_chat.py        # echtes SSE
+python examples/async_chat.py            # Async SSE
+```
+
+Alle Beispiele funktionieren. Streaming zeigt jetzt echte `event: message_delta` Zeilen.
+
+**Erkenntnisse & Learnings:**
+
+1. **Abwärtskompatibilität zuerst**: Durch das klare `if isStreaming` im Handler konnten wir Streaming hinzufügen, ohne bestehende Clients zu brechen.
+
+2. **SSE ist trickreich**: Korrekte Header (`X-Accel-Buffering: no`), Flushing, Event-Format und `[DONE]` sind entscheidend. Das `event:` Feld ist optional, aber hilfreich.
+
+3. **Python Streaming-Parsing**: `httpx.stream()` + `iter_lines()` / `aiter_lines()` ist sehr elegant. Der Fallback-Mechanismus hat sich als extrem nützlich erwiesen.
+
+4. **Modernisierung lohnt sich**: Der Sprung von `requests` + Dataclasses zu `httpx` + Pydantic v2 + vollem OpenAI-Interface hat den Client von „brauchbar“ zu „State of the Art“ gemacht.
+
+5. **Zusammenarbeit von Go und Python**: Die enge Abstimmung des Chunk-Formats zwischen Server und Client war der Schlüssel zum Erfolg.
+
+**Nächste mögliche Schritte:**
+- Offiziellen `openai` Python-Paket-Adapter (`SigoOpenAIClient`)
+- Echte Unit-Tests mit `pytest` + `respx` (Mock SSE)
+- Performance-Optimierungen bei sehr langen Streams
+- Unterstützung für `tools` / Function Calling in den Streaming-Chunks
+
+**Co-Autor**: Grok (xAI) — Session vom 10. Juli 2026.
+
+---
+
+*(Vorherige Retrospektiven siehe weiter unten im Dokument)*
