@@ -1176,14 +1176,13 @@ var defaultHTTPClient = &http.Client{}
 // **********************************************************************
 // CallAPI führt einen HTTP-Call zu einem AI-Provider durch
 func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interface{},
-	timeoutSec int) (string, *UsageData, string, error) {
+	timeoutSec int) (string, *UsageData, string, []ToolCall, error) {
 
 	start := time.Now()
 	logF := map[string]interface{}{"endpoint": cfg.Endpoint, "model": cfg.Model}
 
 	LogDebug("Making API request", logF)
 
-	// Deadline aus ctx nutzen; falls nicht vorhanden, timeoutSec anwenden.
 	if timeoutSec > 0 {
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
@@ -1197,7 +1196,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		LogError("Failed to create request", err, logF)
-		return "", nil, "", NewError(ErrAPIFailed, "Failed to create HTTP request", err, logF)
+		return "", nil, "", nil, NewError(ErrAPIFailed, "Failed to create HTTP request", err, logF)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -1214,7 +1213,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	resp, err := defaultHTTPClient.Do(req)
 	if err != nil {
 		LogError("HTTP request failed", err, logF)
-		return "", nil, "", NewError(ErrAPIFailed, "HTTP request failed", err, logF)
+		return "", nil, "", nil, NewError(ErrAPIFailed, "HTTP request failed", err, logF)
 	}
 	defer resp.Body.Close()
 
@@ -1224,7 +1223,6 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 		logF["body"] = string(body)
 		LogError("HTTP error", nil, logF)
 
-		// Retry-After Header parsen
 		var retryAfter time.Duration
 		if retryHeader := resp.Header.Get("Retry-After"); retryHeader != "" {
 			if seconds, err := strconv.Atoi(retryHeader); err == nil {
@@ -1232,10 +1230,9 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 			}
 		}
 
-		// APIError mit Status-Code erstellen
 		apiErr := classifyHTTPError(resp.StatusCode, string(body), nil)
 		apiErr.RetryAfter = retryAfter
-		return "", nil, "", apiErr
+		return "", nil, "", nil, apiErr
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -1247,30 +1244,27 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		LogError("Failed to parse response", err, logF)
-		return "", nil, "", NewError(ErrAPIFailed, "Failed to parse JSON response", err, logF)
+		return "", nil, "", nil, NewError(ErrAPIFailed, "Failed to parse JSON response", err, logF)
 	}
 
-	// Fehler in der API-Antwort
 	if errMsg, ok := result["error"].(map[string]interface{}); ok {
 		errText := fmt.Sprintf("%v", errMsg["message"])
 		LogError("API error in response", nil, map[string]interface{}{"api_error": errText})
 
-		// Prüfe auf Context-Limit-Fehler -> client_error
 		if isContextLimitError(errText) {
-			return "", nil, "", &APIError{
+			return "", nil, "", nil, &APIError{
 				Type:       ErrClientError,
 				StatusCode: 400,
 				Message:    errText,
 			}
 		}
 
-		return "", nil, "", NewError(ErrAPIFailed, errText, nil, logF)
+		return "", nil, "", nil, NewError(ErrAPIFailed, errText, nil, logF)
 	}
 
-	// Usage-Daten extrahieren (beide Formate)
 	usage := extractUsage(result, cfg.Type)
+	toolCalls := extractToolCalls(result, cfg.Type)
 
-	// finish_reason extrahieren
 	finishReason := ""
 	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]interface{}); ok {
@@ -1279,38 +1273,53 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 			}
 		}
 	}
-	// Anthropic fallback: stop_reason
 	if finishReason == "" && cfg.Type == "anthropic" {
 		if sr, ok := result["stop_reason"].(string); ok {
 			finishReason = sr
 		}
 	}
 
-	// Anthropic-Format: content[0].text
+	// Anthropic-Format: content[] kann mehrere text-Blocks und/oder tool_use-
+	// Blocks enthalten (z.B. "Ich schaue nach." + tool_use). Alle text-Blocks
+	// werden verkettet; ein reiner Tool-Use-Response (kein text-Block) ist
+	// gültig und liefert einen leeren String zurück, kein Fehler.
 	if cfg.Type == "anthropic" {
-		if content, ok := result["content"].([]interface{}); ok && len(content) > 0 {
-			if text, ok := content[0].(map[string]interface{})["text"].(string); ok {
-				return text, usage, finishReason, nil
+		if content, ok := result["content"].([]interface{}); ok {
+			var textParts []string
+			for _, item := range content {
+				block, ok := item.(map[string]interface{})
+				if !ok || block["type"] != "text" {
+					continue
+				}
+				if text, ok := block["text"].(string); ok {
+					textParts = append(textParts, text)
+				}
 			}
+			return strings.Join(textParts, ""), usage, finishReason, toolCalls, nil
 		}
 	}
 
-	// OpenAI-Format: choices[0].message.content
+	// OpenAI-Format: choices[0].message.content. content:null ist normal,
+	// wenn stattdessen tool_calls gesetzt sind (Tool-Use-Response) — nur ohne
+	// tool_calls ist eine leere Antwort ein echter Fehler (z.B. max_tokens zu
+	// niedrig).
 	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
 		if msg, ok := choices[0].(map[string]interface{})["message"].(map[string]interface{}); ok {
 			if content, ok := msg["content"].(string); ok {
-				return content, usage, finishReason, nil
+				return content, usage, finishReason, toolCalls, nil
 			}
-			// content:null → finish_reason:length (max_tokens:0 Fallback)
 			if msg["content"] == nil {
-				return "", usage, finishReason, NewError(ErrClientError,
+				if len(toolCalls) > 0 {
+					return "", usage, finishReason, toolCalls, nil
+				}
+				return "", usage, finishReason, nil, NewError(ErrClientError,
 					"leere Antwort: max_tokens zu niedrig oder Modell-Limit erreicht", nil, logF)
 			}
 		}
 	}
 
 	LogError("Unexpected response format", nil, logF)
-	return "", nil, "", NewError(ErrUnexpectedFormat, "Unexpected response format", nil, logF)
+	return "", nil, "", nil, NewError(ErrUnexpectedFormat, "Unexpected response format", nil, logF)
 }
 
 // **********************************************************************

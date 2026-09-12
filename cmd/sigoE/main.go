@@ -156,7 +156,7 @@ func main() {
 
 	err = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
 		return breaker.Do(func() error {
-			text, _, _, e := sigoengine.CallAPI(ctx, cfg, request, *timeout)
+			text, _, _, _, e := sigoengine.CallAPI(ctx, cfg, request, *timeout)
 			if e != nil {
 				return e
 			}

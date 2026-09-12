@@ -842,7 +842,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		} else {
 			lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
 				return breaker.Do(func() error {
-					text, u, fr, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
+					text, u, fr, _, e := sigoengine.CallAPI(ctx, cfg, apiRequest, req.Timeout)
 					if e != nil {
 						apiErr := sigoengine.ClassifyError(e)
 						if apiErr.Type == sigoengine.ErrAuthFailed {
