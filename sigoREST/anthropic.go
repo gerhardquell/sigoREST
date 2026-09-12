@@ -13,6 +13,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+
+	"sigorest/sigoengine"
 )
 
 // AnthropicTool ist ein vom Client angebotenes Tool (Anthropic-Schema).
@@ -207,4 +210,75 @@ func anthropicToolChoiceToInternal(raw json.RawMessage) (interface{}, error) {
 	default:
 		return "auto", nil
 	}
+}
+
+// AnthropicUsage ist das usage-Objekt der Anthropic-Response.
+type AnthropicUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// AnthropicResponse ist der Body einer nicht-gestreamten POST /v1/messages
+// Antwort.
+type AnthropicResponse struct {
+	ID         string                  `json:"id"`
+	Type       string                  `json:"type"`
+	Role       string                  `json:"role"`
+	Model      string                  `json:"model"`
+	Content    []AnthropicContentBlock `json:"content"`
+	StopReason string                  `json:"stop_reason,omitempty"`
+	Usage      AnthropicUsage          `json:"usage"`
+}
+
+// finishReasonToStopReason mappt OpenAI/Anthropic finish_reason-Werte auf
+// Anthropics stop_reason-Vokabular. hasToolCalls hat Vorrang, weil manche
+// Provider bei Tool-Calls trotzdem finish_reason="stop" liefern.
+func finishReasonToStopReason(finishReason string, hasToolCalls bool) string {
+	if hasToolCalls {
+		return "tool_use"
+	}
+	switch finishReason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls":
+		return "tool_use"
+	case "stop_sequence":
+		return "stop_sequence"
+	default:
+		return "end_turn"
+	}
+}
+
+// internalToAnthropicResponse baut die Anthropic-Response aus dem
+// normalisierten Ergebnis eines CallAPI-Aufrufs.
+func internalToAnthropicResponse(model, text string, toolCalls []sigoengine.ToolCall, usage *sigoengine.UsageData, finishReason string) *AnthropicResponse {
+	var content []AnthropicContentBlock
+	if text != "" {
+		content = append(content, AnthropicContentBlock{Type: "text", Text: text})
+	}
+	for _, tc := range toolCalls {
+		input := json.RawMessage(tc.Function.Arguments)
+		if !json.Valid(input) {
+			input = json.RawMessage("{}")
+		}
+		content = append(content, AnthropicContentBlock{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: input,
+		})
+	}
+
+	resp := &AnthropicResponse{
+		ID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		Type:       "message",
+		Role:       "assistant",
+		Model:      model,
+		Content:    content,
+		StopReason: finishReasonToStopReason(finishReason, len(toolCalls) > 0),
+	}
+	if usage != nil {
+		resp.Usage = AnthropicUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens}
+	}
+	return resp
 }
