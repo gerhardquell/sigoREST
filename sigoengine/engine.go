@@ -560,6 +560,22 @@ type UsageData struct {
 }
 
 // **********************************************************************
+// ToolCallFunction beschreibt den aufgerufenen Funktionsnamen + Roh-Argumente
+// (JSON-String, wie vom Provider geliefert — Parsing obliegt dem Aufrufer).
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// ToolCall ist ein normalisierter Tool-Aufruf, unabhängig vom Provider-Format
+// (OpenAI choices[0].message.tool_calls oder Anthropic content[].type=="tool_use").
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // "function"
+	Function ToolCallFunction `json:"function"`
+}
+
+// **********************************************************************
 // Response - strukturierte API-Antwort
 type Response struct {
 	Model     string        `json:"model"`
@@ -1389,6 +1405,78 @@ func extractUsage(result map[string]interface{}, providerType string) *UsageData
 	}
 
 	return usage
+}
+
+// extractToolCalls liest Tool-Calls aus einer Provider-Response.
+// OpenAI-Format: choices[0].message.tool_calls (Array von {id, type, function:{name, arguments}}).
+// Anthropic-Format: content[] enthält Blocks mit type=="tool_use" ({id, name, input}).
+// Liefert nil wenn keine Tool-Calls vorhanden sind.
+func extractToolCalls(result map[string]interface{}, providerType string) []ToolCall {
+	if providerType == "anthropic" {
+		content, ok := result["content"].([]interface{})
+		if !ok {
+			return nil
+		}
+		var calls []ToolCall
+		for _, item := range content {
+			block, ok := item.(map[string]interface{})
+			if !ok || block["type"] != "tool_use" {
+				continue
+			}
+			id, _ := block["id"].(string)
+			name, _ := block["name"].(string)
+			argsJSON := "{}"
+			if input, ok := block["input"]; ok {
+				if b, err := json.Marshal(input); err == nil {
+					argsJSON = string(b)
+				}
+			}
+			calls = append(calls, ToolCall{
+				ID:       id,
+				Type:     "function",
+				Function: ToolCallFunction{Name: name, Arguments: argsJSON},
+			})
+		}
+		return calls
+	}
+
+	choices, ok := result["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	msg, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	rawCalls, ok := msg["tool_calls"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var calls []ToolCall
+	for _, item := range rawCalls {
+		tc, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := tc["id"].(string)
+		tcType, _ := tc["type"].(string)
+		if tcType == "" {
+			tcType = "function"
+		}
+		fn, _ := tc["function"].(map[string]interface{})
+		name, _ := fn["name"].(string)
+		args, _ := fn["arguments"].(string)
+		calls = append(calls, ToolCall{
+			ID:       id,
+			Type:     tcType,
+			Function: ToolCallFunction{Name: name, Arguments: args},
+		})
+	}
+	return calls
 }
 
 // EstimateUsage schatzt Token-Verbrauch heuristisch
