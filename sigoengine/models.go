@@ -21,6 +21,7 @@ type Model struct {
 	MinTemperature           float64 // Minimale Temperatur
 	MaxTemperature           float64 // Maximale Temperatur
 	RequiresCompletionTokens bool    // Nutzt max_completion_tokens statt max_tokens (GPT-5)
+	UpstreamID               string  // Realer Modellname beim Provider, falls ≠ ID (z.B. Aggregator-Präfix "ci-"); leer = ID wird 1:1 gesendet
 }
 
 // CoreModels enthält das Minimal-Set eingebetteter Modelle (Fallback)

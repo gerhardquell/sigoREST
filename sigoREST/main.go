@@ -127,6 +127,7 @@ type ModelInfo struct {
 	MinTemperature           float64 `json:"min_temperature"`
 	MaxTemperature           float64 `json:"max_temperature"`
 	RequiresCompletionTokens bool    `json:"requires_completion_tokens"`
+	UpstreamID               string  `json:"upstream_id,omitempty"` // realer Modellname beim Provider, falls ≠ ID
 }
 
 // ModelUsageStats kumulierter Token-Verbrauch pro Modell
@@ -336,6 +337,7 @@ func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
 		MinTemperature:           m.MinTemperature,
 		MaxTemperature:           m.MaxTemperature,
 		RequiresCompletionTokens: m.RequiresCompletionTokens,
+		UpstreamID:               m.UpstreamID,
 	}
 }
 
@@ -380,6 +382,15 @@ func loadModelsFromProviders() map[string]ModelInfo {
 	// 4. Longcat (fällt intern auf statische Liste zurück)
 	if ms, err := sigoengine.FetchWithRetry("longcat", fetchAttempts, fetchBackoff, sigoengine.FetchLongcatModels); err != nil {
 		sigoengine.LogWarn("Longcat-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
+	} else {
+		for _, m := range ms {
+			models[m.ID] = modelInfoFromEngine(m)
+		}
+	}
+
+	// 5. Cheaperinference (Aggregator; IDs mit "ci-" präfixt, siehe UpstreamID)
+	if ms, err := sigoengine.FetchWithRetry("cheaperinference", fetchAttempts, fetchBackoff, sigoengine.FetchCheaperinferenceModels); err != nil {
+		sigoengine.LogWarn("Cheaperinference-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
 	} else {
 		for _, m := range ms {
 			models[m.ID] = modelInfoFromEngine(m)
@@ -510,6 +521,8 @@ func (s *Server) providerForModel(modelID string) string {
 			return "zai"
 		case strings.Contains(info.Endpoint, "longcat"):
 			return "longcat"
+		case strings.Contains(info.Endpoint, "cheaperinference"):
+			return "cheaperinference"
 		}
 	}
 	// Fallback by model name heuristics (case-insensitiv)
@@ -521,6 +534,8 @@ func (s *Server) providerForModel(modelID string) string {
 		return "zai"
 	case strings.Contains(lower, "longcat"):
 		return "longcat"
+	case strings.HasPrefix(lower, "ci-"):
+		return "cheaperinference"
 	default:
 		return "mammouth"
 	}
@@ -582,6 +597,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Endpoint = modelInfo.Endpoint
+	if modelInfo.UpstreamID != "" {
+		cfg.Model = modelInfo.UpstreamID
+	}
 
 	// Provider-Ping: scheitert → sofortiger Fehler, kein API-Call
 	if err := sigoengine.PingProvider(modelInfo.Endpoint); err != nil {
@@ -758,6 +776,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cfg.Endpoint = modelInfo.Endpoint
+		if modelInfo.UpstreamID != "" {
+			cfg.Model = modelInfo.UpstreamID
+		}
 
 		// Rate-Limiter pro Kanal (hybrid): wartet bis minInterval seit
 		// letztem Call vergangen, spätestens nach maxWait → ErrRateLimited

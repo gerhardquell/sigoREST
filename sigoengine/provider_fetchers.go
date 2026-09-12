@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -22,7 +23,8 @@ const (
 	zaiChatEndpoint      = "https://api.z.ai/api/paas/v4/chat/completions"
 	// ACHTUNG: offizielle Domain ist api.longcat.chat, nicht api.longcat.ai
 	// (TODO 20260830 nannte fälschlich .ai — per Doku-Recherche korrigiert).
-	longcatChatEndpoint = "https://api.longcat.chat/openai/v1/chat/completions"
+	longcatChatEndpoint          = "https://api.longcat.chat/openai/v1/chat/completions"
+	cheaperinferenceChatEndpoint = "https://api.cheaperinference.com/v1/chat/completions"
 )
 
 // Provider-Model-Listen-Endpoints (GET, kostenlos — keine Token-Billing).
@@ -33,6 +35,8 @@ const (
 	moonshotModelsEndpoint = "https://api.moonshot.ai/v1/models"         // Bearer
 	zaiModelsEndpoint      = "https://api.z.ai/api/paas/v4/models"       // Bearer
 	longcatModelsEndpoint  = "https://api.longcat.chat/openai/v1/models" // Bearer
+
+	cheaperinferenceModelsEndpoint = "https://api.cheaperinference.com/v1/models" // Bearer
 )
 
 // **********************************************************************
@@ -457,5 +461,91 @@ func FetchLongcatModels() ([]Model, error) {
 	}
 
 	LogInfo("Longcat-Modelle geladen", map[string]interface{}{"count": len(result)})
+	return result, nil
+}
+
+// **********************************************************************
+// FetchCheaperinferenceModels ruft https://api.cheaperinference.com/v1/models
+// ab (OMNIROUTE_API_KEY, Bearer Token). Anders als Moonshot/ZAI/Longcat
+// liefert dieser Aggregator Preise + Kontextfenster direkt mit — kein
+// statisches Known-Model-Mapping nötig. Die Liste enthält neben Text- auch
+// Bild-/Video-Modelle; wir filtern auf type=="text" mit
+// endpoint=="/v1/chat/completions".
+//
+// ID-Präfix "ci-": cheaperinference aggregiert Modelle, die es teils auch
+// direkt über Mammouth/Moonshot/ZAI gibt (gleicher Modellname). Ohne Präfix
+// würde die spätere Provider-Ladung in loadModelsFromProviders() den
+// früheren Eintrag in der ID-Map überschreiben. UpstreamID trägt den
+// unpräfixten Original-Namen, den main.go beim Request-Aufbau als
+// tatsächliches "model"-Feld verwendet (die API kennt "ci-..." nicht).
+func FetchCheaperinferenceModels() ([]Model, error) {
+	apiKey := os.Getenv("OMNIROUTE_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("cheaperinference: OMNIROUTE_API_KEY nicht gesetzt")
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, cheaperinferenceModelsEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cheaperinference: Request-Erstellung fehlgeschlagen: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cheaperinference: GET /v1/models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("cheaperinference: /v1/models returned HTTP %d", resp.StatusCode)
+	}
+
+	var listResp struct {
+		Data []struct {
+			ID              string `json:"id"`
+			Type            string `json:"type"`
+			Endpoint        string `json:"endpoint"`
+			ContextLength   int    `json:"context_length"`
+			MaxOutputTokens int    `json:"max_output_tokens"`
+			Pricing         struct {
+				InputPerMillion  string `json:"input_per_million"`
+				OutputPerMillion string `json:"output_per_million"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, fmt.Errorf("cheaperinference: invalid JSON: %w", err)
+	}
+
+	used := make(map[string]bool)
+	var result []Model
+
+	for _, item := range listResp.Data {
+		if item.ID == "" || item.Type != "text" || item.Endpoint != "/v1/chat/completions" {
+			continue
+		}
+
+		inputCost, _ := strconv.ParseFloat(item.Pricing.InputPerMillion, 64)
+		outputCost, _ := strconv.ParseFloat(item.Pricing.OutputPerMillion, 64)
+		sc := "ci-" + generateProviderShortcode(item.ID, used)
+		used[sc] = true
+
+		result = append(result, Model{
+			ID:              "ci-" + item.ID,
+			Shortcode:       sc,
+			Endpoint:        cheaperinferenceChatEndpoint,
+			APIKeyEnv:       "OMNIROUTE_API_KEY",
+			MaxInputTokens:  item.ContextLength,
+			MaxOutputTokens: item.MaxOutputTokens,
+			InputCost:       inputCost,
+			OutputCost:      outputCost,
+			MinTemperature:  0.0,
+			MaxTemperature:  2.0,
+			UpstreamID:      item.ID,
+		})
+	}
+
+	LogInfo("Cheaperinference-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
 }
