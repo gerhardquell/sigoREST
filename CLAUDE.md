@@ -14,8 +14,9 @@ sigoREST = drei-schichtiges Go-Projekt, zwei User-Interfaces:
 - **sigoREST Server**: OpenAI-kompatibler REST-Server für parallele Verbindungen (~100)
 
 Beide nutzen **Shared Package** `sigoengine` für:
-- Model-Registry (60+ Modelle von Mammouth.ai, Moonshot.ai, Z.ai)
+- Model-Registry (Modelle von Mammouth.ai, Moonshot.ai, Z.ai, Longcat)
 - API-Abstraktion (OpenAI + Anthropic Formate)
+- Multi-Channel-Support mit Failover + pro-Kanal Rate-Limiting + Health-Monitor
 - Circuit Breaker + Retry Logic
 - Session-Management (JSON-basiert)
 - Thread-safes Logging
@@ -82,16 +83,24 @@ CLI selbst haben keine Go-Tests → manuell via CLI/REST-API testen.
 
 ```
 sigorest/
-├── sigoengine/             # Shared Package (thread-safe), mehrere Dateien:
-│   ├── engine.go           #   CallAPI, CircuitBreaker, Session, Logging
-│   ├── models.go           #   Model-Typ, CoreModels (Fallback-Liste)
-│   ├── models_registry.go  #   Lookup-Maps, Laden JSON→CSV→CoreModels
-│   ├── provider_fetchers.go#   Dynamischer Abruf Mammoth/Moonshot/ZAI
-│   ├── retry.go            #   FetchWithRetry (Backoff gegen Boot-DNS-Race)
-│   └── shortcode.go        #   Shortcode-Generierung (Familie+Version+Variante)
-├── cmd/sigoE/main.go       # CLI-Wrapper
-├── sigoREST/main.go        # REST-Server
-└── sigoREST/memory.json    # Globaler Memory-Block (embedded + Disk)
+├── sigoengine/                  # Shared Package (thread-safe), mehrere Dateien:
+│   ├── engine.go                #   CallAPI, CircuitBreaker, Session, Logging
+│   ├── models.go                #   Model-Typ, CoreModels (Fallback-Liste)
+│   ├── models_registry.go       #   Lookup-Maps, Laden JSON→CSV→CoreModels
+│   ├── provider_fetchers.go     #   Dynamischer Abruf Mammoth/Moonshot/ZAI/Longcat
+│   ├── retry.go                 #   FetchWithRetry (Backoff gegen Boot-DNS-Race)
+│   ├── shortcode.go             #   Shortcode-Generierung (Familie+Version+Variante)
+│   ├── channel.go               #   Channel-Datenmodell + Registry (Multi-Channel)
+│   ├── channel_manager.go       #   Kanal-Auflösung + Failover-Logik
+│   ├── channel_health.go        #   Hintergrund-Health-Monitor (lazy, kein Chat-Ping)
+│   ├── loadconfig_channel.go    #   LoadConfig-Erweiterung für Kanal-Auswahl
+│   ├── rate_limiter.go          #   Pro-Kanal Rate-Limiter (hybrid, siehe unten)
+│   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
+│   ├── env.go                   #   Optionale ./env Datei
+│   └── version.go               #   Zentrale Versions-Konstante
+├── cmd/sigoE/main.go            # CLI-Wrapper
+├── sigoREST/main.go             # REST-Server
+└── sigoREST/memory.json         # Globaler Memory-Block (embedded + Disk)
 ```
 
 ### sigoengine — Shared Package
@@ -109,14 +118,19 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 | `Log*()` | Thread-safes Logging (DEBUG/INFO/WARN/ERROR/FATAL) |
 | `DiscoverOllamaModels(endpoint)` | Auto-Discovery lokaler LLMs |
 | `ResolveModelName(shortcode)` | Shortcode → vollständiger Name |
-| `Fetch{Mammouth,Moonshot,ZAI}Models()` | Dynamischer Modell-Abruf pro Provider |
+| `Fetch{Mammouth,Moonshot,ZAI,Longcat}Models()` | Dynamischer Modell-Abruf pro Provider |
 | `FetchWithRetry(name, attempts, backoff, fn)` | Retry-Wrapper mit Backoff um einen Fetcher |
 | `GenerateShortcode(id, used)` | Sprechender Shortcode aus Modellname |
+| `ChannelRegistry` / `ChannelManager` | Multi-Channel-Verwaltung + Failover-Auflösung |
+| `LoadConfigWithChannel(model, ch)` | Wie `LoadConfig`, aber für einen bestimmten Kanal |
+| `RateLimiter.Acquire/Release` | Pro-Kanal hybrides Rate-Limiting (→ `ErrRateLimited`) |
+| `StartHealthMonitor(...)` | Lazy Hintergrund-Health-Check (GET `/models`, kein Chat-Ping) |
 
 **Thread-Safety:**
 - `sync.RWMutex` für Logging-Konfiguration
 - `sync.Once` für Shortcode-Lookup-Map
 - `sync.RWMutex` für Ollama-Registry
+- `sync.RWMutex` je Rate-Limiter-Key, `sync.RWMutex` für Channel-Registry
 
 ### cmd/sigoE/main.go — CLI-Wrapper
 
@@ -144,10 +158,11 @@ OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
 - HTTPS `:9443` — Privates Netz (192.168.0.0/16, 10.0.0.0/8)
 
 **Modell-Quelle (wichtig):** Der Server lädt seine Modelle beim Start
-**dynamisch** über `loadModelsFromProviders()` (Mammoth/Moonshot/ZAI per HTTP)
-plus Ollama-Discovery — **nicht** aus einer models.csv. Nur `memory.json` ist
-embedded (`//go:embed memory.json`), Disk hat Vorrang. Die CSV/Registry
-(`models_registry.go`) ist primär für die CLI; der Server nutzt sie nicht.
+**dynamisch** über `loadModelsFromProviders()` (Mammoth/Moonshot/ZAI/Longcat
+per HTTP) plus Ollama-Discovery — **nicht** aus einer models.csv. Nur
+`memory.json` ist embedded (`//go:embed memory.json`), Disk hat Vorrang. Die
+CSV/Registry (`models_registry.go`) ist primär für die CLI; der Server nutzt
+sie nicht.
 
 **Endpoints:**
 | Pfad | Methode | Zweck |
@@ -156,10 +171,18 @@ embedded (`//go:embed memory.json`), Disk hat Vorrang. Die CSV/Registry
 | `/v1/models` | GET | Modell-Liste (ID + Shortcode) |
 | `/api/models` | GET | Volle Modell-Infos (Preise, Limits) |
 | `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
+| `/api/shortlist` | GET | Kompakt: nur Shortcode + Provider, sortiert |
+| `/api/channels` | GET | Status aller Kanäle (inkl. `min_interval_ms`/`max_wait_ms`) |
+| `/api/channels/:provider/:name` | GET | Einzelkanal-Detail |
+| `/api/channels/:provider/:name/enable` | POST | Kanal aktivieren |
+| `/api/channels/:provider/:name/disable` | POST | Kanal deaktivieren |
+| `/api/channels/:provider/:name/memory` | GET/PUT | Kanal-spezifischer Memory-Block |
+| `/api/channels/:provider/:name/system-prompt` | GET/PUT | Kanal-spezifischer System-Prompt |
 | `/api/health` | GET | Server-Status + Circuit-Breaker |
 | `/api/memory` | GET/PUT | Globaler Memory-Block |
 | `/api/usage`  | GET | Token-Statistiken (RAM, Reset bei Neustart) |
 | `/api/system-prompt` | GET/PUT | Globaler System-Prompt |
+| `/api/version` | GET | Version + Component-Name |
 | `/api/help`   | GET | Endpoint-Dokumentation |
 | `/ping`       | GET | Load-Balancer Health-Check |
 
@@ -176,7 +199,7 @@ embedded (`//go:embed memory.json`), Disk hat Vorrang. Die CSV/Registry
 
 ### Dynamisches Modell-Laden (Server)
 
-`loadModelsFromProviders()` ruft beim Start sequenziell drei Provider-APIs ab.
+`loadModelsFromProviders()` ruft beim Start sequenziell vier Provider-APIs ab.
 Jeder Fetcher ist in `FetchWithRetry` gewickelt (4 Versuche, 2s/4s/8s Backoff).
 Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
 
@@ -185,12 +208,14 @@ Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
 |----------|-----------|-------|
 | Mammoth (`/public/models`, kein Key) | `return nil, err` | 0 Modelle |
 | Moonshot (`MOONSHOT_API_KEY`) | `return nil, err` | 0 Modelle |
-| ZAI (`ZAI_API_KEY`) | `return zaiStaticModels, nil` | 13 statische Modelle |
+| ZAI (`ZAI_API_KEY`) | `return zaiStaticModels, nil` | statische Modelle |
+| Longcat (`LONGCAT_API_KEY`) | `return longcatKnownModels, nil` | statische Modelle |
 
-→ Wenn beim Boot nur ~13 Modelle erscheinen ("no such host" im Log): DNS war
-beim Start noch nicht oben. Schutz: systemd-Unit mit `Wants/After=network-online.target`
-(nicht `network.target`!) **plus** der Retry. Siehe `docs/systemd-install.md`.
-Workaround zur Laufzeit: `systemctl restart sigoREST`.
+→ Wenn beim Boot nur die statischen ZAI/Longcat-Modelle erscheinen ("no such
+host" im Log): DNS war beim Start noch nicht oben. Schutz: systemd-Unit mit
+`Wants/After=network-online.target` (nicht `network.target`!) **plus** der
+Retry. Siehe `docs/systemd-install.md`. Workaround zur Laufzeit:
+`systemctl restart sigoREST`.
 
 **Shortcode-Generierung:** `GenerateShortcode` (in `shortcode.go`) baut sprechende
 Kürzel: Familie (longest-prefix, z.B. `gpt`/`claude→cl`/`gemini→gem`) + Subfamily
@@ -242,6 +267,29 @@ Server nutzt `NewEnhancedCircuitBreaker` pro Modell (`handleChatCompletions`):
 
 Fehler bei einem Modell blockieren andere nicht.
 
+### Multi-Channel, Failover, Rate-Limiting, Health-Monitor
+
+Ein Provider kann mehrere **Kanäle** (API-Keys) haben (`ChannelRegistry` in
+`channel.go`, Config `channels.json`). Bei einem Request probiert der
+`ChannelManager` (`channel_manager.go`) die Kanäle eines Providers der Reihe
+nach durch — Failover ist transparent für den Client.
+
+**Rate-Limiter (hybrid, pro Kanal, nicht pro Provider):** `RateLimiter.Acquire`
+wartet bis `minInterval` seit letztem Call vergangen ist; würde die Wartezeit
+`maxWait` überschreiten, schlägt der Call mit `ErrRateLimited` fehl → Server
+probiert den nächsten Kanal. Erst wenn alle Kanäle eines Providers erschöpft
+sind, geht HTTP 429 + `Retry-After` an den Client. Konfigurierbar global
+(`-rate-min-interval`, `-rate-max-wait`) und pro Kanal (`MinInterval`/`MaxWait`
+in `channels.json`, ms). Granularität ist bewusst pro Kanal: ein
+Provider-weiter Limiter würde alle Failover-Keys gleichzeitig blockieren.
+
+**Health-Monitor** (`channel_health.go`, `StartHealthMonitor`): lazy
+Hintergrund-Check, reaktiviert Reserve-Kanäle bei Bedarf. Probe läuft über
+GET `/models` (oder Äquivalent), **nicht** über einen echten Chat-Call — kein
+API-Kosten-Verbrauch im Leerlauf.
+
+Details/Historie siehe `RETROSPECTIVE.md`, Session 2026-08-18.
+
 ### Session-Management
 
 Sessions als JSON-Dateien:
@@ -265,7 +313,9 @@ sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 
 - **Go-Modul**: `sigorest` mit Go 1.26
 - **Embedded Files**: nur `memory.json` eingebettet (Disk hat Vorrang); Server-Modelle kommen dynamisch von den Providern, nicht aus einer embedded CSV
-- **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-Fallback-Liste (DNS-Race)
+- **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-/Longcat-Fallback-Liste (DNS-Race)
+- **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`
+- **Scope-Grenze**: sigoREST bleibt schlanker Proxy, kein Agent-Harness — bewusst kein Tool-Call-Repair o.ä.
 - **IPv6**: Geblockt (außer `::1` loopback)
 - **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start
 - **Ports**: 8080/8443 belegt auf Gerhards System (lokaler Webserver)
@@ -279,8 +329,19 @@ Detaillierte Session-Historie: Siehe `RETROSPECTIVE.md`
 ### Neues Modell hinzufügen
 Server: Modelle kommen dynamisch vom Provider — bekannte Modelle werden in
 `provider_fetchers.go` angereichert (`moonshotKnownModels`, `zaiStaticModels`,
-Mammoth via API). Neuen Provider → neue `Fetch*`-Funktion + Aufruf in
-`loadModelsFromProviders()`. CLI: Eintrag in CSV/Registry.
+`longcatKnownModels`, Mammoth via API). CLI: Eintrag in CSV/Registry.
+
+### Neuen Provider hinzufügen
+Reicht NICHT nur: `Fetch*`-Funktion in `provider_fetchers.go` + Eintrag in
+`channel.go` (`knownProviders`) + Aufruf in `loadModelsFromProviders()`.
+**`providerForModel()` in `sigoREST/main.go` muss ebenfalls einen `case` für
+den neuen Provider bekommen** (beide Zweige: Endpoint-Match und
+Namens-Heuristik-Fallback) — sonst fällt jedes Modell des neuen Providers auf
+den Default-Zweig (`mammouth`) zurück und Chat-Calls gehen mit falschem
+API-Key raus (Symptom: HTTP 401 "incorrect api key", obwohl der Key gültig
+ist — beim Longcat-Rollout genau so live aufgetreten). Nach jedem neuen
+Provider einen echten End-to-End Chat-Call testen, nicht nur den Models-Fetch
+beim Boot.
 
 ### REST-Server als systemd-Service installieren
 ```bash
