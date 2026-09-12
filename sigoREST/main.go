@@ -541,6 +541,35 @@ func (s *Server) providerForModel(modelID string) string {
 	}
 }
 
+// recordUsage aktualisiert die Token-Statistiken für ein Modell und den
+// tatsächlich genutzten Kanal. Gemeinsam genutzt von /v1/chat/completions
+// und /v1/messages.
+func (s *Server) recordUsage(modelID string, ch *sigoengine.Channel, usage *sigoengine.UsageData) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+
+	stats, ok := s.usage[modelID]
+	if !ok {
+		stats = &ModelUsageStats{}
+		s.usage[modelID] = stats
+	}
+	stats.InputTokens += int64(usage.InputTokens)
+	stats.OutputTokens += int64(usage.OutputTokens)
+	stats.TotalTokens += int64(usage.TotalTokens)
+	stats.Requests++
+
+	channelKey := fmt.Sprintf("%s#%s", modelID, ch.FullName())
+	channelStats, ok := s.usageByChannel[channelKey]
+	if !ok {
+		channelStats = &ModelUsageStats{}
+		s.usageByChannel[channelKey] = channelStats
+	}
+	channelStats.InputTokens += int64(usage.InputTokens)
+	channelStats.OutputTokens += int64(usage.OutputTokens)
+	channelStats.TotalTokens += int64(usage.TotalTokens)
+	channelStats.Requests++
+}
+
 // **********************************************************************
 // HTTP Handler
 
@@ -953,28 +982,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		CompletionTokens: responseUsage.OutputTokens,
 		TotalTokens:      responseUsage.TotalTokens,
 	}
-	s.usageMu.Lock()
-	stats, ok := s.usage[modelID]
-	if !ok {
-		stats = &ModelUsageStats{}
-		s.usage[modelID] = stats
-	}
-	stats.InputTokens += int64(responseUsage.InputTokens)
-	stats.OutputTokens += int64(responseUsage.OutputTokens)
-	stats.TotalTokens += int64(responseUsage.TotalTokens)
-	stats.Requests++
-
-	channelKey := fmt.Sprintf("%s#%s", modelID, successfulCh.FullName())
-	channelStats, ok := s.usageByChannel[channelKey]
-	if !ok {
-		channelStats = &ModelUsageStats{}
-		s.usageByChannel[channelKey] = channelStats
-	}
-	channelStats.InputTokens += int64(responseUsage.InputTokens)
-	channelStats.OutputTokens += int64(responseUsage.OutputTokens)
-	channelStats.TotalTokens += int64(responseUsage.TotalTokens)
-	channelStats.Requests++
-	s.usageMu.Unlock()
+	s.recordUsage(modelID, successfulCh, responseUsage)
 
 	// Bei echtem Streaming wurde die Antwort bereits geschrieben.
 	if streamed {

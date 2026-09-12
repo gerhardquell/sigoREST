@@ -202,3 +202,21 @@ func TestHandleUsage(t *testing.T) {
 		t.Fatal("missing by_channel")
 	}
 }
+
+func TestRecordUsage(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ch := &sigoengine.Channel{Provider: "mammouth", Name: "default"}
+
+	srv.recordUsage("claude-h", ch, &sigoengine.UsageData{InputTokens: 10, OutputTokens: 5, TotalTokens: 15})
+	srv.recordUsage("claude-h", ch, &sigoengine.UsageData{InputTokens: 3, OutputTokens: 2, TotalTokens: 5})
+
+	stats := srv.usage["claude-h"]
+	if stats == nil || stats.Requests != 2 || stats.TotalTokens != 20 {
+		t.Fatalf("unexpected model stats: %+v", stats)
+	}
+
+	chStats := srv.usageByChannel["claude-h#mammouth-default"]
+	if chStats == nil || chStats.Requests != 2 || chStats.TotalTokens != 20 {
+		t.Fatalf("unexpected channel stats: %+v", chStats)
+	}
+}
