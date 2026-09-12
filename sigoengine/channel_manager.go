@@ -84,6 +84,24 @@ func (m *ChannelManager) NextActive(provider string, after *Channel) (*Channel, 
 	return nil, false
 }
 
+// FailoverList returns the ordered list of channels to try for a request:
+// the given starting channel followed by the provider's remaining active
+// channels in NextActive order. Used by request handlers to build their
+// retry/failover loop without re-implementing NextActive traversal.
+func (m *ChannelManager) FailoverList(provider string, first *Channel) []*Channel {
+	list := []*Channel{first}
+	current := first
+	for {
+		next, ok := m.NextActive(provider, current)
+		if !ok {
+			break
+		}
+		list = append(list, next)
+		current = next
+	}
+	return list
+}
+
 // AllChannelStatus returns a snapshot of every known channel.
 func (m *ChannelManager) AllChannelStatus() []map[string]interface{} {
 	var result []map[string]interface{}

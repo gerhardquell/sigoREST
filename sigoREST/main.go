@@ -752,16 +752,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	inputText := inputBuilder.String()
 
 	// Liste der zu probierenden Kanäle aufbauen (initial + Failover)
-	channelsToTry := []*sigoengine.Channel{ch}
-	current := ch
-	for {
-		next, ok := s.channelManager.NextActive(provider, current)
-		if !ok {
-			break
-		}
-		channelsToTry = append(channelsToTry, next)
-		current = next
-	}
+	channelsToTry := s.channelManager.FailoverList(provider, ch)
 
 	// Exponential Backoff Retry
 	retryConfig := sigoengine.DefaultRetryConfig()

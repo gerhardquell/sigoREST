@@ -98,3 +98,33 @@ func TestChannelManager_ResolveProviderMismatch(t *testing.T) {
 		t.Fatal("expected provider mismatch error")
 	}
 }
+
+func TestChannelManager_FailoverList(t *testing.T) {
+	os.Setenv("MAMMOUTH_API_KEY", "default-key")
+	os.Setenv("MAMMOUTH_API_KEY_0", "key-0")
+	os.Setenv("MAMMOUTH_API_KEY_1", "key-1")
+	defer func() {
+		os.Unsetenv("MAMMOUTH_API_KEY")
+		os.Unsetenv("MAMMOUTH_API_KEY_0")
+		os.Unsetenv("MAMMOUTH_API_KEY_1")
+	}()
+
+	reg := NewChannelRegistry("")
+	reg.DiscoverFromEnv()
+	reg.SetActive("mammouth", "0", true)
+	reg.SetActive("mammouth", "1", true)
+	mgr := NewChannelManager(reg)
+
+	first, err := mgr.Resolve("mammouth", "")
+	if err != nil {
+		t.Fatalf("resolve default: %v", err)
+	}
+
+	list := mgr.FailoverList("mammouth", first)
+	if len(list) != 3 {
+		t.Fatalf("expected 3 channels in failover list, got %d: %+v", len(list), list)
+	}
+	if list[0].Name != "default" {
+		t.Fatalf("expected first channel = default, got %s", list[0].Name)
+	}
+}
