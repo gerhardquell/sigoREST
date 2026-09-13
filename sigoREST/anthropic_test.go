@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -184,5 +185,100 @@ func TestHandleMessages_StreamingNotYetSupported(t *testing.T) {
 
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestStreamAnthropicResponse_TextOnly(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	chunk := func(content, finishReason string) string {
+		choice := map[string]interface{}{"delta": map[string]interface{}{"content": content}}
+		if finishReason != "" {
+			choice["finish_reason"] = finishReason
+		}
+		payload := map[string]interface{}{"choices": []interface{}{choice}}
+		b, _ := json.Marshal(payload)
+		return "data: " + string(b) + "\n\n"
+	}
+
+	sse := chunk("Hallo", "") + chunk(" Welt", "stop") + "data: [DONE]\n\n"
+	stream := io.NopCloser(strings.NewReader(sse))
+	rr := httptest.NewRecorder()
+
+	text, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "Hallo Welt" {
+		t.Fatalf("expected accumulated text 'Hallo Welt', got %q", text)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		`"type":"text_delta"`,
+		`"text":"Hallo"`,
+		"event: content_block_stop",
+		"event: message_delta",
+		`"stop_reason":"end_turn"`,
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestStreamAnthropicResponse_ToolCall(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	chunk := func(delta map[string]interface{}, finishReason string) string {
+		choice := map[string]interface{}{"delta": delta}
+		if finishReason != "" {
+			choice["finish_reason"] = finishReason
+		}
+		payload := map[string]interface{}{"choices": []interface{}{choice}}
+		b, _ := json.Marshal(payload)
+		return "data: " + string(b) + "\n\n"
+	}
+
+	sse := chunk(map[string]interface{}{
+		"tool_calls": []interface{}{
+			map[string]interface{}{
+				"index": 0, "id": "call_1", "type": "function",
+				"function": map[string]interface{}{"name": "read_file", "arguments": ""},
+			},
+		},
+	}, "")
+	sse += chunk(map[string]interface{}{
+		"tool_calls": []interface{}{
+			map[string]interface{}{"index": 0, "function": map[string]interface{}{"arguments": `{"path":`}},
+		},
+	}, "")
+	sse += chunk(map[string]interface{}{
+		"tool_calls": []interface{}{
+			map[string]interface{}{"index": 0, "function": map[string]interface{}{"arguments": `"x.txt"}`}},
+		},
+	}, "tool_calls")
+	sse += "data: [DONE]\n\n"
+
+	stream := io.NopCloser(strings.NewReader(sse))
+	rr := httptest.NewRecorder()
+
+	_, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`"type":"tool_use"`,
+		`"id":"call_1"`,
+		`"name":"read_file"`,
+		`path`,
+		`"stop_reason":"tool_use"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
+		}
 	}
 }

@@ -10,9 +10,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -516,4 +518,182 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	resp := internalToAnthropicResponse(req.Model, responseText, responseToolCalls, responseUsage, responseFinishReason)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// writeAnthropicSSEEvent schreibt ein einzelnes Anthropic-SSE-Event
+// (event: + data: + Leerzeile) und flusht sofort.
+func writeAnthropicSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, data); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+// streamAnthropicResponse liest einen OpenAI-kompatiblen SSE-Stream (wie von
+// sigoengine.CallAPIStream geliefert) und übersetzt ihn live in eine
+// Anthropic-Messages-Event-Sequenz. Tool-Call-Argument-Fragmente werden
+// unverändert als partial_json durchgereicht (Anthropic erwartet ohnehin
+// akkumulierbare JSON-Fragmente, keine Neu-Serialisierung nötig).
+func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCloser, model string) (string, error) {
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return "", fmt.Errorf("response writer does not support flushing")
+	}
+
+	messageID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+	writeAnthropicSSEEvent(w, flusher, "message_start", map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id": messageID, "type": "message", "role": "assistant", "model": model,
+			"content": []interface{}{}, "stop_reason": nil,
+			"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0},
+		},
+	})
+
+	var responseText strings.Builder
+	nextBlockIndex := 0
+	textBlockIndex := -1
+	toolBlockIndexByOpenAIIndex := map[int]int{}
+	var openBlockIndices []int
+	finishReason := ""
+	var usage *sigoengine.UsageData
+
+	scanner := bufio.NewScanner(stream)
+	buf := make([]byte, 4096)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		dataStr := strings.TrimPrefix(line, "data: ")
+		if dataStr == "" || dataStr == "[DONE]" {
+			continue
+		}
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+			continue
+		}
+
+		if u, ok := chunk["usage"].(map[string]interface{}); ok {
+			usage = &sigoengine.UsageData{}
+			if v, ok := u["prompt_tokens"].(float64); ok {
+				usage.InputTokens = int(v)
+			}
+			if v, ok := u["completion_tokens"].(float64); ok {
+				usage.OutputTokens = int(v)
+			}
+		}
+
+		choices, ok := chunk["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			continue
+		}
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+			finishReason = fr
+		}
+		delta, ok := choice["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		if text, ok := delta["content"].(string); ok && text != "" {
+			if textBlockIndex == -1 {
+				textBlockIndex = nextBlockIndex
+				nextBlockIndex++
+				openBlockIndices = append(openBlockIndices, textBlockIndex)
+				writeAnthropicSSEEvent(w, flusher, "content_block_start", map[string]interface{}{
+					"type": "content_block_start", "index": textBlockIndex,
+					"content_block": map[string]interface{}{"type": "text", "text": ""},
+				})
+			}
+			responseText.WriteString(text)
+			writeAnthropicSSEEvent(w, flusher, "content_block_delta", map[string]interface{}{
+				"type": "content_block_delta", "index": textBlockIndex,
+				"delta": map[string]interface{}{"type": "text_delta", "text": text},
+			})
+		}
+
+		if rawToolCalls, ok := delta["tool_calls"].([]interface{}); ok {
+			for _, item := range rawToolCalls {
+				tc, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				openAIIdx := 0
+				if v, ok := tc["index"].(float64); ok {
+					openAIIdx = int(v)
+				}
+				anthropicIdx, seen := toolBlockIndexByOpenAIIndex[openAIIdx]
+				fn, _ := tc["function"].(map[string]interface{})
+				if !seen {
+					anthropicIdx = nextBlockIndex
+					nextBlockIndex++
+					toolBlockIndexByOpenAIIndex[openAIIdx] = anthropicIdx
+					openBlockIndices = append(openBlockIndices, anthropicIdx)
+					id, _ := tc["id"].(string)
+					name := ""
+					if fn != nil {
+						name, _ = fn["name"].(string)
+					}
+					writeAnthropicSSEEvent(w, flusher, "content_block_start", map[string]interface{}{
+						"type": "content_block_start", "index": anthropicIdx,
+						"content_block": map[string]interface{}{
+							"type": "tool_use", "id": id, "name": name, "input": map[string]interface{}{},
+						},
+					})
+				}
+				if fn != nil {
+					if args, ok := fn["arguments"].(string); ok && args != "" {
+						writeAnthropicSSEEvent(w, flusher, "content_block_delta", map[string]interface{}{
+							"type": "content_block_delta", "index": anthropicIdx,
+							"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": args},
+						})
+					}
+				}
+			}
+		}
+	}
+
+	for _, idx := range openBlockIndices {
+		writeAnthropicSSEEvent(w, flusher, "content_block_stop", map[string]interface{}{
+			"type": "content_block_stop", "index": idx,
+		})
+	}
+
+	hasToolCalls := len(toolBlockIndexByOpenAIIndex) > 0
+	stopReason := finishReasonToStopReason(finishReason, hasToolCalls)
+	usagePayload := map[string]interface{}{"output_tokens": 0}
+	if usage != nil {
+		usagePayload["output_tokens"] = usage.OutputTokens
+	}
+	writeAnthropicSSEEvent(w, flusher, "message_delta", map[string]interface{}{
+		"type":  "message_delta",
+		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
+		"usage": usagePayload,
+	})
+	writeAnthropicSSEEvent(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
+
+	if err := scanner.Err(); err != nil {
+		return responseText.String(), err
+	}
+	return responseText.String(), nil
 }
