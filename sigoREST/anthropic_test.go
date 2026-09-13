@@ -173,9 +173,9 @@ func TestHandleMessages_ModelNotFound(t *testing.T) {
 	}
 }
 
-func TestHandleMessages_StreamingNotYetSupported(t *testing.T) {
+func TestHandleMessages_StreamingReachesProviderCall(t *testing.T) {
 	srv, _ := newTestServer(t)
-	srv.models["claude-h"] = ModelInfo{ID: "claude-h", Endpoint: "https://api.mammouth.ai/v1/chat/completions"}
+	srv.models["claude-h"] = ModelInfo{ID: "claude-h", Endpoint: "http://127.0.0.1:1/v1/chat/completions"}
 
 	body := `{"model":"claude-h","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
@@ -183,8 +183,10 @@ func TestHandleMessages_StreamingNotYetSupported(t *testing.T) {
 
 	srv.handleMessages(rr, req)
 
-	if rr.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d: %s", rr.Code, rr.Body.String())
+	// Kein echter Provider erreichbar -> Verbindung schlägt fehl, aber NICHT
+	// mehr mit 501 (das hätte Task 7's Platzhalter noch geliefert).
+	if rr.Code == http.StatusNotImplemented {
+		t.Fatalf("expected streaming to be wired up, still got 501 not-implemented")
 	}
 }
 

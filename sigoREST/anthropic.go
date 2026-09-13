@@ -412,11 +412,6 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		apiRequest["max_tokens"] = req.MaxTokens
 	}
 
-	if req.Stream {
-		writeError(w, "streaming not yet supported on /v1/messages", "not_implemented", http.StatusNotImplemented)
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
 
@@ -436,6 +431,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var responseToolCalls []sigoengine.ToolCall
 	var successfulCh *sigoengine.Channel
 	var lastErr error
+	var streamed bool
 
 	for _, currentCh := range channelsToTry {
 		cfg, err := sigoengine.LoadConfigWithChannel(modelID, currentCh)
@@ -475,23 +471,39 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		breaker := s.breakers[cbKey]
 		s.mu.Unlock()
 
-		lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
-			return breaker.Do(func() error {
-				text, u, fr, tc, e := sigoengine.CallAPI(ctx, cfg, apiRequest, 180)
+		if req.Stream && cfg.Type != "anthropic" {
+			lastErr = breaker.Do(func() error {
+				stream, e := sigoengine.CallAPIStream(ctx, cfg, apiRequest)
 				if e != nil {
-					apiErr := sigoengine.ClassifyError(e)
-					if apiErr.Type == sigoengine.ErrAuthFailed {
-						s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false)
-					}
+					return e
+				}
+				text, e := s.streamAnthropicResponse(w, stream, req.Model)
+				if e != nil {
 					return e
 				}
 				responseText = text
-				responseUsage = u
-				responseFinishReason = fr
-				responseToolCalls = tc
+				streamed = true
 				return nil
 			})
-		})
+		} else {
+			lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
+				return breaker.Do(func() error {
+					text, u, fr, tc, e := sigoengine.CallAPI(ctx, cfg, apiRequest, 180)
+					if e != nil {
+						apiErr := sigoengine.ClassifyError(e)
+						if apiErr.Type == sigoengine.ErrAuthFailed {
+							s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false)
+						}
+						return e
+					}
+					responseText = text
+					responseUsage = u
+					responseFinishReason = fr
+					responseToolCalls = tc
+					return nil
+				})
+			})
+		}
 
 		if lastErr == nil {
 			successfulCh = currentCh
@@ -508,6 +520,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if lastErr != nil {
 		s.writeAPIError(w, modelID, lastErr)
 		return
+	}
+
+	if streamed {
+		return // Anthropic-SSE-Antwort wurde bereits vollständig geschrieben.
 	}
 
 	if responseUsage == nil {
