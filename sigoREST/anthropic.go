@@ -371,6 +371,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Default setzen: Anthropic-Clients, die max_tokens weglassen, senden 0 im
+	// JSON (int-Zero-Value) — 0 würde unten unverändert an den Provider
+	// durchgereicht und dort als "generiere nichts" interpretiert.
+	if req.MaxTokens == 0 && modelInfo.MaxOutputTokens > 0 {
+		req.MaxTokens = modelInfo.MaxOutputTokens
+	}
+
 	messages, tools, toolChoice, err := anthropicRequestToInternal(&req)
 	if err != nil {
 		writeError(w, "Invalid request: "+err.Error(), "invalid_request", http.StatusBadRequest)
@@ -391,9 +398,25 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		"model":    wireModel,
 		"messages": messages,
 	}
-	if req.Temperature != nil {
-		apiRequest["temperature"] = *req.Temperature
+	// Temperatur festlegen (analog handleChatCompletions):
+	//   - Fixed-Temp-Modelle (Min==Max, z.B. kimi-k2.5 thinking): Wert immer
+	//     erzwingen, Client-Override ignorieren — sonst 400 vom Provider.
+	//   - Sonst: Client-Wert oder Default-Mittelpunkt, geclampt auf [Min,Max].
+	var temperature float64
+	switch {
+	case modelInfo.MinTemperature == modelInfo.MaxTemperature:
+		temperature = modelInfo.MinTemperature
+	case req.Temperature == nil:
+		temperature = (modelInfo.MinTemperature + modelInfo.MaxTemperature) / 2.0
+	default:
+		temperature = *req.Temperature
+		if temperature < modelInfo.MinTemperature {
+			temperature = modelInfo.MinTemperature
+		} else if temperature > modelInfo.MaxTemperature {
+			temperature = modelInfo.MaxTemperature
+		}
 	}
+	apiRequest["temperature"] = temperature
 	if req.TopP != nil {
 		apiRequest["top_p"] = *req.TopP
 	}
@@ -406,10 +429,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if toolChoice != nil {
 		apiRequest["tool_choice"] = toolChoice
 	}
-	if modelInfo.RequiresCompletionTokens {
-		apiRequest["max_completion_tokens"] = req.MaxTokens
-	} else {
-		apiRequest["max_tokens"] = req.MaxTokens
+	// max_tokens nur setzen wenn > 0 (0 → Provider-Default, verhindert leere Antworten)
+	if req.MaxTokens > 0 {
+		if modelInfo.RequiresCompletionTokens {
+			apiRequest["max_completion_tokens"] = req.MaxTokens
+		} else {
+			apiRequest["max_tokens"] = req.MaxTokens
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
@@ -522,14 +548,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if streamed {
-		return // Anthropic-SSE-Antwort wurde bereits vollständig geschrieben.
-	}
-
 	if responseUsage == nil {
 		responseUsage = sigoengine.EstimateUsage(inputText, responseText)
 	}
 	s.recordUsage(modelID, successfulCh, responseUsage)
+
+	if streamed {
+		return // Anthropic-SSE-Antwort wurde bereits vollständig geschrieben.
+	}
 
 	resp := internalToAnthropicResponse(req.Model, responseText, responseToolCalls, responseUsage, responseFinishReason)
 	w.Header().Set("Content-Type", "application/json")
