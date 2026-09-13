@@ -10,8 +10,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -281,4 +283,237 @@ func internalToAnthropicResponse(model, text string, toolCalls []sigoengine.Tool
 		resp.Usage = AnthropicUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens}
 	}
 	return resp
+}
+
+// writeAPIError klassifiziert einen Fehler aus der Provider-Kette und
+// schreibt die passende HTTP-Fehlerantwort (Status-Code, Error-Type,
+// Retry-After bei Rate-Limits). Eigenständig von handleChatCompletions'
+// Fehlerbehandlung, um den bestehenden, produktionskritischen Pfad nicht
+// anzufassen.
+func (s *Server) writeAPIError(w http.ResponseWriter, modelID string, err error) {
+	if err == sigoengine.ErrRateLimited {
+		retryAfter := s.rateMaxWait.Seconds()
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		sigoengine.LogWarn("Alle Kanäle rate-limitiert", map[string]interface{}{
+			"model": modelID, "retry_after": retryAfter,
+		})
+		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
+		writeError(w, "rate limit exceeded: all channels throttled", "rate_limit", http.StatusTooManyRequests)
+		return
+	}
+
+	apiErr := sigoengine.ClassifyError(err)
+	sigoengine.LogError("API-Call fehlgeschlagen", err, map[string]interface{}{
+		"model":       modelID,
+		"error_type":  apiErr.Type,
+		"status_code": apiErr.StatusCode,
+	})
+
+	httpStatus := http.StatusBadGateway
+	errType := "api_error"
+	switch apiErr.Type {
+	case sigoengine.ErrRateLimit:
+		httpStatus = http.StatusTooManyRequests
+		errType = "rate_limit"
+		if apiErr.RetryAfter > 0 {
+			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", apiErr.RetryAfter.Seconds()))
+		}
+	case sigoengine.ErrAuthFailed:
+		httpStatus = http.StatusUnauthorized
+		errType = "auth_failed"
+	case sigoengine.ErrTimeout:
+		httpStatus = http.StatusGatewayTimeout
+		errType = "timeout"
+	case sigoengine.ErrServerError:
+		httpStatus = http.StatusServiceUnavailable
+		errType = "server_error"
+	case sigoengine.ErrClientError:
+		httpStatus = http.StatusBadRequest
+		errType = "client_error"
+	case sigoengine.ErrCircuitOpen:
+		httpStatus = http.StatusServiceUnavailable
+		errType = "circuit_open"
+	}
+	writeError(w, apiErr.Message, errType, httpStatus)
+}
+
+// handleMessages implementiert POST /v1/messages (Anthropic-Messages-API).
+// Übersetzt Request/Response und nutzt dieselbe Channel-Resolution/
+// Failover/Rate-Limiter/Circuit-Breaker-Maschinerie wie handleChatCompletions.
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "Method not allowed", "invalid_request", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req AnthropicRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.RLock()
+	modelInfo, modelID, exists := s.lookupModel(req.Model)
+	s.mu.RUnlock()
+	if !exists {
+		writeError(w, fmt.Sprintf("Model '%s' nicht gefunden", req.Model), "not_found_error", http.StatusNotFound)
+		return
+	}
+
+	provider := s.providerForModel(modelID)
+	ch, err := s.channelManager.Resolve(provider, "")
+	if err != nil {
+		writeError(w, err.Error(), "api_error", http.StatusServiceUnavailable)
+		return
+	}
+
+	messages, tools, toolChoice, err := anthropicRequestToInternal(&req)
+	if err != nil {
+		writeError(w, "Invalid request: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		return
+	}
+
+	firstCfg, err := sigoengine.LoadConfigWithChannel(modelID, ch)
+	if err != nil {
+		writeError(w, err.Error(), "config_error", http.StatusInternalServerError)
+		return
+	}
+	wireModel := firstCfg.Model
+	if modelInfo.UpstreamID != "" {
+		wireModel = modelInfo.UpstreamID
+	}
+
+	apiRequest := map[string]interface{}{
+		"model":    wireModel,
+		"messages": messages,
+	}
+	if req.Temperature != nil {
+		apiRequest["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		apiRequest["top_p"] = *req.TopP
+	}
+	if len(req.StopSequences) > 0 {
+		apiRequest["stop"] = req.StopSequences
+	}
+	if len(tools) > 0 {
+		apiRequest["tools"] = tools
+	}
+	if toolChoice != nil {
+		apiRequest["tool_choice"] = toolChoice
+	}
+	if modelInfo.RequiresCompletionTokens {
+		apiRequest["max_completion_tokens"] = req.MaxTokens
+	} else {
+		apiRequest["max_tokens"] = req.MaxTokens
+	}
+
+	if req.Stream {
+		writeError(w, "streaming not yet supported on /v1/messages", "not_implemented", http.StatusNotImplemented)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+	defer cancel()
+
+	var inputBuilder strings.Builder
+	for _, m := range req.Messages {
+		text, _ := anthropicTextFromRaw(m.Content)
+		inputBuilder.WriteString(text)
+	}
+	inputText := inputBuilder.String()
+
+	channelsToTry := s.channelManager.FailoverList(provider, ch)
+	retryConfig := sigoengine.DefaultRetryConfig()
+
+	var responseText string
+	var responseUsage *sigoengine.UsageData
+	var responseFinishReason string
+	var responseToolCalls []sigoengine.ToolCall
+	var successfulCh *sigoengine.Channel
+	var lastErr error
+
+	for _, currentCh := range channelsToTry {
+		cfg, err := sigoengine.LoadConfigWithChannel(modelID, currentCh)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		cfg.Endpoint = modelInfo.Endpoint
+		cfg.Model = wireModel
+
+		minInt := s.rateMinInterval
+		if currentCh.MinInterval > 0 {
+			minInt = time.Duration(currentCh.MinInterval) * time.Millisecond
+		}
+		maxW := s.rateMaxWait
+		if currentCh.MaxWait > 0 {
+			maxW = time.Duration(currentCh.MaxWait) * time.Millisecond
+		}
+		if minInt > 0 {
+			if err := s.rateLimiter.Acquire(ctx, currentCh.FullName(), minInt, maxW); err != nil {
+				lastErr = err
+				if err == sigoengine.ErrRateLimited {
+					continue
+				}
+				break
+			}
+			s.rateLimiter.Release(currentCh.FullName())
+		}
+
+		cbKey := fmt.Sprintf("%s#%s", modelID, currentCh.FullName())
+		s.mu.Lock()
+		if _, exists := s.breakers[cbKey]; !exists {
+			s.breakers[cbKey] = sigoengine.NewEnhancedCircuitBreaker(&sigoengine.CircuitBreakerConfig{
+				Threshold: 5, Window: 60 * time.Second, Cooldown: 10 * time.Second, HalfOpenMax: 3,
+			})
+		}
+		breaker := s.breakers[cbKey]
+		s.mu.Unlock()
+
+		lastErr = sigoengine.RetryWithBackoff(ctx, retryConfig, func() error {
+			return breaker.Do(func() error {
+				text, u, fr, tc, e := sigoengine.CallAPI(ctx, cfg, apiRequest, 180)
+				if e != nil {
+					apiErr := sigoengine.ClassifyError(e)
+					if apiErr.Type == sigoengine.ErrAuthFailed {
+						s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false)
+					}
+					return e
+				}
+				responseText = text
+				responseUsage = u
+				responseFinishReason = fr
+				responseToolCalls = tc
+				return nil
+			})
+		})
+
+		if lastErr == nil {
+			successfulCh = currentCh
+			s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, true, "")
+			break
+		}
+
+		s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, false, lastErr.Error())
+		if sigoengine.ClassifyError(lastErr).Type == sigoengine.ErrClientError {
+			break
+		}
+	}
+
+	if lastErr != nil {
+		s.writeAPIError(w, modelID, lastErr)
+		return
+	}
+
+	if responseUsage == nil {
+		responseUsage = sigoengine.EstimateUsage(inputText, responseText)
+	}
+	s.recordUsage(modelID, successfulCh, responseUsage)
+
+	resp := internalToAnthropicResponse(req.Model, responseText, responseToolCalls, responseUsage, responseFinishReason)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }

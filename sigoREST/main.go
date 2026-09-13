@@ -1766,6 +1766,7 @@ func main() {
 	mux.HandleFunc("/ping", srv.handlePing)
 	mux.HandleFunc("/api/version", srv.handleVersion)
 	mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
+	mux.HandleFunc("/v1/messages", srv.handleMessages)
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
 	mux.HandleFunc("/api/shortcodes", srv.handleShortcodes)

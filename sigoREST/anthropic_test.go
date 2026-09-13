@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"sigorest/sigoengine"
@@ -153,5 +156,33 @@ func TestInternalToAnthropicResponse_ToolUse(t *testing.T) {
 	}
 	if resp.StopReason != "tool_use" {
 		t.Fatalf("expected tool_use, got %s", resp.StopReason)
+	}
+}
+
+func TestHandleMessages_ModelNotFound(t *testing.T) {
+	srv, _ := newTestServer(t)
+	body := `{"model":"does-not-exist","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	srv.handleMessages(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleMessages_StreamingNotYetSupported(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.models["claude-h"] = ModelInfo{ID: "claude-h", Endpoint: "https://api.mammouth.ai/v1/chat/completions"}
+
+	body := `{"model":"claude-h","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	srv.handleMessages(rr, req)
+
+	if rr.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
