@@ -169,6 +169,7 @@ sie nicht.
 |-------|---------|-------|
 | `/v1/chat/completions` | POST | OpenAI-kompatible Chat API |
 | `/v1/models` | GET | Modell-Liste (ID + Shortcode) |
+| `/v1/messages` | POST | Anthropic-Messages-API-Bridge (Claude Code o.ä.), Tool-Calling, alle Provider |
 | `/api/models` | GET | Volle Modell-Infos (Preise, Limits) |
 | `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
 | `/api/shortlist` | GET | Kompakt: nur Shortcode + Provider, sortiert |
@@ -303,6 +304,16 @@ GET `/models` (oder Äquivalent), **nicht** über einen echten Chat-Call — kei
 API-Kosten-Verbrauch im Leerlauf.
 
 Details/Historie siehe `RETROSPECTIVE.md`, Session 2026-08-18.
+
+### Anthropic-Messages-Bridge (`/v1/messages`)
+
+Übersetzt Anthropic-Messages-Wire-Format (Request, Response, SSE-Streaming,
+Tool-Calling) auf dieselbe interne Engine wie `/v1/chat/completions` — jedes
+sigoREST-Modell ist damit auch über `ANTHROPIC_BASE_URL` (z.B. Claude Code)
+erreichbar, unabhängig vom Provider-Wire-Format. Modellwahl ist 1:1 wie bei
+`/v1/chat/completions` (ID/Shortcode, kein Alias). Keine Memory-/System-
+Prompt-/Session-Injektion in diesem Pfad — der Client verwaltet seinen
+eigenen Kontext. Details: `docs/superpowers/specs/2026-09-12-anthropic-messages-bridge-design.md`.
 
 ### Session-Management
 
