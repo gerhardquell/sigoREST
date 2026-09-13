@@ -369,6 +369,26 @@ Antwort enthält `usage`-Block (sofern Provider Token-Daten liefert):
 }
 ```
 
+### POST /v1/messages
+
+Anthropic-Messages-API-kompatibler Endpoint — macht jedes sigoREST-Modell
+(unabhängig vom Provider-Wire-Format) über `ANTHROPIC_BASE_URL` erreichbar,
+z.B. für Claude Code:
+
+```bash
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_BASE_URL="http://localhost:9080"
+export ANTHROPIC_AUTH_TOKEN="unused"   # wird ignoriert, claude-CLI verlangt aber einen Wert
+export ANTHROPIC_MODEL="cl46-s"
+claude "Hallo"
+```
+
+Unterstützt Tool-Calling und SSE-Streaming. Modellwahl ist 1:1 wie bei
+`/v1/chat/completions` (ID/Shortcode, kein Alias). Kein separater
+Auth-Mechanismus (gleiche IP-Zugriffskontrolle wie alle anderen Endpunkte),
+keine Memory-/System-Prompt-/Session-Injektion — der Client verwaltet
+seinen eigenen Kontext.
+
 ### GET /v1/models
 ```bash
 curl -s http://localhost:9080/v1/models

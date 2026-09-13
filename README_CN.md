@@ -371,6 +371,24 @@ curl -s http://localhost:9080/v1/chat/completions \
 }
 ```
 
+### POST /v1/messages
+
+兼容 Anthropic Messages API 的端点——让每个 sigoREST 模型（无论上游 Provider
+的线路格式如何）都能通过 `ANTHROPIC_BASE_URL` 访问，例如用于 Claude Code：
+
+```bash
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_BASE_URL="http://localhost:9080"
+export ANTHROPIC_AUTH_TOKEN="unused"   # 会被忽略，但 claude CLI 要求必须设置
+export ANTHROPIC_MODEL="cl46-s"
+claude "你好"
+```
+
+支持工具调用（Tool-Calling）和 SSE 流式传输。模型选择方式与
+`/v1/chat/completions` 一致（ID/简码，无别名）。没有独立的鉴权机制（与其他
+端点共用相同的基于 IP 的访问控制），也不注入 Memory/System-Prompt/会话
+——客户端自行管理上下文。
+
 ### GET /v1/models
 ```bash
 curl -s http://localhost:9080/v1/models
