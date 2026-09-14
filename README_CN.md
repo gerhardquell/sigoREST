@@ -387,7 +387,10 @@ claude "你好"
 支持工具调用（Tool-Calling）和 SSE 流式传输。模型选择方式与
 `/v1/chat/completions` 一致（ID/简码，无别名）。没有独立的鉴权机制（与其他
 端点共用相同的基于 IP 的访问控制），也不注入 Memory/System-Prompt/会话
-——客户端自行管理上下文。
+——客户端自行管理上下文。错误响应遵循 Anthropic 格式
+（`{"type":"error","error":{"type":"...","message":"..."}}`），而非
+`/v1/chat/completions` 使用的 OpenAI 格式。即使在流式传输场景下，
+`usage`（输入/输出令牌数）也来自 Provider 返回的真实数据，而非估算值。
 
 ### GET /v1/models
 ```bash

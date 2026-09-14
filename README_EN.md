@@ -386,7 +386,12 @@ claude "Hello"
 Supports tool calling and SSE streaming. Model selection is 1:1 like
 `/v1/chat/completions` (ID/shortcode, no alias). No separate auth mechanism
 (same IP-based access control as every other endpoint), no memory/system-
-prompt/session injection — the client manages its own context.
+prompt/session injection — the client manages its own context. Error
+responses follow the Anthropic shape
+(`{"type":"error","error":{"type":"...","message":"..."}}`), not the
+OpenAI shape used by `/v1/chat/completions`. `usage` (input/output tokens)
+is populated from real provider data even for streaming responses, not
+estimated.
 
 ### GET /v1/models
 ```bash

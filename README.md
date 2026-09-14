@@ -387,7 +387,11 @@ Unterstützt Tool-Calling und SSE-Streaming. Modellwahl ist 1:1 wie bei
 `/v1/chat/completions` (ID/Shortcode, kein Alias). Kein separater
 Auth-Mechanismus (gleiche IP-Zugriffskontrolle wie alle anderen Endpunkte),
 keine Memory-/System-Prompt-/Session-Injektion — der Client verwaltet
-seinen eigenen Kontext.
+seinen eigenen Kontext. Fehler-Antworten folgen dem Anthropic-Format
+(`{"type":"error","error":{"type":"...","message":"..."}}`), nicht dem
+OpenAI-Format von `/v1/chat/completions`. `usage` (Input-/Output-Tokens)
+wird auch bei Streaming aus den echten Provider-Daten befüllt, nicht
+geschätzt.
 
 ### GET /v1/models
 ```bash
