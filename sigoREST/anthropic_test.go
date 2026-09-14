@@ -226,6 +226,77 @@ func TestHandleMessages_ModelNotFound(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
 	}
+
+	// Regression: /v1/messages Fehler müssen im Anthropic-Wire-Format
+	// kommen ({"type":"error","error":{"type","message"}}), nicht im
+	// OpenAI-Shape ({"error":{"message","type","code"}}) von writeError.
+	var envelope struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if envelope.Type != "error" {
+		t.Fatalf("expected top-level type \"error\", got %q (body: %s)", envelope.Type, rr.Body.String())
+	}
+	if envelope.Error.Type != "not_found_error" {
+		t.Fatalf("expected error.type \"not_found_error\", got %q (body: %s)", envelope.Error.Type, rr.Body.String())
+	}
+	if envelope.Error.Message == "" {
+		t.Fatalf("expected non-empty error.message, body: %s", rr.Body.String())
+	}
+}
+
+func TestWriteAnthropicError_Shape(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeAnthropicError(rr, "rate_limit_error", "boom", http.StatusTooManyRequests)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", rr.Code)
+	}
+	var envelope map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if envelope["type"] != "error" {
+		t.Fatalf("expected top-level type \"error\", got %+v", envelope["type"])
+	}
+	errObj, ok := envelope["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected error object, got %+v", envelope["error"])
+	}
+	if errObj["type"] != "rate_limit_error" || errObj["message"] != "boom" {
+		t.Fatalf("unexpected error object: %+v", errObj)
+	}
+	// OpenAI-Shape-Felder ("code") dürfen nicht auftauchen.
+	if _, hasCode := errObj["code"]; hasCode {
+		t.Fatalf("did not expect OpenAI-shaped \"code\" field, got: %s", rr.Body.String())
+	}
+}
+
+func TestAnthropicErrorType_Mapping(t *testing.T) {
+	cases := []struct {
+		internal string
+		want     string
+	}{
+		{sigoengine.ErrRateLimit, "rate_limit_error"},
+		{sigoengine.ErrAuthFailed, "authentication_error"},
+		{sigoengine.ErrClientError, "invalid_request_error"},
+		{sigoengine.ErrConfigNotFound, "not_found_error"},
+		{sigoengine.ErrCircuitOpen, "overloaded_error"},
+		{sigoengine.ErrTimeout, "api_error"},
+		{sigoengine.ErrServerError, "api_error"},
+		{"something_unmapped", "api_error"},
+	}
+	for _, c := range cases {
+		if got := anthropicErrorType(c.internal); got != c.want {
+			t.Errorf("anthropicErrorType(%q) = %q, want %q", c.internal, got, c.want)
+		}
+	}
 }
 
 func TestHandleMessages_StreamingReachesProviderCall(t *testing.T) {

@@ -294,11 +294,61 @@ func internalToAnthropicResponse(model, text string, toolCalls []sigoengine.Tool
 	return resp
 }
 
+// anthropicErrorEnvelope ist das Anthropic-Wire-Format für Fehlerantworten:
+// {"type":"error","error":{"type":"...","message":"..."}}. Bewusst getrennt
+// von ErrorResponse (main.go), das die OpenAI-Form {"error":{"message",
+// "type","code"}} für /v1/chat/completions liefert — beide Endpoints
+// behalten ihr jeweils eigenes Wire-Format.
+type anthropicErrorEnvelope struct {
+	Type  string `json:"type"`
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// writeAnthropicError schreibt eine Fehlerantwort im Anthropic-Wire-Format.
+// Einziger Fehler-Schreibpfad für /v1/messages (siehe writeAPIError und
+// handleMessages) — die OpenAI-förmige writeError()/ErrorResponse aus
+// main.go darf hier nicht mehr verwendet werden.
+func writeAnthropicError(w http.ResponseWriter, anthropicType, msg string, status int) {
+	var resp anthropicErrorEnvelope
+	resp.Type = "error"
+	resp.Error.Type = anthropicType
+	resp.Error.Message = msg
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(resp)
+}
+
+// anthropicErrorType mappt sigoRESTs interne Fehlerkategorien (aus
+// sigoengine.ClassifyError) auf Anthropics Error-Type-Vokabular
+// (invalid_request_error, authentication_error, rate_limit_error,
+// not_found_error, overloaded_error, api_error).
+func anthropicErrorType(internalType string) string {
+	switch internalType {
+	case sigoengine.ErrRateLimit:
+		return "rate_limit_error"
+	case sigoengine.ErrAuthFailed:
+		return "authentication_error"
+	case sigoengine.ErrClientError:
+		return "invalid_request_error"
+	case sigoengine.ErrConfigNotFound:
+		return "not_found_error"
+	case sigoengine.ErrCircuitOpen:
+		return "overloaded_error"
+	default:
+		// ErrTimeout, ErrServerError, ErrAPIFailed, unbekannt: generisches
+		// Fallback aus Anthropics Vokabular.
+		return "api_error"
+	}
+}
+
 // writeAPIError klassifiziert einen Fehler aus der Provider-Kette und
-// schreibt die passende HTTP-Fehlerantwort (Status-Code, Error-Type,
-// Retry-After bei Rate-Limits). Eigenständig von handleChatCompletions'
-// Fehlerbehandlung, um den bestehenden, produktionskritischen Pfad nicht
-// anzufassen.
+// schreibt die passende HTTP-Fehlerantwort im Anthropic-Wire-Format
+// (Status-Code, Error-Type, Retry-After bei Rate-Limits). Eigenständig von
+// handleChatCompletions' Fehlerbehandlung, um den bestehenden,
+// produktionskritischen Pfad nicht anzufassen.
 func (s *Server) writeAPIError(w http.ResponseWriter, modelID string, err error) {
 	if err == sigoengine.ErrRateLimited {
 		retryAfter := s.rateMaxWait.Seconds()
@@ -309,7 +359,7 @@ func (s *Server) writeAPIError(w http.ResponseWriter, modelID string, err error)
 			"model": modelID, "retry_after": retryAfter,
 		})
 		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter))
-		writeError(w, "rate limit exceeded: all channels throttled", "rate_limit", http.StatusTooManyRequests)
+		writeAnthropicError(w, "rate_limit_error", "rate limit exceeded: all channels throttled", http.StatusTooManyRequests)
 		return
 	}
 
@@ -321,31 +371,24 @@ func (s *Server) writeAPIError(w http.ResponseWriter, modelID string, err error)
 	})
 
 	httpStatus := http.StatusBadGateway
-	errType := "api_error"
 	switch apiErr.Type {
 	case sigoengine.ErrRateLimit:
 		httpStatus = http.StatusTooManyRequests
-		errType = "rate_limit"
 		if apiErr.RetryAfter > 0 {
 			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", apiErr.RetryAfter.Seconds()))
 		}
 	case sigoengine.ErrAuthFailed:
 		httpStatus = http.StatusUnauthorized
-		errType = "auth_failed"
 	case sigoengine.ErrTimeout:
 		httpStatus = http.StatusGatewayTimeout
-		errType = "timeout"
 	case sigoengine.ErrServerError:
 		httpStatus = http.StatusServiceUnavailable
-		errType = "server_error"
 	case sigoengine.ErrClientError:
 		httpStatus = http.StatusBadRequest
-		errType = "client_error"
 	case sigoengine.ErrCircuitOpen:
 		httpStatus = http.StatusServiceUnavailable
-		errType = "circuit_open"
 	}
-	writeError(w, apiErr.Message, errType, httpStatus)
+	writeAnthropicError(w, anthropicErrorType(apiErr.Type), apiErr.Message, httpStatus)
 }
 
 // handleMessages implementiert POST /v1/messages (Anthropic-Messages-API).
@@ -353,13 +396,13 @@ func (s *Server) writeAPIError(w http.ResponseWriter, modelID string, err error)
 // Failover/Rate-Limiter/Circuit-Breaker-Maschinerie wie handleChatCompletions.
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, "Method not allowed", "invalid_request", http.StatusMethodNotAllowed)
+		writeAnthropicError(w, "invalid_request_error", "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req AnthropicRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		writeAnthropicError(w, "invalid_request_error", "Invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -367,14 +410,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	modelInfo, modelID, exists := s.lookupModel(req.Model)
 	s.mu.RUnlock()
 	if !exists {
-		writeError(w, fmt.Sprintf("Model '%s' nicht gefunden", req.Model), "not_found_error", http.StatusNotFound)
+		writeAnthropicError(w, "not_found_error", fmt.Sprintf("Model '%s' nicht gefunden", req.Model), http.StatusNotFound)
 		return
 	}
 
 	provider := s.providerForModel(modelID)
 	ch, err := s.channelManager.Resolve(provider, "")
 	if err != nil {
-		writeError(w, err.Error(), "api_error", http.StatusServiceUnavailable)
+		writeAnthropicError(w, anthropicErrorType(sigoengine.ClassifyError(err).Type), err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
@@ -387,13 +430,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	messages, tools, toolChoice, err := anthropicRequestToInternal(&req)
 	if err != nil {
-		writeError(w, "Invalid request: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		writeAnthropicError(w, "invalid_request_error", "Invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	firstCfg, err := sigoengine.LoadConfigWithChannel(modelID, ch)
 	if err != nil {
-		writeError(w, err.Error(), "config_error", http.StatusInternalServerError)
+		writeAnthropicError(w, "api_error", err.Error(), http.StatusInternalServerError)
 		return
 	}
 	wireModel := firstCfg.Model
