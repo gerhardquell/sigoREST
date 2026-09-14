@@ -553,11 +553,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				if e != nil {
 					return e
 				}
-				text, e := s.streamAnthropicResponse(w, stream, req.Model)
+				text, u, e := s.streamAnthropicResponse(w, stream, req.Model)
 				if e != nil {
 					return e
 				}
 				responseText = text
+				responseUsage = u
 				streamed = true
 				return nil
 			})
@@ -637,7 +638,7 @@ func writeAnthropicSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventTy
 // Anthropic-Messages-Event-Sequenz. Tool-Call-Argument-Fragmente werden
 // unverändert als partial_json durchgereicht (Anthropic erwartet ohnehin
 // akkumulierbare JSON-Fragmente, keine Neu-Serialisierung nötig).
-func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCloser, model string) (string, error) {
+func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCloser, model string) (string, *sigoengine.UsageData, error) {
 	defer stream.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -648,7 +649,7 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return "", fmt.Errorf("response writer does not support flushing")
+		return "", nil, fmt.Errorf("response writer does not support flushing")
 	}
 
 	messageID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
@@ -779,8 +780,11 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 
 	hasToolCalls := len(toolBlockIndexByOpenAIIndex) > 0
 	stopReason := finishReasonToStopReason(finishReason, hasToolCalls)
-	usagePayload := map[string]interface{}{"output_tokens": 0}
+	// input_tokens mit ausliefern (nicht nur output_tokens), sonst
+	// unterberichtet Claude Codes eigene Token-/Kosten-Anzeige.
+	usagePayload := map[string]interface{}{"input_tokens": 0, "output_tokens": 0}
 	if usage != nil {
+		usagePayload["input_tokens"] = usage.InputTokens
 		usagePayload["output_tokens"] = usage.OutputTokens
 	}
 	writeAnthropicSSEEvent(w, flusher, "message_delta", map[string]interface{}{
@@ -791,7 +795,7 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 	writeAnthropicSSEEvent(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 
 	if err := scanner.Err(); err != nil {
-		return responseText.String(), err
+		return responseText.String(), usage, err
 	}
-	return responseText.String(), nil
+	return responseText.String(), usage, nil
 }

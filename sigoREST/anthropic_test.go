@@ -333,7 +333,7 @@ func TestStreamAnthropicResponse_TextOnly(t *testing.T) {
 	stream := io.NopCloser(strings.NewReader(sse))
 	rr := httptest.NewRecorder()
 
-	text, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
+	text, _, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,6 +354,53 @@ func TestStreamAnthropicResponse_TextOnly(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
 		}
+	}
+}
+
+func TestStreamAnthropicResponse_UsageCapturedAndIncludesInputTokens(t *testing.T) {
+	// Regression: der Provider liefert prompt_tokens/completion_tokens in
+	// einem SSE-Chunk mit -> streamAnthropicResponse darf sie weder
+	// verwerfen (Rückgabewert) noch im message_delta.usage-Event nur
+	// output_tokens ausliefern.
+	srv, _ := newTestServer(t)
+
+	chunk := func(content, finishReason string, usage map[string]interface{}) string {
+		choice := map[string]interface{}{"delta": map[string]interface{}{"content": content}}
+		if finishReason != "" {
+			choice["finish_reason"] = finishReason
+		}
+		payload := map[string]interface{}{"choices": []interface{}{choice}}
+		if usage != nil {
+			payload["usage"] = usage
+		}
+		b, _ := json.Marshal(payload)
+		return "data: " + string(b) + "\n\n"
+	}
+
+	sse := chunk("Hallo", "", nil)
+	sse += chunk("", "stop", map[string]interface{}{"prompt_tokens": 42, "completion_tokens": 7})
+	sse += "data: [DONE]\n\n"
+
+	stream := io.NopCloser(strings.NewReader(sse))
+	rr := httptest.NewRecorder()
+
+	_, usage, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage == nil {
+		t.Fatalf("expected non-nil usage to be returned")
+	}
+	if usage.InputTokens != 42 || usage.OutputTokens != 7 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+
+	body := rr.Body.String()
+	if !strings.Contains(body, `"input_tokens":42`) {
+		t.Fatalf("expected message_delta.usage to contain input_tokens:42, got:\n%s", body)
+	}
+	if !strings.Contains(body, `"output_tokens":7`) {
+		t.Fatalf("expected message_delta.usage to contain output_tokens:7, got:\n%s", body)
 	}
 }
 
@@ -393,7 +440,7 @@ func TestStreamAnthropicResponse_ToolCall(t *testing.T) {
 	stream := io.NopCloser(strings.NewReader(sse))
 	rr := httptest.NewRecorder()
 
-	_, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
+	_, _, err := srv.streamAnthropicResponse(rr, stream, "ci-claude-opus-5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
