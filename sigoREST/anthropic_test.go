@@ -105,6 +105,40 @@ func TestAnthropicRequestToInternal_AssistantToolUse(t *testing.T) {
 	}
 }
 
+func TestAnthropicRequestToInternal_ToolUseWithoutInput(t *testing.T) {
+	// Regression: Client lässt "input" für ein parameterloses Tool weg ->
+	// b.Input ist nil/leer. Provider erwarten trotzdem einen gültigen
+	// JSON-Objekt-String ("{}"), nicht "".
+	req := &AnthropicRequest{
+		Model:     "ci-claude-opus-5",
+		MaxTokens: 100,
+		Messages: []AnthropicMessage{
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"tool_use","id":"toolu_01","name":"list_files"}
+			]`)},
+		},
+	}
+
+	messages, _, _, err := anthropicRequestToInternal(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d: %+v", len(messages), messages)
+	}
+	toolCalls, ok := messages[0]["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %+v", messages[0]["tool_calls"])
+	}
+	fn, ok := toolCalls[0]["function"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected function map, got %+v", toolCalls[0]["function"])
+	}
+	if fn["arguments"] != "{}" {
+		t.Fatalf("expected arguments '{}', got %q", fn["arguments"])
+	}
+}
+
 func TestFinishReasonToStopReason(t *testing.T) {
 	cases := []struct {
 		finishReason string

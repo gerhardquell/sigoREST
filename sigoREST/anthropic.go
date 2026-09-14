@@ -99,12 +99,19 @@ func anthropicRequestToInternal(req *AnthropicRequest) (messages []map[string]in
 			case "text":
 				textParts = append(textParts, b.Text)
 			case "tool_use":
+				// Client lässt input bei parameterlosen Tools ggf. weg
+				// (b.Input == nil/leer) — Provider erwarten trotzdem einen
+				// gültigen JSON-Objekt-String, nicht "".
+				args := "{}"
+				if len(b.Input) > 0 {
+					args = string(b.Input)
+				}
 				toolCalls = append(toolCalls, map[string]interface{}{
 					"id":   b.ID,
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":      b.Name,
-						"arguments": string(b.Input),
+						"arguments": args,
 					},
 				})
 			case "tool_result":
@@ -518,7 +525,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 					if e != nil {
 						apiErr := sigoengine.ClassifyError(e)
 						if apiErr.Type == sigoengine.ErrAuthFailed {
-							s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false)
+							if deactErr := s.channelManager.Registry().SetActive(currentCh.Provider, currentCh.Name, false); deactErr != nil {
+								sigoengine.LogWarn("Konnte Kanal nach Auth-Fehler nicht deaktivieren", map[string]interface{}{
+									"provider": currentCh.Provider,
+									"channel":  currentCh.Name,
+									"error":    deactErr.Error(),
+								})
+							}
 						}
 						return e
 					}
