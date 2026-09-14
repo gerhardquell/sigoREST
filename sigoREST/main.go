@@ -1485,6 +1485,24 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
   -d '{"model":"claude-h","messages":[{"role":"user","content":"Hallo"}]}'`,
 			},
 			{
+				"path":        "/v1/messages",
+				"method":      "POST",
+				"description": "Anthropic-Messages-API-Bridge (Claude Code u.a.), Tool-Calling, alle Provider",
+				"parameters": map[string]string{
+					"model":       "Modell-ID oder Shortcode (z.B. 'claude-h', 'gpt41')",
+					"max_tokens":  "Max. Ausgabe-Tokens (Anthropic-Pflichtfeld; 0 → Modell-Default)",
+					"messages":    "Array von {role, content} Objekten (content: String oder Block-Array)",
+					"system":      "Optional: System-Prompt (String oder Block-Array)",
+					"tools":       "Optional: Array von Anthropic-Tool-Definitionen",
+					"tool_choice": "Optional: Anthropic tool_choice-Objekt",
+					"temperature": "Optional: Modell-Range (default: Modell-Mittelwert)",
+					"stream":      "Optional: true für Anthropic-SSE-Event-Streaming",
+				},
+				"example": `curl -s http://localhost:9080/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-h","max_tokens":1024,"messages":[{"role":"user","content":"Hallo"}]}'`,
+			},
+			{
 				"path":        "/v1/models",
 				"method":      "GET",
 				"description": "Liste aller verfügbaren Modelle (OpenAI-kompatibel)",

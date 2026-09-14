@@ -46,6 +46,40 @@ func newTestServer(t *testing.T) (*Server, string) {
 	}, dir
 }
 
+func TestHandleHelp_ListsMessagesEndpoint(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/help", nil)
+	rr := httptest.NewRecorder()
+	srv.handleHelp(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var help map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &help); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	endpoints, ok := help["endpoints"].([]interface{})
+	if !ok {
+		t.Fatalf("expected endpoints array, got %+v", help["endpoints"])
+	}
+	found := false
+	for _, e := range endpoints {
+		entry, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if entry["path"] == "/v1/messages" && entry["method"] == "POST" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected /api/help to list POST /v1/messages, got: %s", rr.Body.String())
+	}
+}
+
 func TestHandleChannels(t *testing.T) {
 	srv, _ := newTestServer(t)
 
