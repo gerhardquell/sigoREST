@@ -96,6 +96,13 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 	}
 
 	if err := scanner.Err(); err != nil {
+		// Upstream-Lesefehler mitten im Stream: Client hat bereits Header +
+		// mindestens einen Chunk erhalten. Bestmöglich sauber schließen
+		// (dasselbe "data: [DONE]"-Terminator-Pattern wie im Erfolgsfall),
+		// statt die Verbindung ohne Abschluss-Marker offen hängen zu lassen.
+		fmt.Fprintln(w, "data: [DONE]")
+		fmt.Fprintln(w)
+		flusher.Flush()
 		return responseText.String(), err
 	}
 
@@ -789,6 +796,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var lastErr error
 	var streamed bool
+	// streamStarted: sobald streamProviderResponse aufgerufen wurde, hat es
+	// bereits w.WriteHeader(200) geschrieben (erste Anweisung der Funktion),
+	// unabhängig davon ob sie am Ende erfolgreich zurückkehrt. Ein späterer
+	// Fehler darf dann weder einen zweiten Stream-Preamble auf denselben
+	// ResponseWriter schreiben (Failover auf nächsten Kanal) noch eine JSON-
+	// Fehlerantwort auf den bereits offenen text/event-stream-Body glueen.
+	var streamStarted bool
 	for _, currentCh := range channelsToTry {
 		cfg, err := sigoengine.LoadConfigWithChannel(modelID, currentCh)
 		if err != nil {
@@ -851,6 +865,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				if e != nil {
 					return e
 				}
+				// Ab hier hat streamProviderResponse garantiert bereits
+				// WriteHeader(200) aufgerufen (erste Anweisung der Funktion) —
+				// egal ob sie am Ende erfolgreich zurückkehrt oder nicht.
+				streamStarted = true
 				text, e := s.streamProviderResponse(w, stream, req.Model)
 				if e != nil {
 					return e
@@ -895,7 +913,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, false, lastErr.Error())
 
 		apiErr := sigoengine.ClassifyError(lastErr)
-		if apiErr.Type == sigoengine.ErrClientError {
+		if streamStarted || apiErr.Type == sigoengine.ErrClientError {
+			// streamStarted: Client hat bereits einen halb-offenen Stream —
+			// ein Failover auf den nächsten Kanal würde einen zweiten
+			// Stream-Preamble auf denselben ResponseWriter schreiben.
 			break
 		}
 		sigoengine.LogWarn("Failing over to next channel", map[string]interface{}{
@@ -903,6 +924,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"channel":    currentCh.FullName(),
 			"error_type": apiErr.Type,
 		})
+	}
+
+	if lastErr != nil && streamStarted {
+		// streamProviderResponse hat den Stream bereits bestmöglich sauber
+		// geschlossen (data: [DONE]-Terminator, siehe dort). Eine JSON-
+		// Fehlerantwort auf den offenen text/event-stream-Body wäre für den
+		// Client nicht parsebar — hier nur noch loggen, kein zweiter
+		// Body-Write, Verbindung wird beendet.
+		sigoengine.LogError("Stream-Fehler nach Header-Write, Verbindung wird beendet", lastErr, map[string]interface{}{
+			"model": req.Model,
+		})
+		return
 	}
 
 	if lastErr != nil {

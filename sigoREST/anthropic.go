@@ -508,6 +508,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var successfulCh *sigoengine.Channel
 	var lastErr error
 	var streamed bool
+	// streamStarted: sobald streamAnthropicResponse aufgerufen wurde, hat es
+	// bereits w.WriteHeader(200) + mindestens "message_start" geflusht. Ein
+	// späterer Fehler darf dann weder einen zweiten Stream-Preamble auf
+	// denselben ResponseWriter schreiben (nächster Kanal) noch eine
+	// JSON-Fehlerantwort auf den bereits offenen text/event-stream-Body
+	// glueen — beides würde den Client-seitigen Stream-Parser brechen.
+	var streamStarted bool
 
 	for _, currentCh := range channelsToTry {
 		cfg, err := sigoengine.LoadConfigWithChannel(modelID, currentCh)
@@ -553,6 +560,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				if e != nil {
 					return e
 				}
+				// Ab hier hat streamAnthropicResponse garantiert bereits
+				// WriteHeader(200) aufgerufen (erste Anweisung der Funktion) —
+				// egal ob sie am Ende erfolgreich zurückkehrt oder nicht.
+				streamStarted = true
 				text, u, e := s.streamAnthropicResponse(w, stream, req.Model)
 				if e != nil {
 					return e
@@ -595,12 +606,27 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, false, lastErr.Error())
-		if sigoengine.ClassifyError(lastErr).Type == sigoengine.ErrClientError {
+		if streamStarted || sigoengine.ClassifyError(lastErr).Type == sigoengine.ErrClientError {
+			// streamStarted: Client hat bereits einen halb-offenen Stream —
+			// ein Failover auf den nächsten Kanal würde einen zweiten
+			// Stream-Preamble auf denselben ResponseWriter schreiben.
 			break
 		}
 	}
 
 	if lastErr != nil {
+		if streamStarted {
+			// streamAnthropicResponse hat den Stream bereits selbst
+			// bestmöglich sauber geschlossen (content_block_stop/
+			// message_delta/message_stop, siehe dort). Eine JSON-
+			// Fehlerantwort auf den offenen text/event-stream-Body wäre für
+			// den Client nicht parsebar — hier nur noch loggen, kein
+			// zweiter Body-Write, Verbindung wird beendet.
+			sigoengine.LogError("Stream-Fehler nach Header-Write, Verbindung wird beendet", lastErr, map[string]interface{}{
+				"model": modelID,
+			})
+			return
+		}
 		s.writeAPIError(w, modelID, lastErr)
 		return
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,6 +78,72 @@ func TestHandleHelp_ListsMessagesEndpoint(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected /api/help to list POST /v1/messages, got: %s", rr.Body.String())
+	}
+}
+
+func TestHandleChatCompletions_MidStreamFailureDoesNotDoubleWriteOrGlueJSON(t *testing.T) {
+	// Regression for Finding #3 (handleChatCompletions/streamProviderResponse
+	// side): once headers are written and at least one SSE chunk flushed,
+	// a later read error from the upstream must not (a) retry the next
+	// channel (second stream preamble on the same ResponseWriter) nor
+	// (b) fall through to the JSON error writer on the already-open
+	// text/event-stream body.
+	postCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			// sigoengine.PingProvider's pre-flight check.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		postCalls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support flushing")
+		}
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"Hallo"}}]}`)
+		flusher.Flush()
+
+		// Verbindung mitten im Stream abrupt kappen -> echter Lesefehler
+		// (unexpected EOF) statt eines sauberen Stream-Endes.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		conn.Close()
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestServer(t)
+	// Zweiten aktiven Kanal für denselben Provider aktivieren, damit ohne
+	// den Fix tatsächlich ein Failover-Versuch stattfinden würde.
+	if err := srv.channelManager.Registry().SetActive("mammouth", "0", true); err != nil {
+		t.Fatalf("failed to activate second channel: %v", err)
+	}
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	srv.handleChatCompletions(rr, req)
+
+	if postCalls != 1 {
+		t.Fatalf("expected exactly 1 upstream POST call (no failover retry once the stream had started), got %d", postCalls)
+	}
+	respBody := rr.Body.String()
+	if n := strings.Count(respBody, `"delta":{"content":"Hallo"}`); n != 1 {
+		t.Fatalf("expected exactly 1 streamed chunk (no duplicate preamble/retry), got %d in body:\n%s", n, respBody)
+	}
+	if strings.Contains(respBody, `"error"`) {
+		t.Fatalf("expected no JSON error glued onto the open SSE stream, got body:\n%s", respBody)
 	}
 }
 
