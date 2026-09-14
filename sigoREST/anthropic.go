@@ -256,7 +256,7 @@ func finishReasonToStopReason(finishReason string, hasToolCalls bool) string {
 // internalToAnthropicResponse baut die Anthropic-Response aus dem
 // normalisierten Ergebnis eines CallAPI-Aufrufs.
 func internalToAnthropicResponse(model, text string, toolCalls []sigoengine.ToolCall, usage *sigoengine.UsageData, finishReason string) *AnthropicResponse {
-	var content []AnthropicContentBlock
+	content := []AnthropicContentBlock{}
 	if text != "" {
 		content = append(content, AnthropicContentBlock{Type: "text", Text: text})
 	}

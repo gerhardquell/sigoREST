@@ -160,6 +160,27 @@ func TestInternalToAnthropicResponse_ToolUse(t *testing.T) {
 	}
 }
 
+func TestInternalToAnthropicResponse_EmptyContentMarshalsAsEmptyArray(t *testing.T) {
+	// Regression: leerer Text + keine Tool-Calls (z.B. Content-Filter-Hit)
+	// darf nicht "content": null marshaln — Anthropic-SDK-Clients iterieren
+	// response.content und stürzen bei null ab.
+	resp := internalToAnthropicResponse("ci-claude-opus-5", "", nil, nil, "stop")
+
+	if resp.Content == nil {
+		t.Fatalf("expected non-nil Content slice, got nil")
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("unexpected marshal error: %v", err)
+	}
+	if strings.Contains(string(b), `"content":null`) {
+		t.Fatalf("content marshaled as null, want []: %s", b)
+	}
+	if !strings.Contains(string(b), `"content":[]`) {
+		t.Fatalf("expected \"content\":[] in output, got: %s", b)
+	}
+}
+
 func TestHandleMessages_ModelNotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 	body := `{"model":"does-not-exist","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
