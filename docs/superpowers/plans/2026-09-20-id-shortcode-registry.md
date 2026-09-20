@@ -487,28 +487,26 @@ func TestAssignModel_SameModelReturnsSameShortcode(t *testing.T) {
 func TestAssignModel_CollisionAppendsNumericSuffix(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	// Zwei Modell-IDs, die auf denselben semantischen Code abbilden
-	// (GenerateShortcode kennt "glm" nicht als eigene Familie -> Cutter
-	// liefert für beide denselben Präfix-Treffer, wenn die Namen gleich
-	// beginnen). Wir erzwingen die Kollision direkt über einen zweiten
-	// Modellnamen, der zufällig denselben semantischen Code ergibt, indem
-	// wir GenerateShortcode zuerst befragen und dann bewusst zwei
-	// upstream_ids verwenden, die absichtlich denselben Rohnamen tragen
-	// (Simulation zweier Provider-seitig unterschiedlicher IDs mit
-	// identischem sprechendem Code).
-	entryA, err := r.AssignModel("zai", "glm-4.5")
+	// "glm-4.5" und "GLM-4.5" sind unterschiedliche upstream_ids (SQLite-
+	// TEXT-Vergleich ist case-sensitiv, kein COLLATE NOCASE im Schema),
+	// erzeugen über GenerateShortcode aber garantiert denselben
+	// semantischen Code (GenerateShortcode lowercased modelID intern
+	// als allerersten Schritt) -- das erzwingt die Kollision deterministisch,
+	// ohne auf Zufallstreffer in der Cutter-Sanborn-Tabelle angewiesen zu sein.
+	first, err := r.AssignModel("zai", "glm-4.5")
 	if err != nil {
 		t.Fatalf("AssignModel(glm-4.5): %v", err)
 	}
-	entryB, err := r.AssignModel("zai", "GLM-4.5-DUPLICATE-NAME-FOR-TEST")
+	second, err := r.AssignModel("zai", "GLM-4.5")
 	if err != nil {
-		t.Fatalf("AssignModel(duplicate): %v", err)
+		t.Fatalf("AssignModel(GLM-4.5): %v", err)
 	}
-	// Beide upstream_ids sind unterschiedlich, semantischer Code kann
-	// zufällig gleich oder verschieden sein -- die eigentliche Prüfung
-	// ist: Shortcodes sind in jedem Fall eindeutig.
-	if entryA.Shortcode == entryB.Shortcode {
-		t.Fatalf("zwei verschiedene Modelle bekamen denselben Shortcode %q", entryA.Shortcode)
+	if first.Shortcode == second.Shortcode {
+		t.Fatalf("Kollision nicht aufgelöst: beide Modelle bekamen %q", first.Shortcode)
+	}
+	wantSecond := first.Shortcode + "-2"
+	if second.Shortcode != wantSecond {
+		t.Errorf("second.Shortcode = %q, erwartet %q (erste Kollision -> Suffix -2)", second.Shortcode, wantSecond)
 	}
 }
 
