@@ -163,7 +163,8 @@ type Server struct {
 	rateMinInterval time.Duration
 	rateMaxWait     time.Duration
 	baseDir         string
-	costDB          *sigoengine.CostDB // persistentes Kosten-Tracking (costs.db im data-dir); nil-safe
+	costDB          *sigoengine.CostDB     // persistentes Kosten-Tracking (costs.db im data-dir); nil-safe
+	idRegistry      *sigoengine.IDRegistry // persistente Shortcode-/Provider-Kürzel-Registry (id_registry.db im data-dir); nil-safe
 }
 
 // **********************************************************************
@@ -355,7 +356,14 @@ func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
 // loadModelsFromProviders ruft alle Provider-APIs beim Start ab.
 // Fehler bei einzelnen Providern werden geloggt; der Server startet
 // trotzdem mit den verfügbaren Modellen.
-func loadModelsFromProviders() map[string]ModelInfo {
+//
+// reg synchronisiert nach jedem ERFOLGREICHEN Fetch die persistente
+// ID-Registry (sigoengine.IDRegistry) und liefert den einmalig
+// vergebenen, über Boots hinweg stabilen Shortcode statt des bisherigen
+// pro-Boot berechneten. reg darf nil sein (Registry konnte nicht
+// geöffnet werden) — Shortcodes werden dann wie bisher pro Boot neu
+// berechnet, nil-safe analog zu costDB.
+func loadModelsFromProviders(reg *sigoengine.IDRegistry) map[string]ModelInfo {
 	models := make(map[string]ModelInfo)
 
 	// Retry-Parameter: 4 Versuche mit 2s/4s/8s Backoff. Fängt den Fall ab,
@@ -363,48 +371,44 @@ func loadModelsFromProviders() map[string]ModelInfo {
 	const fetchAttempts = 4
 	const fetchBackoff = 2 * time.Second
 
-	// 1. Mammouth (kein API-Key nötig)
-	if ms, err := sigoengine.FetchWithRetry("mammouth", fetchAttempts, fetchBackoff, sigoengine.FetchMammouthModels); err != nil {
-		sigoengine.LogWarn("Mammouth-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
-	} else {
-		for _, m := range ms {
-			models[m.ID] = modelInfoFromEngine(m)
-		}
+	fetchers := []struct {
+		provider string
+		fn       func() ([]sigoengine.Model, error)
+	}{
+		{"mammouth", sigoengine.FetchMammouthModels},
+		{"moonshot", sigoengine.FetchMoonshotModels},
+		{"zai", sigoengine.FetchZAIModels},
+		{"longcat", sigoengine.FetchLongcatModels},
+		{"cheaperinference", sigoengine.FetchCheaperinferenceModels},
 	}
 
-	// 2. Moonshot
-	if ms, err := sigoengine.FetchWithRetry("moonshot", fetchAttempts, fetchBackoff, sigoengine.FetchMoonshotModels); err != nil {
-		sigoengine.LogWarn("Moonshot-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
-	} else {
-		for _, m := range ms {
-			models[m.ID] = modelInfoFromEngine(m)
+	for _, f := range fetchers {
+		ms, err := sigoengine.FetchWithRetry(f.provider, fetchAttempts, fetchBackoff, f.fn)
+		if err != nil {
+			sigoengine.LogWarn(f.provider+"-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
+			continue
 		}
-	}
 
-	// 3. ZAI (fällt intern auf statische Liste zurück)
-	if ms, err := sigoengine.FetchWithRetry("zai", fetchAttempts, fetchBackoff, sigoengine.FetchZAIModels); err != nil {
-		sigoengine.LogWarn("ZAI-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
-	} else {
-		for _, m := range ms {
-			models[m.ID] = modelInfoFromEngine(m)
+		var entries map[string]sigoengine.ModelEntry
+		if reg != nil {
+			ids := make([]string, len(ms))
+			for i, m := range ms {
+				ids[i] = m.ID
+			}
+			entries, err = reg.SyncProvider(f.provider, ids)
+			if err != nil {
+				sigoengine.LogWarn("ID-Registry-Sync fehlgeschlagen", map[string]interface{}{
+					"provider": f.provider, "error": err.Error(),
+				})
+			}
 		}
-	}
 
-	// 4. Longcat (fällt intern auf statische Liste zurück)
-	if ms, err := sigoengine.FetchWithRetry("longcat", fetchAttempts, fetchBackoff, sigoengine.FetchLongcatModels); err != nil {
-		sigoengine.LogWarn("Longcat-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
-	} else {
 		for _, m := range ms {
-			models[m.ID] = modelInfoFromEngine(m)
-		}
-	}
-
-	// 5. Cheaperinference (Aggregator; IDs mit "ci-" präfixt, siehe UpstreamID)
-	if ms, err := sigoengine.FetchWithRetry("cheaperinference", fetchAttempts, fetchBackoff, sigoengine.FetchCheaperinferenceModels); err != nil {
-		sigoengine.LogWarn("Cheaperinference-Modelle nicht geladen", map[string]interface{}{"error": err.Error()})
-	} else {
-		for _, m := range ms {
-			models[m.ID] = modelInfoFromEngine(m)
+			info := modelInfoFromEngine(m)
+			if entry, ok := entries[m.ID]; ok {
+				info.Shortcode = entry.Shortcode
+			}
+			models[m.ID] = info
 		}
 	}
 
@@ -1809,15 +1813,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Persistente ID-Registry (id_registry.db im data-dir) VOR dem
+	// Modell-Laden öffnen, damit loadModelsFromProviders die einmalig
+	// vergebenen Shortcodes übernehmen kann. Ein Fehlschlag ist nicht
+	// fatal — Shortcodes werden dann wie vor diesem Feature pro Boot neu
+	// berechnet (nil-safe analog zu costDB).
+	idRegistry, err := sigoengine.OpenIDRegistry(*dataDir)
+	if err != nil {
+		sigoengine.LogWarn("ID-Registry konnte nicht geöffnet werden — Shortcodes werden pro Boot neu berechnet", map[string]interface{}{"error": err.Error()})
+		idRegistry = nil
+	} else {
+		defer idRegistry.Close()
+		sigoengine.LogInfo("ID-Registry aktiv", map[string]interface{}{"path": idRegistry.Path()})
+	}
+
 	// Server-State initialisieren
 	srv := &Server{
-		models:         loadModelsFromProviders(),
+		models:         loadModelsFromProviders(idRegistry),
 		memory:         loadMemory(*dataDir),
 		breakers:       make(map[string]*sigoengine.EnhancedCircuitBreaker),
 		systemPrompt:   loadSystemPrompt(*dataDir),
 		usage:          make(map[string]*ModelUsageStats),
 		usageByChannel: make(map[string]*ModelUsageStats),
 		baseDir:        *dataDir,
+		idRegistry:     idRegistry,
 	}
 
 	// Datenverzeichnis anlegen falls nicht vorhanden
