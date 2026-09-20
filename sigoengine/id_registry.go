@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -119,15 +120,78 @@ func (r *IDRegistry) migrate() error {
 }
 
 // **********************************************************************
-// Platzhalter-Methoden (Task 2/3)
+// Provider-Kürzel-Verwaltung (Task 2+)
 
 func (r *IDRegistry) providerCodeLocked(provider string) (string, error) {
 	var code string
 	err := r.db.QueryRow(`SELECT code FROM providers WHERE name = ?`, provider).Scan(&code)
-	if err != nil && err != sql.ErrNoRows {
+	if err == nil {
+		return code, nil
+	}
+	if err != sql.ErrNoRows {
 		return "", fmt.Errorf("id_registry: provider-code lesen fehlgeschlagen: %w", err)
 	}
-	return code, nil
+
+	candidate := normalizeCode(provider, 3)
+	taken, err := r.providerCodeTakenLocked(candidate)
+	if err != nil {
+		return "", err
+	}
+	if taken {
+		candidate = normalizeCode(cutterCode(provider), 3)
+		taken, err = r.providerCodeTakenLocked(candidate)
+		if err != nil {
+			return "", err
+		}
+		if taken {
+			// Extrem unwahrscheinlicher Doppel-Kollisionsfall: letzte Stelle
+			// numerisch durchprobieren.
+			base := candidate[:2]
+			found := false
+			for i := 0; i < 10; i++ {
+				alt := fmt.Sprintf("%s%d", base, i)
+				altTaken, err := r.providerCodeTakenLocked(alt)
+				if err != nil {
+					return "", err
+				}
+				if !altTaken {
+					candidate = alt
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", fmt.Errorf("id_registry: kein freier 3-Zeichen-Code für Provider %q gefunden", provider)
+			}
+		}
+	}
+
+	if _, err := r.db.Exec(
+		`INSERT INTO providers (name, code, assigned_at) VALUES (?, ?, ?)`,
+		provider, candidate, time.Now().Unix(),
+	); err != nil {
+		return "", fmt.Errorf("id_registry: provider anlegen fehlgeschlagen: %w", err)
+	}
+	return candidate, nil
+}
+
+func (r *IDRegistry) providerCodeTakenLocked(code string) (bool, error) {
+	var count int
+	err := r.db.QueryRow(`SELECT COUNT(*) FROM providers WHERE code = ?`, code).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("id_registry: provider-code-check fehlgeschlagen: %w", err)
+	}
+	return count > 0, nil
+}
+
+// normalizeCode kürzt/füllt s auf genau n Zeichen (lowercase, mit "x"
+// aufgefüllt falls zu kurz) — für 3-Zeichen-Provider-Codes.
+func normalizeCode(s string, n int) string {
+	s = strings.ToLower(s)
+	if len(s) >= n {
+		return s[:n]
+	}
+	return s + strings.Repeat("x", n-len(s))
 }
 
 func (r *IDRegistry) getModelLocked(provider, upstreamID string) (*ModelEntry, error) {
