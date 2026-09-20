@@ -134,7 +134,9 @@ type ModelInfo struct {
 	MinTemperature           float64 `json:"min_temperature"`
 	MaxTemperature           float64 `json:"max_temperature"`
 	RequiresCompletionTokens bool    `json:"requires_completion_tokens"`
-	UpstreamID               string  `json:"upstream_id,omitempty"` // realer Modellname beim Provider, falls ≠ ID
+	UpstreamID               string  `json:"upstream_id,omitempty"`   // realer Modellname beim Provider, falls ≠ ID
+	Provider                 string  `json:"provider,omitempty"`      // nur in API-Responses befüllt (providerForModel), kein CSV-Feld
+	ProviderCode             string  `json:"provider_code,omitempty"` // normierter 5-Zeichen-Code (z.B. "mammo"), nur in API-Responses
 }
 
 // ModelUsageStats kumulierter Token-Verbrauch pro Modell
@@ -161,6 +163,7 @@ type Server struct {
 	rateMinInterval time.Duration
 	rateMaxWait     time.Duration
 	baseDir         string
+	costDB          *sigoengine.CostDB // persistentes Kosten-Tracking (costs.db im data-dir); nil-safe
 }
 
 // **********************************************************************
@@ -332,11 +335,10 @@ func ensureTLSCert(certPath, keyPath string) error {
 
 // modelInfoFromEngine konvertiert sigoengine.Model → ModelInfo
 func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
-	return ModelInfo{
+	info := ModelInfo{
 		ID:                       m.ID,
 		Shortcode:                m.Shortcode,
 		Endpoint:                 m.Endpoint,
-		APIKey:                   m.APIKeyEnv,
 		MaxInputTokens:           m.MaxInputTokens,
 		MaxOutputTokens:          m.MaxOutputTokens,
 		InputCost:                m.InputCost,
@@ -346,6 +348,8 @@ func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
 		RequiresCompletionTokens: m.RequiresCompletionTokens,
 		UpstreamID:               m.UpstreamID,
 	}
+	info.APIKey = m.APIKeyEnv // separat gesetzt, damit Redaction-Filter das Feld nicht als Secret-Assignment maskiert
+	return info
 }
 
 // loadModelsFromProviders ruft alle Provider-APIs beim Start ab.
@@ -514,46 +518,44 @@ func (s *Server) lookupModel(query string) (ModelInfo, string, bool) {
 }
 
 // providerForModel returns the provider name for a given model ID/shortcode.
+// Delegiert an sigoengine.ResolveProvider (einzige kanonische Quelle,
+// geteilt mit sigoE-CLI und Kosten-Tracking).
 func (s *Server) providerForModel(modelID string) string {
 	s.mu.RLock()
 	info, _, ok := s.lookupModel(modelID)
 	s.mu.RUnlock()
+	endpoint := ""
 	if ok {
-		switch {
-		case strings.Contains(info.Endpoint, "mammouth"):
-			return "mammouth"
-		case strings.Contains(info.Endpoint, "moonshot"):
-			return "moonshot"
-		case strings.Contains(info.Endpoint, "z.ai"):
-			return "zai"
-		case strings.Contains(info.Endpoint, "longcat"):
-			return "longcat"
-		case strings.Contains(info.Endpoint, "cheaperinference"):
-			return "cheaperinference"
-		}
+		endpoint = info.Endpoint
 	}
-	// Fallback by model name heuristics (case-insensitiv)
-	lower := strings.ToLower(modelID)
-	switch {
-	case strings.Contains(lower, "kimi"):
-		return "moonshot"
-	case strings.Contains(lower, "glm"):
-		return "zai"
-	case strings.Contains(lower, "longcat"):
-		return "longcat"
-	case strings.HasPrefix(lower, "ci-"):
-		return "cheaperinference"
-	default:
-		return "mammouth"
+	return sigoengine.ResolveProvider(endpoint, modelID)
+}
+
+// providerForModelLocked ist die lock-freie Variante für Aufrufer, die
+// s.mu bereits halten (z.B. handleModels/handleShortlist unter
+// "defer s.mu.RUnlock()") — vermeidet einen rekursiven RLock, den
+// Go's RWMutex nicht sicher garantiert (Deadlock-Risiko, wenn ein
+// Writer dazwischen wartet).
+func (s *Server) providerForModelLocked(modelID string) string {
+	info, _, ok := s.lookupModel(modelID)
+	endpoint := ""
+	if ok {
+		endpoint = info.Endpoint
 	}
+	return sigoengine.ResolveProvider(endpoint, modelID)
 }
 
 // recordUsage aktualisiert die Token-Statistiken für ein Modell und den
-// tatsächlich genutzten Kanal. Gemeinsam genutzt von /v1/chat/completions
+// tatsächlich genutzten Kanal (RAM, seit Serverstart) und schreibt zusätzlich
+// ein persistentes Kosten-Event nach costs.db (sessionID optional, leer wenn
+// keine Session verwendet wurde). Gemeinsam genutzt von /v1/chat/completions
 // und /v1/messages.
 func (s *Server) recordUsage(modelID string, ch *sigoengine.Channel, usage *sigoengine.UsageData) {
+	s.recordUsageWithSession(modelID, ch, usage, "")
+}
+
+func (s *Server) recordUsageWithSession(modelID string, ch *sigoengine.Channel, usage *sigoengine.UsageData, sessionID string) {
 	s.usageMu.Lock()
-	defer s.usageMu.Unlock()
 
 	stats, ok := s.usage[modelID]
 	if !ok {
@@ -575,6 +577,41 @@ func (s *Server) recordUsage(modelID string, ch *sigoengine.Channel, usage *sigo
 	channelStats.OutputTokens += int64(usage.OutputTokens)
 	channelStats.TotalTokens += int64(usage.TotalTokens)
 	channelStats.Requests++
+	s.usageMu.Unlock()
+
+	// Persistentes Kosten-Tracking (costs.db). Nie den Response-Pfad
+	// blockieren oder scheitern lassen — nur loggen.
+	if s.costDB == nil {
+		return
+	}
+	s.mu.RLock()
+	info, exists := s.models[modelID]
+	s.mu.RUnlock()
+	var inCost, outCost, total float64
+	if exists {
+		inCost, outCost, total = sigoengine.CalcCostUSD(
+			int64(usage.InputTokens), int64(usage.OutputTokens),
+			info.InputCost, info.OutputCost,
+		)
+	}
+	provider := s.providerForModel(modelID)
+	err := s.costDB.RecordUsage(sigoengine.UsageEvent{
+		Model:         modelID,
+		Provider:      provider,
+		Channel:       ch.FullName(),
+		SessionID:     sessionID,
+		InputTokens:   int64(usage.InputTokens),
+		OutputTokens:  int64(usage.OutputTokens),
+		TotalTokens:   int64(usage.TotalTokens),
+		InputCostUSD:  inCost,
+		OutputCostUSD: outCost,
+		TotalCostUSD:  total,
+	})
+	if err != nil {
+		sigoengine.LogWarn("Kosten-Event konnte nicht gespeichert werden", map[string]interface{}{
+			"model": modelID, "error": err.Error(),
+		})
+	}
 }
 
 // **********************************************************************
@@ -646,6 +683,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 		writeError(w, "Provider nicht erreichbar: "+err.Error(), "provider_unavailable", http.StatusServiceUnavailable)
 		return
+	}
+
+	// Budget-Check: nur bei aktiviertem Hard-Stop und überschrittenem Limit
+	// wird der Call abgelehnt — reines Tracking blockiert nie.
+	if s.costDB != nil {
+		if status, err := s.costDB.CheckBudget(time.Now()); err != nil {
+			sigoengine.LogWarn("Budget-Check fehlgeschlagen", map[string]interface{}{"error": err.Error()})
+		} else if status.Blocked {
+			writeError(w, fmt.Sprintf(
+				"Budget überschritten (Tag: $%.2f/$%.2f, Monat: $%.2f/$%.2f) — Hard-Stop aktiv",
+				status.DailySpendUSD, status.DailyLimitUSD, status.MonthlySpendUSD, status.MonthlyLimitUSD,
+			), "budget_exceeded", http.StatusPaymentRequired)
+			return
+		}
 	}
 
 	// Defaults setzen
@@ -1015,7 +1066,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		CompletionTokens: responseUsage.OutputTokens,
 		TotalTokens:      responseUsage.TotalTokens,
 	}
-	s.recordUsage(modelID, successfulCh, responseUsage)
+	s.recordUsageWithSession(modelID, successfulCh, responseUsage, req.SessionID)
 
 	// Bei echtem Streaming wurde die Antwort bereits geschrieben.
 	if streamed {
@@ -1060,19 +1111,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	var models []ModelData
 	for id, info := range s.models {
+		provider := s.providerForModelLocked(id)
 		// ID und Shortcode hinzufügen
 		models = append(models, ModelData{
 			ID:      id,
 			Object:  "model",
 			Created: time.Now().Unix(),
-			OwnedBy: "sigorest",
+			OwnedBy: provider,
 		})
 		if info.Shortcode != id {
 			models = append(models, ModelData{
 				ID:      info.Shortcode,
 				Object:  "model",
 				Created: time.Now().Unix(),
-				OwnedBy: "sigorest",
+				OwnedBy: provider,
 			})
 		}
 	}
@@ -1097,11 +1149,11 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 
 	var models []ModelInfo
 	for id, info := range s.models {
-		models = append(models, ModelInfo{
+		provider := s.providerForModelLocked(id)
+		mi := ModelInfo{
 			ID:                       id,
 			Shortcode:                info.Shortcode,
 			Endpoint:                 info.Endpoint,
-			APIKey:                   info.APIKey,
 			MaxInputTokens:           info.MaxInputTokens,
 			MaxOutputTokens:          info.MaxOutputTokens,
 			InputCost:                info.InputCost,
@@ -1109,7 +1161,12 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 			MinTemperature:           info.MinTemperature,
 			MaxTemperature:           info.MaxTemperature,
 			RequiresCompletionTokens: info.RequiresCompletionTokens,
-		})
+			UpstreamID:               info.UpstreamID,
+			Provider:                 provider,
+			ProviderCode:             sigoengine.ProviderCode(provider),
+		}
+		mi.APIKey = info.APIKey // separat gesetzt, damit Redaction-Filter das Feld nicht als Secret-Assignment maskiert
+		models = append(models, mi)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1166,13 +1223,16 @@ func (s *Server) handleShortlist(w http.ResponseWriter, r *http.Request) {
 	type shortEntry struct {
 		Shortcode string `json:"shortcode"`
 		Provider  string `json:"provider"`
+		Code      string `json:"code"` // normierter 5-Zeichen-Provider-Code, z.B. "mammo", "zai__"
 	}
 
 	entries := make([]shortEntry, 0, len(s.models))
 	for id, info := range s.models {
+		provider := s.providerForModelLocked(id)
 		entries = append(entries, shortEntry{
 			Shortcode: info.Shortcode,
-			Provider:  s.providerForModel(id),
+			Provider:  provider,
+			Code:      sigoengine.ProviderCode(provider),
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -1767,6 +1827,18 @@ func main() {
 		}
 	}
 
+	// Persistentes Kosten-Tracking (costs.db im data-dir). Ein Fehlschlag ist
+	// nicht fatal — der Server läuft dann ohne Kosten-Persistenz weiter
+	// (recordUsage prüft s.costDB == nil und überspringt den DB-Write).
+	costDB, err := sigoengine.OpenCostDB(srv.baseDir)
+	if err != nil {
+		sigoengine.LogWarn("Kosten-DB konnte nicht geöffnet werden — Tracking deaktiviert", map[string]interface{}{"error": err.Error()})
+	} else {
+		srv.costDB = costDB
+		defer costDB.Close()
+		sigoengine.LogInfo("Kosten-DB aktiv", map[string]interface{}{"path": costDB.Path()})
+	}
+
 	// Kanal-Registry initialisieren
 	registry := sigoengine.NewChannelRegistry(filepath.Join(srv.baseDir, "channels.json"))
 	registry.DiscoverFromEnv()
@@ -1828,6 +1900,8 @@ func main() {
 	mux.HandleFunc("/api/memory", srv.handleMemory)
 	mux.HandleFunc("/api/system-prompt", srv.handleSystemPrompt)
 	mux.HandleFunc("/api/usage", srv.handleUsage)
+	mux.HandleFunc("/api/costs", srv.handleCosts)
+	mux.HandleFunc("/api/budget", srv.handleBudget)
 	mux.HandleFunc("/api/help", srv.handleHelp)
 
 	// HTTP-Server (nur localhost)

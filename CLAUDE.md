@@ -1,5 +1,8 @@
 # CLAUDE.md
 
+claude --worktree anthropic-messages-bridge --resume cd4cd259-7826-41a6-b845-5383fc49acf2
+
+
 Anleitung für Claude Code (claude.ai/code) bei Arbeit mit diesem Repo.
 
 ## Developer
@@ -97,9 +100,12 @@ sigorest/
 │   ├── rate_limiter.go          #   Pro-Kanal Rate-Limiter (hybrid, siehe unten)
 │   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
 │   ├── env.go                   #   Optionale ./env Datei
+│   ├── costdb.go                #   Kosten-Tracking (SQLite, WAL) + Budget-Check
+│   ├── provider_id.go           #   Kanonische Provider-Erkennung + 5-Zeichen-Code
 │   └── version.go               #   Zentrale Versions-Konstante
 ├── cmd/sigoE/main.go            # CLI-Wrapper
 ├── sigoREST/main.go             # REST-Server
+├── sigoREST/costhandlers.go     # /api/costs, /api/budget Handler
 └── sigoREST/memory.json         # Globaler Memory-Block (embedded + Disk)
 ```
 
@@ -125,6 +131,11 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 | `LoadConfigWithChannel(model, ch)` | Wie `LoadConfig`, aber für einen bestimmten Kanal |
 | `RateLimiter.Acquire/Release` | Pro-Kanal hybrides Rate-Limiting (→ `ErrRateLimited`) |
 | `StartHealthMonitor(...)` | Lazy Hintergrund-Health-Check (GET `/models`, kein Chat-Ping) |
+| `OpenCostDB(dataDir)` | Öffnet/erstellt `costs.db` (SQLite, WAL), Schema-Migration |
+| `CostDB.RecordUsage/Summary/CheckBudget` | Kosten-Event schreiben, Zeitraum aggregieren, Budget prüfen |
+| `CalcCostUSD(inTok, outTok, inPrice, outPrice)` | Token→USD anhand Modell-Preisen ($/1M Tokens) |
+| `ResolveProvider(endpoint, modelID)` | Kanonische Provider-Erkennung (Endpoint zuerst, Namens-Heuristik als Fallback) |
+| `ProviderCode(provider)` | Normiert Provider-Namen auf festen 5-Zeichen-Code (`mammo`, `zai__`, ...) |
 
 **Thread-Safety:**
 - `sync.RWMutex` für Logging-Konfiguration
@@ -168,11 +179,11 @@ sie nicht.
 | Pfad | Methode | Zweck |
 |-------|---------|-------|
 | `/v1/chat/completions` | POST | OpenAI-kompatible Chat API |
-| `/v1/models` | GET | Modell-Liste (ID + Shortcode) |
+| `/v1/models` | GET | Modell-Liste (ID + Shortcode), `owned_by` = kanonischer Provider |
 | `/v1/messages` | POST | Anthropic-Messages-API-Bridge (Claude Code o.ä.), Tool-Calling, alle Provider |
-| `/api/models` | GET | Volle Modell-Infos (Preise, Limits) |
+| `/api/models` | GET | Volle Modell-Infos (Preise, Limits, `provider`/`provider_code`) |
 | `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
-| `/api/shortlist` | GET | Kompakt: nur Shortcode + Provider, sortiert |
+| `/api/shortlist` | GET | Kompakt: Shortcode + Provider + 5-Zeichen-Code, sortiert |
 | `/api/channels` | GET | Status aller Kanäle (inkl. `min_interval_ms`/`max_wait_ms`) |
 | `/api/channels/:provider/:name` | GET | Einzelkanal-Detail |
 | `/api/channels/:provider/:name/enable` | POST | Kanal aktivieren |
@@ -182,6 +193,8 @@ sie nicht.
 | `/api/health` | GET | Server-Status + Circuit-Breaker |
 | `/api/memory` | GET/PUT | Globaler Memory-Block |
 | `/api/usage`  | GET | Token-Statistiken (RAM, Reset bei Neustart) |
+| `/api/costs`  | GET | Token-Statistiken + USD-Kosten, persistent (SQLite, `costs.db`) |
+| `/api/budget` | GET/PUT | Tages-/Monats-Budget-Limits + Verbrauchsstatus, optional Hard-Stop |
 | `/api/system-prompt` | GET/PUT | Globaler System-Prompt |
 | `/api/version` | GET | Version + Component-Name |
 | `/api/help`   | GET | Endpoint-Dokumentation |
@@ -305,6 +318,87 @@ API-Kosten-Verbrauch im Leerlauf.
 
 Details/Historie siehe `RETROSPECTIVE.md`, Session 2026-08-18.
 
+### Kosten-Tracking (`sigoengine/costdb.go`, `sigoREST/costhandlers.go`)
+
+Persistente SQLite-Datenbank (`modernc.org/sqlite`, pure Go, kein CGO,
+WAL-Mode) unter `<data-dir>/costs.db`, ergänzend zum RAM-only
+`/api/usage`. Jeder abgeschlossene Chat-Call (`/v1/chat/completions`
+und `/v1/messages`, über `recordUsage`/`recordUsageWithSession` in
+`main.go`) schreibt ein Event in `usage_events`: Modell, Provider, Kanal,
+Session-ID (optional), Tokens, sowie USD-Kosten berechnet aus
+`ModelInfo.InputCost`/`OutputCost` ($/1M Tokens, `CalcCostUSD`). Modelle
+ohne Preisangabe (Ollama) landen mit $0 Kosten im Log, nicht komplett
+ohne Eintrag — Token-/Request-Zahlen bleiben so auswertbar.
+
+**Nil-safe by design:** `Server.costDB` ist ein `*sigoengine.CostDB`, den
+alle Methoden auf `nil`-Empfänger sauber abfangen (No-Op statt Panic).
+Schlägt `OpenCostDB` beim Serverstart fehl (z.B. Disk voll,
+Berechtigungsproblem), läuft der Server ohne Kosten-Persistenz weiter —
+`recordUsage` überspringt den DB-Write, `/api/costs`/`/api/budget`
+antworten mit `503 cost_tracking_disabled`. Ein DB-Fehler beim
+Schreiben selbst wird nur geloggt (`LogWarn`), niemals dem
+API-Response-Pfad in den Weg gestellt.
+
+**Budget-Check vor jedem Call:** In `handleChatCompletions`, direkt nach
+dem Provider-Ping (vor dem eigentlichen API-Call, gleiches Muster wie
+"Provider nicht erreichbar → kein API-Call"). `CheckBudget(now)` prüft
+Tages-/Monats-Ausgaben (`spendSince`, lokale Zeitzone via
+`StartOfDay`/`StartOfMonth`) gegen die konfigurierten Limits
+(`budget_config`-Tabelle, Singleton-Zeile). Nur bei `hard_stop_enabled:
+true` UND überschrittenem Limit wird der Call mit `HTTP 402
+budget_exceeded` abgelehnt — Default ist reines Tracking, kein Eingriff.
+
+**Bekannter Bug + Fix (Off-by-One bei `Summary()`):** gespeicherte
+Timestamps sind ganze Sekunden (`ts.Unix()`), aber `until` in
+`/api/costs` ist `time.Now()` mit Nanosekunden-Anteil. Ohne Rundung
+schneidet `until.Unix()` (floor) exakt die Sekunde ab, in der ein Event
+GERADE JETZT geschrieben wurde — beobachtet als "Chat-Call meldet Erfolg,
+`/api/costs` zeigt trotzdem 0 Requests", wenn beide im selben
+Sekunden-Tick liegen. Fix: `ceilUnix()` rundet `until` für die
+`Summary()`-Query auf die nächste volle Sekunde auf (Regressionstest:
+`TestSummary_IncludesEventFromSameInstantAsUntil`).
+
+### Provider-Kennzeichnung (`sigoengine/provider_id.go`)
+
+Vorher: drei unabhängige, unterschiedlich vollständige
+Provider-Erkennungen — `sigoREST/main.go:providerForModel()` (nur
+Endpoint-Substring + Namens-Fallback), `cmd/sigoE/main.go:listAllModels()`
+(nur Mammoth/Moonshot/Z.ai, alles andere landete in "Other" — Longcat,
+cheaperinference, Ollama fehlten komplett) und `sigoengine/channel.go:
+knownProviders` (nur für ENV-Var-Discovery gedacht, nie für
+Anzeige-Zwecke). Jetzt eine kanonische Quelle:
+
+- `ProviderFromEndpoint(endpoint)` — erkennt anhand der Endpoint-URL
+  (`mammouth`, `moonshot`, `z.ai`, `longcat`, `cheaperinference`,
+  `localhost:11434`/`127.0.0.1:11434` → `ollama`); `""` bei keinem Match
+- `ProviderFromModelID(modelID)` — Namens-Heuristik als Fallback
+  (`ollama-`-Präfix, `kimi`, `glm`, `longcat`, `ci-`-Präfix), Default
+  `"mammouth"`
+- `ResolveProvider(endpoint, modelID)` — kombiniert beide: Endpoint
+  zuerst (zuverlässiger, vom Server selbst gesetzt), Namens-Heuristik
+  nur als Fallback
+- `ProviderCode(provider)` — normiert auf festen 5-Zeichen-Code
+  (`providerCodes`-Map: `mammo`, `moons`, `zai__`, `longc`, `cheap`,
+  `ollam`; unbekannte Provider werden mit `_` aufgefüllt bzw. hart auf 5
+  Zeichen gekappt)
+
+Genutzt von `sigoREST/main.go` (`providerForModel`/
+`providerForModelLocked` sind dünne Wrapper, die die alte Logik
+ersetzen), `/api/shortlist`, `/api/models` (`provider`/`provider_code`),
+`/v1/models` (`owned_by` — vorher hart `"sigorest"`) und `cmd/sigoE`
+(`-l`, `-i`).
+
+**Zwei Bugs beim Umbau gefunden:**
+1. **Rekursiver RLock**: `handleShortlist`/`handleModels` halten
+   `s.mu.RLock()` per `defer` und riefen darin `providerForModel()` auf,
+   das selbst nochmal `s.mu.RLock()` nimmt — Go's `RWMutex` garantiert
+   das nicht deadlock-frei, wenn ein Writer dazwischen wartet. Fix:
+   separate lock-freie `providerForModelLocked()` für Aufrufer, die den
+   Lock schon halten.
+2. **Ollama fiel auf `mammouth` zurück**: die alte Heuristik kannte
+   weder `localhost:11434` noch das `ollama-`-Präfix — jetzt in
+   `ProviderFromEndpoint`/`ProviderFromModelID` explizit behandelt.
+
 ### Anthropic-Messages-Bridge (`/v1/messages`)
 
 Übersetzt Anthropic-Messages-Wire-Format (Request, Response, SSE-Streaming,
@@ -340,6 +434,7 @@ sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 - **Embedded Files**: nur `memory.json` eingebettet (Disk hat Vorrang); Server-Modelle kommen dynamisch von den Providern, nicht aus einer embedded CSV
 - **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-/Longcat-Fallback-Liste (DNS-Race)
 - **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference)
+- **Kosten-DB**: `costs.db` (SQLite/WAL) im `-data-dir`; `modernc.org/sqlite` (pure Go) — kein CGO-Zwang im Build, bewusst analog zur Hermes-`state.db`-Entscheidung (lokaler Single-Process-Store, kein Netzwerk-Overhead)
 - **Scope-Grenze**: sigoREST bleibt schlanker Proxy, kein Agent-Harness — bewusst kein Tool-Call-Repair o.ä.
 - **IPv6**: Geblockt (außer `::1` loopback)
 - **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start
@@ -389,6 +484,24 @@ systemctl restart sigorest  # oder: ./build/sigoREST
 curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"ollama-llama3.3","messages":[{"role":"user","content":"Hallo"}]}'
+```
+
+### Kosten im Blick behalten / Budget setzen
+```bash
+# Verbrauch heute / diesen Monat
+curl -s "http://localhost:9080/api/costs?period=today"
+curl -s "http://localhost:9080/api/costs?period=month"
+
+# Hartes Tages-/Monats-Limit setzen (Server lehnt Calls mit HTTP 402 ab,
+# sobald das Limit erreicht ist)
+curl -s -X PUT http://localhost:9080/api/budget \
+  -H "Content-Type: application/json" \
+  -d '{"daily_limit_usd":5,"monthly_limit_usd":100,"hard_stop_enabled":true}'
+
+# Nur beobachten, nie blockieren: hard_stop_enabled auf false lassen/setzen
+curl -s -X PUT http://localhost:9080/api/budget \
+  -H "Content-Type: application/json" \
+  -d '{"daily_limit_usd":5,"monthly_limit_usd":100,"hard_stop_enabled":false}'
 ```
 
 ### Debugging REST-Server

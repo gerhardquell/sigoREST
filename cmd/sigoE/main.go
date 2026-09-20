@@ -254,28 +254,20 @@ func listAllModels() {
 	type modelEntry struct {
 		name, shortcode string
 		inCost, outCost float64
-		provider        string
+		provider        string // kanonischer Name, z.B. "mammouth" (für Sortierung/Gruppierung)
+		code            string // normierter 5-Zeichen-Code, z.B. "mammo"
 	}
 
 	var entries []modelEntry
 	for _, m := range sigoengine.GetAllModels() {
-		var provider string
-		switch {
-		case strings.Contains(m.Endpoint, "mammouth"):
-			provider = "Mammoth.ai"
-		case strings.Contains(m.Endpoint, "moonshot"):
-			provider = "Moonshot"
-		case strings.Contains(m.Endpoint, "z.ai"):
-			provider = "Z.ai"
-		default:
-			provider = "Other"
-		}
+		provider := sigoengine.ResolveProvider(m.Endpoint, m.ID)
 		entries = append(entries, modelEntry{
 			name:      m.ID,
 			shortcode: m.Shortcode,
 			inCost:    m.InputCost,
 			outCost:   m.OutputCost,
 			provider:  provider,
+			code:      sigoengine.ProviderCode(provider),
 		})
 	}
 
@@ -292,7 +284,7 @@ func listAllModels() {
 			if curProvider != "" {
 				fmt.Println()
 			}
-			fmt.Printf("--- %s ---\n", e.provider)
+			fmt.Printf("--- %s [%s] ---\n", e.provider, e.code)
 			fmt.Printf("%-20s %-12s %10s %10s\n", "Modell", "Shortcode", "Input$/M", "Output$/M")
 			fmt.Println(strings.Repeat("-", 58))
 			curProvider = e.provider
@@ -313,6 +305,8 @@ func showModelInfo(modelName string) {
 	}
 	fmt.Printf("\nModell: %s\n", m.ID)
 	fmt.Printf("Shortcode:   %s\n", m.Shortcode)
+	provider := sigoengine.ResolveProvider(m.Endpoint, m.ID)
+	fmt.Printf("Provider:    %s [%s]\n", provider, sigoengine.ProviderCode(provider))
 	fmt.Printf("Endpoint:    %s\n", m.Endpoint)
 	fmt.Printf("API Key Env: %s\n", m.APIKeyEnv)
 	fmt.Printf("Max Context: %d Tokens\n", m.MaxInputTokens)

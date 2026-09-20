@@ -74,7 +74,7 @@ make clean
 | `-https-port` | `9443` | HTTPS (privates Netz 192.168.0.0/16, 10.0.0.0/8) |
 | `-cert` | `./certs/server.crt` | TLS-Zertifikat (wird beim ersten Start auto-generiert) |
 | `-key` | `./certs/server.key` | TLS-Schlüssel |
-| `-data-dir` | `/var/sigoREST` | Basisverzeichnis für Memory, System-Prompt, channels.json, Sessions |
+| `-data-dir` | `/var/sigoREST` | Basisverzeichnis für Memory, System-Prompt, channels.json, Sessions, costs.db |
 | `-channel-health-interval` | `30s` | Intervall für Kanal-Health-Checks |
 | `-rate-min-interval` | `500ms` | Default Mindest-Abstand zwischen Calls pro Kanal (`0`=deaktiviert) |
 | `-rate-max-wait` | `1000ms` | Default max Queue-Wartezeit bis HTTP 429 pro Kanal |
@@ -153,6 +153,7 @@ Standard: `/var/sigoREST`
 ├── channels.json                     # Persistenter Aktivierungs-Status der Kanäle
 ├── memory.json                       # Globaler Memory-Block
 ├── system-prompt.txt                 # Globaler System-Prompt
+├── costs.db                          # Kosten-Tracking (SQLite, siehe unten)
 ├── channels/
 │   └── <provider>/
 │       └── <channel>/
@@ -397,13 +398,41 @@ geschätzt.
 ```bash
 curl -s http://localhost:9080/v1/models
 ```
-OpenAI-kompatible Modell-Liste (ID + Shortcode).
+OpenAI-kompatible Modell-Liste (ID + Shortcode). `owned_by` ist der
+kanonische Provider-Name (z.B. `"mammouth"`, `"zai"`, `"ollama"`) —
+nicht `"sigorest"`, das macht den Provider für jeden Client (auch
+Hermes) direkt ohne Zusatz-Call sichtbar, analog zu OpenRouters
+Konvention.
 
 ### GET /api/models
 ```bash
 curl -s http://localhost:9080/api/models
 ```
-Volle Modell-Infos: Preise, Token-Limits, Temperatur-Range.
+Volle Modell-Infos: Preise, Token-Limits, Temperatur-Range — inkl.
+`provider` (kanonischer Name) und `provider_code` (normierter
+5-Zeichen-Code, siehe [Provider-Kennzeichnung](#provider-kennzeichnung)
+unten).
+
+### GET /api/shortcodes
+```bash
+curl -s http://localhost:9080/api/shortcodes
+```
+Kompaktes Modell→Shortcode-Mapping: `{"gpt-4.1": "gpt41", ...}`.
+
+### GET /api/shortlist
+```bash
+curl -s http://localhost:9080/api/shortlist
+```
+Die schnelle Antwort auf "welcher Provider steckt hinter diesem
+Shortcode?" — pro Modell nur `shortcode`, `provider` und `provider_code`,
+sortiert nach Provider dann Shortcode:
+```json
+[
+  {"shortcode": "cl-s", "provider": "mammouth", "code": "mammo"},
+  {"shortcode": "kimi", "provider": "moonshot", "code": "moons"},
+  {"shortcode": "zai-glm51", "provider": "zai", "code": "zai__"}
+]
+```
 
 ### GET /api/version
 ```bash
@@ -519,6 +548,89 @@ Kumulierte Token-Statistiken seit Serverstart — pro Modell, pro Kanal und gesa
 ```
 Hinweis: Nur RAM — Reset bei Neustart.
 
+### Kosten-Tracking (`costs.db`)
+
+Persistentes Kosten-Log, unabhängig von `/api/usage` (das nur RAM ist und
+bei jedem Neustart zurückgesetzt wird). Jeder abgeschlossene Chat-Call
+(`/v1/chat/completions` und `/v1/messages`) schreibt ein Event nach
+`<data-dir>/costs.db` (SQLite, WAL) — Modell, Kanal, Session-ID (falls
+gesetzt), Token-Zahlen und daraus berechnete USD-Kosten anhand der
+Modell-Preise (`input_cost`/`output_cost`, $/1M Tokens). Modelle ohne
+Preisangabe (z.B. `ollama-*`) werden mit $0 geloggt, nicht übersprungen —
+Tokens/Requests bleiben so trotzdem sichtbar.
+
+Kosten-Tracking ist best-effort: schlägt das Schreiben fehl, wird nur
+gewarnt (Log), der Chat-Response-Pfad bricht nie deswegen ab. Konnte
+`costs.db` beim Serverstart gar nicht erst geöffnet werden, läuft der
+Server ohne Kosten-Persistenz weiter (`/api/costs`/`/api/budget`
+antworten dann mit `503 cost_tracking_disabled`).
+
+#### GET /api/costs
+```bash
+# Heute (lokale Zeitzone), Default ohne Parameter
+curl -s http://localhost:9080/api/costs
+
+# Bequemlichkeits-Shortcuts
+curl -s "http://localhost:9080/api/costs?period=today"
+curl -s "http://localhost:9080/api/costs?period=month"
+
+# Frei wählbarer Zeitraum (RFC3339 oder YYYY-MM-DD)
+curl -s "http://localhost:9080/api/costs?since=2026-09-01&until=2026-09-19"
+```
+Antwort — Gesamt-Summe plus Aufschlüsselung nach Modell und Kanal:
+```json
+{
+  "since": "2026-09-19T00:00:00+02:00",
+  "until": "2026-09-19T18:05:15.869063475+02:00",
+  "requests": 12,
+  "input_tokens": 4400,
+  "output_tokens": 28100,
+  "total_tokens": 32500,
+  "total_cost_usd": 0.842,
+  "by_model": {
+    "claude-sonnet-4-6": {"requests": 5, "input_tokens": 2000, "output_tokens": 12000, "total_tokens": 14000, "total_cost_usd": 0.6}
+  },
+  "by_channel": {
+    "mammouth#mammouth-default": {"requests": 5, "input_tokens": 2000, "output_tokens": 12000, "total_tokens": 14000, "total_cost_usd": 0.6}
+  }
+}
+```
+
+#### GET/PUT /api/budget
+
+Einfaches Budget-System: Tages- und/oder Monats-Limit in USD, optional mit
+Hard-Stop. Ohne Hard-Stop ist ein überschrittenes Limit reine Information
+(`daily_exceeded`/`monthly_exceeded` in der Antwort) — kein Request wird
+abgelehnt. Mit `hard_stop_enabled: true` lehnt der Server jeden weiteren
+Chat-Call mit `HTTP 402 budget_exceeded` ab, sobald ein gesetztes Limit
+erreicht ist (`0` = kein Limit für dieses Feld).
+
+```bash
+# Aktuelle Config + Verbrauchsstatus (Tag/Monat) in einer Antwort
+curl -s http://localhost:9080/api/budget
+
+# Limits setzen
+curl -s -X PUT http://localhost:9080/api/budget \
+  -H "Content-Type: application/json" \
+  -d '{"daily_limit_usd":5,"monthly_limit_usd":100,"hard_stop_enabled":true}'
+```
+`GET`-Antwort:
+```json
+{
+  "config": {"daily_limit_usd": 5, "monthly_limit_usd": 100, "hard_stop_enabled": true},
+  "status": {
+    "daily_spend_usd": 2.3, "monthly_spend_usd": 41.7,
+    "daily_limit_usd": 5, "monthly_limit_usd": 100,
+    "daily_exceeded": false, "monthly_exceeded": false,
+    "hard_stop_enabled": true, "blocked": false
+  }
+}
+```
+Limit erreicht + Hard-Stop aktiv → jeder weitere Chat-Call:
+```json
+{"error": {"message": "Budget überschritten (Tag: $5.10/$5.00, Monat: $41.70/$100.00) — Hard-Stop aktiv", "type": "budget_exceeded", "code": "budget_exceeded"}}
+```
+
 ### GET /api/help
 ```bash
 curl -s http://localhost:9080/api/help
@@ -556,7 +668,7 @@ print(resp.choices[0].message.content)
 
 ## Modelle
 
-Modelle werden beim Serverstart dynamisch von den Providern geladen (~89 Modelle).
+Modelle werden beim Serverstart dynamisch von den Providern geladen (~177 Modelle).
 Aktuelle Liste:
 ```bash
 curl -s http://localhost:9080/v1/models | jq '.data[].id'
@@ -564,14 +676,52 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 
 **Beispiele:**
 
-| Shortcode | Modell | Provider |
-|-----------|--------|----------|
-| `gpt41` | gpt-4.1 | Mammouth |
-| `gpt4o` | gpt-4o | Mammouth |
-| `cl46-s` | claude-sonnet-4-6 | Mammouth |
-| `kimi` | kimi-k2.5 | Moonshot |
-| `glm51` | glm-5.1 | ZAI |
-| `ollama-gemma3` | gemma3:latest | Ollama (lokal) |
+| Shortcode | Modell | Provider | Code |
+|-----------|--------|----------|------|
+| `gpt41` | gpt-4.1 | mammouth | `mammo` |
+| `gpt4o` | gpt-4o | mammouth | `mammo` |
+| `cl46-s` | claude-sonnet-4-6 | mammouth | `mammo` |
+| `kimi` | kimi-k2.5 | moonshot | `moons` |
+| `glm51` | glm-5.1 | zai | `zai__` |
+| `ollama-gemma3` | gemma3:latest | ollama | `ollam` |
+
+### Provider-Kennzeichnung
+
+Welcher Provider hinter einem Shortcode steckt, ist oft nicht am Namen
+ablesbar (`glm51` → zai, `kimi` → moonshot, `ci-cl45-s` → cheaperinference
+liefert eigentlich Claude...). Mehrere Wege, das ohne Rätselraten
+herauszufinden:
+
+1. **`sigoE -l`** — CLI-Übersicht, nach Provider gruppiert, jede Gruppe
+   mit ihrem Code im Header:
+   ```
+   --- mammouth [mammo] ---
+   Modell               Shortcode      Input$/M  Output$/M
+   ...
+   --- zai [zai__] ---
+   ...
+   ```
+2. **`sigoE -i <shortcode>`** — Einzel-Lookup, zeigt `Provider: zai [zai__]`
+   direkt in der Modell-Detailausgabe.
+3. **`GET /api/shortlist`** — dieselbe Info programmatisch für Skripte/Tools
+   (siehe oben). `GET /api/models` und `GET /v1/models` führen den
+   Provider ebenfalls mit (`provider`/`provider_code` bzw. `owned_by`).
+
+Alle vier Wege nutzen intern dieselbe Erkennung
+(`sigoengine.ResolveProvider`, Endpoint zuerst, Namens-Heuristik als
+Fallback) — keine Abweichungen zwischen CLI und API.
+
+**5-Zeichen-Provider-Codes** (fest, kürzere mit `_` aufgefüllt, längere
+abgeschnitten — Tabellen bleiben so immer exakt ausgerichtet):
+
+| Provider | Code |
+|----------|------|
+| `mammouth` | `mammo` |
+| `moonshot` | `moons` |
+| `zai` | `zai__` |
+| `longcat` | `longc` |
+| `cheaperinference` | `cheap` |
+| `ollama` | `ollam` |
 
 ## Ollama (lokale LLMs)
 
