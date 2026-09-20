@@ -152,9 +152,9 @@ func TestAssignModel_CollisionAppendsNumericSuffix(t *testing.T) {
 	if first.Shortcode == second.Shortcode {
 		t.Fatalf("Kollision nicht aufgelöst: beide Modelle bekamen %q", first.Shortcode)
 	}
-	wantSecond := first.Shortcode + "-2"
+	wantSecond := first.Shortcode + ".2"
 	if second.Shortcode != wantSecond {
-		t.Errorf("second.Shortcode = %q, erwartet %q (erste Kollision -> Suffix -2)", second.Shortcode, wantSecond)
+		t.Errorf("second.Shortcode = %q, erwartet %q (erste Kollision -> Suffix .2)", second.Shortcode, wantSecond)
 	}
 }
 

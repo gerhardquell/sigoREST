@@ -267,7 +267,7 @@ func (r *IDRegistry) AssignModel(provider, upstreamID string) (ModelEntry, error
 		if !taken {
 			break
 		}
-		shortcode = fmt.Sprintf("%s-%d", base, suffix)
+		shortcode = fmt.Sprintf("%s.%d", base, suffix)
 	}
 
 	now := time.Now()
