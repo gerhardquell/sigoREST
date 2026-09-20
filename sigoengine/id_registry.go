@@ -217,3 +217,75 @@ func (r *IDRegistry) getModelLocked(provider, upstreamID string) (*ModelEntry, e
 	}
 	return entry, nil
 }
+
+// **********************************************************************
+// Modell-Shortcode-Verwaltung (Task 3+)
+
+// AssignModel liefert den Registry-Eintrag für (provider, upstreamID):
+// existiert er aktiv -> unverändert zurückgeben; existiert er retired ->
+// reaktivieren (gleicher Shortcode, miss_streak=0, retired_at=NULL);
+// existiert er nicht -> neu anlegen mit einmalig vergebenem Shortcode.
+func (r *IDRegistry) AssignModel(provider, upstreamID string) (ModelEntry, error) {
+	if r == nil || r.db == nil {
+		return ModelEntry{}, fmt.Errorf("id_registry: registry nicht geöffnet")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	providerCode, err := r.providerCodeLocked(provider)
+	if err != nil {
+		return ModelEntry{}, err
+	}
+
+	existing, err := r.getModelLocked(provider, upstreamID)
+	if err != nil {
+		return ModelEntry{}, err
+	}
+	if existing != nil {
+		if existing.RetiredAt == nil {
+			return *existing, nil
+		}
+		if _, err := r.db.Exec(
+			`UPDATE models SET retired_at = NULL, miss_streak = 0 WHERE provider = ? AND upstream_id = ?`,
+			provider, upstreamID,
+		); err != nil {
+			return ModelEntry{}, fmt.Errorf("id_registry: reaktivieren fehlgeschlagen: %w", err)
+		}
+		existing.RetiredAt = nil
+		existing.MissStreak = 0
+		return *existing, nil
+	}
+
+	semantic := GenerateShortcode(upstreamID, nil)
+	base := providerCode + "-" + semantic
+	shortcode := base
+	for suffix := 2; ; suffix++ {
+		taken, err := r.shortcodeTakenLocked(shortcode)
+		if err != nil {
+			return ModelEntry{}, err
+		}
+		if !taken {
+			break
+		}
+		shortcode = fmt.Sprintf("%s-%d", base, suffix)
+	}
+
+	now := time.Now()
+	if _, err := r.db.Exec(
+		`INSERT INTO models (provider, upstream_id, shortcode, assigned_at, retired_at, miss_streak)
+		 VALUES (?, ?, ?, ?, NULL, 0)`,
+		provider, upstreamID, shortcode, now.Unix(),
+	); err != nil {
+		return ModelEntry{}, fmt.Errorf("id_registry: modell anlegen fehlgeschlagen: %w", err)
+	}
+	return ModelEntry{Provider: provider, UpstreamID: upstreamID, Shortcode: shortcode, AssignedAt: now}, nil
+}
+
+func (r *IDRegistry) shortcodeTakenLocked(shortcode string) (bool, error) {
+	var count int
+	err := r.db.QueryRow(`SELECT COUNT(*) FROM models WHERE shortcode = ?`, shortcode).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("id_registry: shortcode-check fehlgeschlagen: %w", err)
+	}
+	return count > 0, nil
+}
