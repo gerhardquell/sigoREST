@@ -189,3 +189,115 @@ func TestAssignModel_ReappearedRetiredModelReactivatesSameShortcode(t *testing.T
 		t.Errorf("miss_streak = %d, erwartet 0 nach Reaktivierung", reactivated.MissStreak)
 	}
 }
+
+// **********************************************************************
+// Sync + Retire-Logik Tests (Task 4)
+
+func TestSyncProvider_PresentModelKeepsMissStreakZero(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	entries, err := r.SyncProvider("zai", []string{"glm-4.5"})
+	if err != nil {
+		t.Fatalf("SyncProvider: %v", err)
+	}
+	if _, ok := entries["glm-4.5"]; !ok {
+		t.Fatal("glm-4.5 fehlt im Sync-Ergebnis")
+	}
+
+	entry, err := r.getModelLocked("zai", "glm-4.5")
+	if err != nil || entry == nil {
+		t.Fatalf("getModelLocked: %v, entry=%v", err, entry)
+	}
+	if entry.MissStreak != 0 {
+		t.Errorf("miss_streak = %d, erwartet 0", entry.MissStreak)
+	}
+}
+
+func TestSyncProvider_MissingModelIncrementsStreakWithoutRetiring(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		t.Fatalf("SyncProvider (1): %v", err)
+	}
+	// Zweiter und dritter Sync ohne glm-4.5 in der Live-Liste.
+	if _, err := r.SyncProvider("zai", []string{}); err != nil {
+		t.Fatalf("SyncProvider (2): %v", err)
+	}
+
+	entry, err := r.getModelLocked("zai", "glm-4.5")
+	if err != nil || entry == nil {
+		t.Fatalf("getModelLocked: %v, entry=%v", err, entry)
+	}
+	if entry.MissStreak != 1 {
+		t.Errorf("miss_streak = %d, erwartet 1", entry.MissStreak)
+	}
+	if entry.RetiredAt != nil {
+		t.Error("Modell darf nach nur einem Miss noch nicht retired sein")
+	}
+}
+
+func TestSyncProvider_RetiresAfterThreeConsecutiveMisses(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		t.Fatalf("SyncProvider (initial): %v", err)
+	}
+	for i := 0; i < retireThreshold; i++ {
+		if _, err := r.SyncProvider("zai", []string{}); err != nil {
+			t.Fatalf("SyncProvider (miss %d): %v", i, err)
+		}
+	}
+
+	entry, err := r.getModelLocked("zai", "glm-4.5")
+	if err != nil || entry == nil {
+		t.Fatalf("getModelLocked: %v, entry=%v", err, entry)
+	}
+	if entry.RetiredAt == nil {
+		t.Fatal("Modell sollte nach 3 aufeinanderfolgenden Misses retired sein")
+	}
+}
+
+func TestSyncProvider_ReappearingModelResetsStreakViaAssignModel(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		t.Fatalf("SyncProvider (initial): %v", err)
+	}
+	if _, err := r.SyncProvider("zai", []string{}); err != nil {
+		t.Fatalf("SyncProvider (miss): %v", err)
+	}
+	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		t.Fatalf("SyncProvider (reappear): %v", err)
+	}
+
+	entry, err := r.getModelLocked("zai", "glm-4.5")
+	if err != nil || entry == nil {
+		t.Fatalf("getModelLocked: %v, entry=%v", err, entry)
+	}
+	if entry.MissStreak != 0 {
+		t.Errorf("miss_streak = %d, erwartet 0 nach Wiederauftauchen", entry.MissStreak)
+	}
+}
+
+func TestSyncProvider_DoesNotTouchOtherProviders(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		t.Fatalf("SyncProvider(zai): %v", err)
+	}
+	if _, err := r.SyncProvider("longcat", []string{"longcat-flash"}); err != nil {
+		t.Fatalf("SyncProvider(longcat): %v", err)
+	}
+	// Zweiter zai-Sync ohne glm-4.5 darf longcat-flash nicht anfassen.
+	if _, err := r.SyncProvider("zai", []string{}); err != nil {
+		t.Fatalf("SyncProvider(zai, leer): %v", err)
+	}
+
+	longcatEntry, err := r.getModelLocked("longcat", "longcat-flash")
+	if err != nil || longcatEntry == nil {
+		t.Fatalf("getModelLocked(longcat): %v, entry=%v", err, longcatEntry)
+	}
+	if longcatEntry.MissStreak != 0 {
+		t.Errorf("longcat-flash miss_streak = %d, erwartet 0 (unberührt)", longcatEntry.MissStreak)
+	}
+}

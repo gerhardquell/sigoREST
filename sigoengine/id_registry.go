@@ -289,3 +289,95 @@ func (r *IDRegistry) shortcodeTakenLocked(shortcode string) (bool, error) {
 	}
 	return count > 0, nil
 }
+
+// **********************************************************************
+// Sync + Retire-Logik (Task 4+)
+
+// SyncProvider gleicht die Live-Modell-Liste eines Providers mit der
+// Registry ab. Nur bei einem ERFOLGREICHEN Fetch aufrufen — bei einem
+// fehlgeschlagenen Fetch (Netzwerkfehler) diese Funktion einfach nicht
+// aufrufen, damit miss_streak unverändert bleibt (schützt vor der
+// dokumentierten ZAI/Longcat-Fallback-Asymmetrie).
+func (r *IDRegistry) SyncProvider(provider string, seenUpstreamIDs []string) (map[string]ModelEntry, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("id_registry: registry nicht geöffnet")
+	}
+
+	result := make(map[string]ModelEntry, len(seenUpstreamIDs))
+	seen := make(map[string]bool, len(seenUpstreamIDs))
+	for _, id := range seenUpstreamIDs {
+		seen[id] = true
+		entry, err := r.AssignModel(provider, id)
+		if err != nil {
+			return nil, err
+		}
+		result[id] = entry
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Resette miss_streak zu 0 für alle sichtbaren Modelle (falls sie > 0 waren
+	// von früheren Syncs). Das geschieht nach AssignModel, um sicherzustellen,
+	// dass wiederaufgetauchte Modelle wieder auf 0 zurückgesetzt werden.
+	for id := range seen {
+		if _, err := r.db.Exec(
+			`UPDATE models SET miss_streak = 0 WHERE provider = ? AND upstream_id = ?`,
+			provider, id,
+		); err != nil {
+			return nil, fmt.Errorf("id_registry: miss-streak-reset fehlgeschlagen: %w", err)
+		}
+	}
+
+	rows, err := r.db.Query(
+		`SELECT upstream_id, miss_streak, retired_at FROM models WHERE provider = ?`,
+		provider,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("id_registry: sync-scan fehlgeschlagen: %w", err)
+	}
+	type missUpdate struct {
+		id      string
+		streak  int
+		retired bool
+	}
+	var updates []missUpdate
+	for rows.Next() {
+		var id string
+		var missStreak int
+		var retiredAt sql.NullInt64
+		if err := rows.Scan(&id, &missStreak, &retiredAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("id_registry: sync-scan-zeile fehlgeschlagen: %w", err)
+		}
+		if seen[id] || retiredAt.Valid {
+			continue
+		}
+		newStreak := missStreak + 1
+		updates = append(updates, missUpdate{id: id, streak: newStreak, retired: newStreak >= retireThreshold})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("id_registry: sync-scan-iteration fehlgeschlagen: %w", err)
+	}
+
+	now := time.Now().Unix()
+	for _, u := range updates {
+		if u.retired {
+			if _, err := r.db.Exec(
+				`UPDATE models SET retired_at = ?, miss_streak = ? WHERE provider = ? AND upstream_id = ?`,
+				now, u.streak, provider, u.id,
+			); err != nil {
+				return nil, fmt.Errorf("id_registry: retire-update fehlgeschlagen: %w", err)
+			}
+		} else {
+			if _, err := r.db.Exec(
+				`UPDATE models SET miss_streak = ? WHERE provider = ? AND upstream_id = ?`,
+				u.streak, provider, u.id,
+			); err != nil {
+				return nil, fmt.Errorf("id_registry: miss-streak-update fehlgeschlagen: %w", err)
+			}
+		}
+	}
+	return result, nil
+}
