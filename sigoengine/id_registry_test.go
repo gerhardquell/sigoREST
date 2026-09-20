@@ -1,6 +1,7 @@
 package sigoengine
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -299,5 +300,90 @@ func TestSyncProvider_DoesNotTouchOtherProviders(t *testing.T) {
 	}
 	if longcatEntry.MissStreak != 0 {
 		t.Errorf("longcat-flash miss_streak = %d, erwartet 0 (unberührt)", longcatEntry.MissStreak)
+	}
+}
+
+// **********************************************************************
+// Shortcode-Auflösung Tests (Task 5)
+
+func TestResolveShortcode_ExactMatchNoChannel(t *testing.T) {
+	r := newTestIDRegistry(t)
+	assigned, err := r.AssignModel("zai", "glm-4.5")
+	if err != nil {
+		t.Fatalf("AssignModel: %v", err)
+	}
+
+	entry, channel, err := r.ResolveShortcode(assigned.Shortcode)
+	if err != nil {
+		t.Fatalf("ResolveShortcode: %v", err)
+	}
+	if channel != "" {
+		t.Errorf("channel = %q, erwartet leer (Default)", channel)
+	}
+	if entry.UpstreamID != "glm-4.5" {
+		t.Errorf("UpstreamID = %q, erwartet glm-4.5", entry.UpstreamID)
+	}
+}
+
+func TestResolveShortcode_ChannelSuffixParsed(t *testing.T) {
+	r := newTestIDRegistry(t)
+	assigned, err := r.AssignModel("zai", "glm-4.5")
+	if err != nil {
+		t.Fatalf("AssignModel: %v", err)
+	}
+
+	entry, channel, err := r.ResolveShortcode(assigned.Shortcode + "-2")
+	if err != nil {
+		t.Fatalf("ResolveShortcode: %v", err)
+	}
+	if channel != "2" {
+		t.Errorf("channel = %q, erwartet '2'", channel)
+	}
+	if entry.UpstreamID != "glm-4.5" {
+		t.Errorf("UpstreamID = %q, erwartet glm-4.5", entry.UpstreamID)
+	}
+}
+
+func TestResolveShortcode_CaseInsensitive(t *testing.T) {
+	r := newTestIDRegistry(t)
+	assigned, err := r.AssignModel("zai", "glm-4.5")
+	if err != nil {
+		t.Fatalf("AssignModel: %v", err)
+	}
+
+	_, _, err = r.ResolveShortcode(strings.ToUpper(assigned.Shortcode))
+	if err != nil {
+		t.Fatalf("ResolveShortcode (uppercase): %v", err)
+	}
+}
+
+func TestResolveShortcode_NotFound(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	_, _, err := r.ResolveShortcode("does-not-exist")
+	if !errors.Is(err, ErrShortcodeNotFound) {
+		t.Errorf("err = %v, erwartet ErrShortcodeNotFound", err)
+	}
+}
+
+func TestResolveShortcode_RetiredEntryStillResolves(t *testing.T) {
+	r := newTestIDRegistry(t)
+	assigned, err := r.AssignModel("zai", "glm-4.5")
+	if err != nil {
+		t.Fatalf("AssignModel: %v", err)
+	}
+	if _, err := r.db.Exec(
+		`UPDATE models SET retired_at = ? WHERE provider = ? AND upstream_id = ?`,
+		time.Now().Unix(), "zai", "glm-4.5",
+	); err != nil {
+		t.Fatalf("retired-Setup fehlgeschlagen: %v", err)
+	}
+
+	entry, _, err := r.ResolveShortcode(assigned.Shortcode)
+	if err != nil {
+		t.Fatalf("ResolveShortcode: %v", err)
+	}
+	if entry.RetiredAt == nil {
+		t.Error("erwarte RetiredAt gesetzt — Aufrufer entscheidet über Fehlerbehandlung")
 	}
 }

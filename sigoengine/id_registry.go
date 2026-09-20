@@ -381,3 +381,80 @@ func (r *IDRegistry) SyncProvider(provider string, seenUpstreamIDs []string) (ma
 	}
 	return result, nil
 }
+
+// **********************************************************************
+// Shortcode-Auflösung (Task 5)
+
+// ResolveShortcode löst einen Shortcode auf, optional mit angehängtem
+// Kanal-Suffix ("<shortcode>-<kanal>", z.B. "zai-glm45-2"). Reihenfolge
+// wichtig: zuerst exakter Treffer (Default-Kanal), erst danach der
+// Versuch, das letzte "-"-Segment als rein numerischen Kanal abzutrennen
+// — Varianten-Suffixe aus GenerateShortcode sind nie rein numerisch
+// (Buchstaben-Abkürzungen bzw. Cutter-Code mit führendem Buchstaben),
+// daher ist die Trennung eindeutig.
+func (r *IDRegistry) ResolveShortcode(input string) (ModelEntry, string, error) {
+	if r == nil || r.db == nil {
+		return ModelEntry{}, "", ErrShortcodeNotFound
+	}
+	lower := strings.ToLower(input)
+
+	if entry, err := r.getByShortcodeLocked(lower); err == nil {
+		return entry, "", nil
+	} else if !errors.Is(err, ErrShortcodeNotFound) {
+		return ModelEntry{}, "", err
+	}
+
+	idx := strings.LastIndex(lower, "-")
+	if idx < 0 {
+		return ModelEntry{}, "", ErrShortcodeNotFound
+	}
+	base, channel := lower[:idx], lower[idx+1:]
+	if !isChannelSuffix(channel) {
+		return ModelEntry{}, "", ErrShortcodeNotFound
+	}
+	entry, err := r.getByShortcodeLocked(base)
+	if err != nil {
+		return ModelEntry{}, "", err
+	}
+	return entry, channel, nil
+}
+
+func (r *IDRegistry) getByShortcodeLocked(shortcode string) (ModelEntry, error) {
+	row := r.db.QueryRow(
+		`SELECT provider, upstream_id, assigned_at, retired_at, miss_streak FROM models WHERE shortcode = ?`,
+		shortcode,
+	)
+	var provider, upstreamID string
+	var assignedAt int64
+	var retiredAt sql.NullInt64
+	var missStreak int
+	err := row.Scan(&provider, &upstreamID, &assignedAt, &retiredAt, &missStreak)
+	if err == sql.ErrNoRows {
+		return ModelEntry{}, ErrShortcodeNotFound
+	}
+	if err != nil {
+		return ModelEntry{}, fmt.Errorf("id_registry: shortcode lesen fehlgeschlagen: %w", err)
+	}
+	entry := ModelEntry{Provider: provider, UpstreamID: upstreamID, Shortcode: shortcode, AssignedAt: time.Unix(assignedAt, 0), MissStreak: missStreak}
+	if retiredAt.Valid {
+		t := time.Unix(retiredAt.Int64, 0)
+		entry.RetiredAt = &t
+	}
+	return entry, nil
+}
+
+// isChannelSuffix prüft, ob s ausschließlich aus Ziffern besteht (Kanal-
+// Nummer). Bewusst eigenständig statt der vorhandenen isDigitOnly aus
+// shortcode.go, die zusätzlich '.' erlaubt (für Versionsnummern gedacht,
+// hier fehl am Platz).
+func isChannelSuffix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
