@@ -49,3 +49,6 @@ test-translator
 
 # CodeGraph index — local to each machine, not for committing
 .codegraph/
+
+# Git worktrees for isolated feature work (SDD/superpowers)
+/.worktrees/
