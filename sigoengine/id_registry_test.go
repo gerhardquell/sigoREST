@@ -101,7 +101,7 @@ func TestProviderCode_CollisionUsesCutterFallback(t *testing.T) {
 func TestAssignModel_NewCreatesShortcode(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	entry, err := r.AssignModel("zai", "glm-4.5")
+	entry, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel: %v", err)
 	}
@@ -119,11 +119,11 @@ func TestAssignModel_NewCreatesShortcode(t *testing.T) {
 func TestAssignModel_SameModelReturnsSameShortcode(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	first, err := r.AssignModel("zai", "glm-4.5")
+	first, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel (1): %v", err)
 	}
-	second, err := r.AssignModel("zai", "glm-4.5")
+	second, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel (2): %v", err)
 	}
@@ -141,11 +141,11 @@ func TestAssignModel_CollisionAppendsNumericSuffix(t *testing.T) {
 	// semantischen Code (GenerateShortcode lowercased modelID intern
 	// als allerersten Schritt) -- das erzwingt die Kollision deterministisch,
 	// ohne auf Zufallstreffer in der Cutter-Sanborn-Tabelle angewiesen zu sein.
-	first, err := r.AssignModel("zai", "glm-4.5")
+	first, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel(glm-4.5): %v", err)
 	}
-	second, err := r.AssignModel("zai", "GLM-4.5")
+	second, err := r.AssignModel("zai", "GLM-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel(GLM-4.5): %v", err)
 	}
@@ -158,10 +158,65 @@ func TestAssignModel_CollisionAppendsNumericSuffix(t *testing.T) {
 	}
 }
 
+// TestSyncProvider_SemanticHintKeepsCheaperinferenceCodesDistinct ist der
+// Regressionstest für den Whole-Branch-Review-Befund: AssignModel berechnete
+// den semantischen Code früher selbst per GenerateShortcode(upstreamID, nil).
+// Bei cheaperinference beginnen ALLE IDs mit "ci-", das in familyPrefixes
+// fehlt — GenerateShortcode fiel damit auf cutterCode über die ganze ID
+// zurück und lieferte für jedes der ~60 Modelle denselben Code ("c01"). Die
+// Kollisionsschleife hängte nur ".2" ... ".60" an: eindeutig, aber
+// bedeutungslos, und per assign-once für immer eingefroren.
+//
+// Hier werden die Hints exakt so berechnet wie in
+// FetchCheaperinferenceModels: GenerateShortcode auf der unpräfixten ID mit
+// einer über die Schleife mitlaufenden used-Map. Geprüft wird nicht nur
+// Eindeutigkeit (das tat die alte Kollisionsschleife auch), sondern dass die
+// Codes verschiedene BASEN haben — also keine Familie
+// "che-c01", "che-c01.2", "che-c01.3".
+func TestSyncProvider_SemanticHintKeepsCheaperinferenceCodesDistinct(t *testing.T) {
+	r := newTestIDRegistry(t)
+
+	upstreamIDs := []string{"ci-claude-opus-5", "ci-gpt-5", "ci-gemini-3-pro"}
+	used := make(map[string]bool)
+	seeds := make([]ProviderModelSeed, 0, len(upstreamIDs))
+	for _, id := range upstreamIDs {
+		seeds = append(seeds, ProviderModelSeed{
+			UpstreamID:   id,
+			SemanticHint: GenerateShortcode(strings.TrimPrefix(id, "ci-"), used),
+		})
+	}
+
+	entries, err := r.SyncProvider("cheaperinference", seeds)
+	if err != nil {
+		t.Fatalf("SyncProvider: %v", err)
+	}
+	if len(entries) != len(upstreamIDs) {
+		t.Fatalf("Sync-Ergebnis hat %d Einträge, erwartet %d", len(entries), len(upstreamIDs))
+	}
+
+	bases := make(map[string]string, len(upstreamIDs))
+	for _, id := range upstreamIDs {
+		entry, ok := entries[id]
+		if !ok {
+			t.Fatalf("%s fehlt im Sync-Ergebnis", id)
+		}
+		if strings.Contains(entry.Shortcode, ".") {
+			t.Errorf("%s bekam einen Kollisions-Suffix (%q) — der semantische Hint wurde nicht benutzt",
+				id, entry.Shortcode)
+		}
+		base, _, _ := strings.Cut(entry.Shortcode, ".")
+		if other, clash := bases[base]; clash {
+			t.Errorf("%s und %s teilen sich die Shortcode-Basis %q — semantische Codes sind nicht unterscheidbar",
+				other, id, base)
+		}
+		bases[base] = id
+	}
+}
+
 func TestAssignModel_ReappearedRetiredModelReactivatesSameShortcode(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	entry, err := r.AssignModel("zai", "glm-4.5")
+	entry, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel: %v", err)
 	}
@@ -176,7 +231,7 @@ func TestAssignModel_ReappearedRetiredModelReactivatesSameShortcode(t *testing.T
 		t.Fatalf("retired-Setup fehlgeschlagen: %v", err)
 	}
 
-	reactivated, err := r.AssignModel("zai", "glm-4.5")
+	reactivated, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel (Reaktivierung): %v", err)
 	}
@@ -197,7 +252,7 @@ func TestAssignModel_ReappearedRetiredModelReactivatesSameShortcode(t *testing.T
 func TestSyncProvider_PresentModelKeepsMissStreakZero(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	entries, err := r.SyncProvider("zai", []string{"glm-4.5"})
+	entries, err := r.SyncProvider("zai", []ProviderModelSeed{{UpstreamID: "glm-4.5"}})
 	if err != nil {
 		t.Fatalf("SyncProvider: %v", err)
 	}
@@ -217,11 +272,11 @@ func TestSyncProvider_PresentModelKeepsMissStreakZero(t *testing.T) {
 func TestSyncProvider_MissingModelIncrementsStreakWithoutRetiring(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+	if _, err := r.SyncProvider("zai", []ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 		t.Fatalf("SyncProvider (1): %v", err)
 	}
 	// Zweiter und dritter Sync ohne glm-4.5 in der Live-Liste.
-	if _, err := r.SyncProvider("zai", []string{}); err != nil {
+	if _, err := r.SyncProvider("zai", nil); err != nil {
 		t.Fatalf("SyncProvider (2): %v", err)
 	}
 
@@ -240,11 +295,11 @@ func TestSyncProvider_MissingModelIncrementsStreakWithoutRetiring(t *testing.T) 
 func TestSyncProvider_RetiresAfterThreeConsecutiveMisses(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+	if _, err := r.SyncProvider("zai", []ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 		t.Fatalf("SyncProvider (initial): %v", err)
 	}
 	for i := 0; i < retireThreshold; i++ {
-		if _, err := r.SyncProvider("zai", []string{}); err != nil {
+		if _, err := r.SyncProvider("zai", nil); err != nil {
 			t.Fatalf("SyncProvider (miss %d): %v", i, err)
 		}
 	}
@@ -261,13 +316,13 @@ func TestSyncProvider_RetiresAfterThreeConsecutiveMisses(t *testing.T) {
 func TestSyncProvider_ReappearingModelResetsStreakViaAssignModel(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+	if _, err := r.SyncProvider("zai", []ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 		t.Fatalf("SyncProvider (initial): %v", err)
 	}
-	if _, err := r.SyncProvider("zai", []string{}); err != nil {
+	if _, err := r.SyncProvider("zai", nil); err != nil {
 		t.Fatalf("SyncProvider (miss): %v", err)
 	}
-	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+	if _, err := r.SyncProvider("zai", []ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 		t.Fatalf("SyncProvider (reappear): %v", err)
 	}
 
@@ -283,14 +338,14 @@ func TestSyncProvider_ReappearingModelResetsStreakViaAssignModel(t *testing.T) {
 func TestSyncProvider_DoesNotTouchOtherProviders(t *testing.T) {
 	r := newTestIDRegistry(t)
 
-	if _, err := r.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+	if _, err := r.SyncProvider("zai", []ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 		t.Fatalf("SyncProvider(zai): %v", err)
 	}
-	if _, err := r.SyncProvider("longcat", []string{"longcat-flash"}); err != nil {
+	if _, err := r.SyncProvider("longcat", []ProviderModelSeed{{UpstreamID: "longcat-flash"}}); err != nil {
 		t.Fatalf("SyncProvider(longcat): %v", err)
 	}
 	// Zweiter zai-Sync ohne glm-4.5 darf longcat-flash nicht anfassen.
-	if _, err := r.SyncProvider("zai", []string{}); err != nil {
+	if _, err := r.SyncProvider("zai", nil); err != nil {
 		t.Fatalf("SyncProvider(zai, leer): %v", err)
 	}
 
@@ -308,7 +363,7 @@ func TestSyncProvider_DoesNotTouchOtherProviders(t *testing.T) {
 
 func TestResolveShortcode_ExactMatchNoChannel(t *testing.T) {
 	r := newTestIDRegistry(t)
-	assigned, err := r.AssignModel("zai", "glm-4.5")
+	assigned, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel: %v", err)
 	}
@@ -327,7 +382,7 @@ func TestResolveShortcode_ExactMatchNoChannel(t *testing.T) {
 
 func TestResolveShortcode_ChannelSuffixParsed(t *testing.T) {
 	r := newTestIDRegistry(t)
-	assigned, err := r.AssignModel("zai", "glm-4.5")
+	assigned, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel: %v", err)
 	}
@@ -346,7 +401,7 @@ func TestResolveShortcode_ChannelSuffixParsed(t *testing.T) {
 
 func TestResolveShortcode_CaseInsensitive(t *testing.T) {
 	r := newTestIDRegistry(t)
-	assigned, err := r.AssignModel("zai", "glm-4.5")
+	assigned, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel: %v", err)
 	}
@@ -368,7 +423,7 @@ func TestResolveShortcode_NotFound(t *testing.T) {
 
 func TestResolveShortcode_RetiredEntryStillResolves(t *testing.T) {
 	r := newTestIDRegistry(t)
-	assigned, err := r.AssignModel("zai", "glm-4.5")
+	assigned, err := r.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel: %v", err)
 	}

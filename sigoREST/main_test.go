@@ -332,21 +332,21 @@ func TestLookupModel_ChannelSuffixAndRetired(t *testing.T) {
 	t.Cleanup(func() { reg.Close() })
 	srv.idRegistry = reg
 
-	active, err := reg.AssignModel("zai", "glm-4.5")
+	active, err := reg.AssignModel("zai", "glm-4.5", "")
 	if err != nil {
 		t.Fatalf("AssignModel(active): %v", err)
 	}
 	srv.models["glm-4.5"] = ModelInfo{ID: "glm-4.5", Shortcode: active.Shortcode}
 
-	retired, err := reg.AssignModel("zai", "glm-4.4-old")
+	retired, err := reg.AssignModel("zai", "glm-4.4-old", "")
 	if err != nil {
 		t.Fatalf("AssignModel(retired): %v", err)
 	}
-	if _, err := reg.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+	if _, err := reg.SyncProvider("zai", []sigoengine.ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 		t.Fatalf("SyncProvider: %v", err)
 	}
 	for i := 0; i < 2; i++ { // insgesamt 3 Misses inkl. des Sync oben
-		if _, err := reg.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		if _, err := reg.SyncProvider("zai", []sigoengine.ProviderModelSeed{{UpstreamID: "glm-4.5"}}); err != nil {
 			t.Fatalf("SyncProvider (miss %d): %v", i, err)
 		}
 	}

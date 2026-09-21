@@ -101,6 +101,7 @@ sigorest/
 │   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
 │   ├── env.go                   #   Optionale ./env Datei
 │   ├── costdb.go                #   Kosten-Tracking (SQLite, WAL) + Budget-Check
+│   ├── id_registry.go           #   Persistente Shortcode-Registry (SQLite, assign-once)
 │   ├── provider_id.go           #   Kanonische Provider-Erkennung + 5-Zeichen-Code
 │   └── version.go               #   Zentrale Versions-Konstante
 ├── cmd/sigoE/main.go            # CLI-Wrapper
@@ -134,6 +135,10 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 | `OpenCostDB(dataDir)` | Öffnet/erstellt `costs.db` (SQLite, WAL), Schema-Migration |
 | `CostDB.RecordUsage/Summary/CheckBudget` | Kosten-Event schreiben, Zeitraum aggregieren, Budget prüfen |
 | `CalcCostUSD(inTok, outTok, inPrice, outPrice)` | Token→USD anhand Modell-Preisen ($/1M Tokens) |
+| `OpenIDRegistry(dataDir)` | Öffnet/erstellt `id_registry.db` (SQLite, WAL), Schema-Migration |
+| `IDRegistry.AssignModel(provider, upstreamID, hint)` | Einmalig vergebener Shortcode für ein Modell (assign-once, Hint = semantischer Code des Fetchers) |
+| `IDRegistry.SyncProvider(provider, seeds)` | Live-Liste abgleichen: Shortcodes vergeben, fehlende Modelle zählen/retiren |
+| `IDRegistry.ResolveShortcode(input)` | Shortcode → Eintrag + Kanal-Suffix (auch retired Modelle) |
 | `ResolveProvider(endpoint, modelID)` | Kanonische Provider-Erkennung (Endpoint zuerst, Namens-Heuristik als Fallback) |
 | `ProviderCode(provider)` | Normiert Provider-Namen auf festen 5-Zeichen-Code (`mammo`, `zai__`, ...) |
 
@@ -358,6 +363,56 @@ Sekunden-Tick liegen. Fix: `ceilUnix()` rundet `until` für die
 `Summary()`-Query auf die nächste volle Sekunde auf (Regressionstest:
 `TestSummary_IncludesEventFromSameInstantAsUntil`).
 
+### ID-/Shortcode-Registry (`sigoengine/id_registry.go`)
+
+Persistente SQLite-Datenbank (`modernc.org/sqlite`, WAL) unter
+`<data-dir>/id_registry.db`. Sie vergibt jedem Provider ein
+3-Zeichen-Kürzel und jedem `(provider, upstream_id)`-Paar **einmalig**
+einen Shortcode im Format `{provider3}-{semanticCode}` (z.B.
+`zai-glm45`, `mam-cl45-s`, optional Kanal-Suffix `-2`). Einmal vergeben,
+bleibt ein Shortcode für immer bei seinem Modell und wird nie
+wiederverwendet — das löst das Problem, dass der Server seine Modelle
+bei jedem Boot dynamisch von Live-Provider-APIs lädt und pro Boot neu
+berechnete Kürzel sich bei jeder Änderung der Live-Liste verschoben.
+
+- **Semantischer Code kommt vom Fetcher, nicht aus einer Neuberechnung:**
+  `SyncProvider` bekommt pro Modell einen `ProviderModelSeed` mit
+  `SemanticHint` (= `Model.Shortcode` aus `provider_fetchers.go`, bei
+  cheaperinference ohne das `ci-`-Präfix). Die Fetcher berechnen ihre
+  Codes mit einer fetch-weiten `used`-Map und liefern deshalb innerhalb
+  eines Providers unterscheidbare Kürzel. Eine blinde Neuberechnung pro
+  ID (`GenerateShortcode(id, nil)`) tut das **nicht**: IDs ohne
+  Familien-Präfix (`ci-...`, `LongCat-...`) fallen auf `cutterCode` über
+  die ganze ID zurück und liefern für alle Modelle denselben Code.
+- **Kollisions-Suffix ist `.2`/`.3`**, nicht `-2` — `-` trennt den Kanal
+  ab, `zai-glm45-2` wäre sonst zweideutig.
+- **Retire nach 3 aufeinanderfolgenden ERFOLGREICHEN Fetches ohne das
+  Modell** (`miss_streak`); ein fehlgeschlagener Fetch lässt den Zähler
+  unangetastet. Retired Modelle bleiben auflösbar und werden mit
+  **HTTP 410** abgelehnt (kein stiller Fallback auf ein anderes Modell).
+  Taucht ein retired Modell wieder auf, bekommt es seinen alten
+  Shortcode zurück.
+- **Nil-safe wie `costDB`:** schlägt `OpenIDRegistry` beim Start fehl,
+  läuft der Server mit pro Boot berechneten Shortcodes weiter. Scheitert
+  die Zuweisung für ein einzelnes Modell, wird nur dieses Modell
+  übersprungen (`LogWarn`) — nicht der ganze Provider-Sync.
+
+**Zwei operative Eigenheiten, die man kennen sollte:**
+
+1. **Shortcodes ändern sich einmalig beim Upgrade.** Beim ersten Boot mit
+   dieser Version werden alle Kürzel neu vergeben: aus `glm46` wird
+   `zai-glm46`, aus `cl45-s` wird `mam-cl45-s`. Es gibt bewusst keine
+   Kompatibilitätsschicht — Clients (Skripte, `ANTHROPIC_BASE_URL`-Configs,
+   C++-Client) müssen `/api/shortcodes` einmal neu abrufen. Siehe
+   `TODO.md`, Abschnitt "Shortcode".
+2. **Retirement zählt Boots, nicht Fetch-Zyklen.** `SyncProvider` wird nur
+   aus `loadModelsFromProviders()` aufgerufen, und das passiert
+   ausschließlich beim Serverstart. Auf einem langlaufenden Deployment
+   braucht ein verschwundenes Modell also 3 **Neustarts** bis zum
+   Retire, nicht 3 Abrufe. Der HTTP-410-Pfad ist damit erreichbar, aber
+   in der Praxis träge. Bewusste Scope-Entscheidung (Boot-Sync statt
+   Hintergrund-Poller), kein Bug.
+
 ### Provider-Kennzeichnung (`sigoengine/provider_id.go`)
 
 Vorher: drei unabhängige, unterschiedlich vollständige
@@ -435,6 +490,7 @@ sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 - **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-/Longcat-Fallback-Liste (DNS-Race)
 - **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference)
 - **Kosten-DB**: `costs.db` (SQLite/WAL) im `-data-dir`; `modernc.org/sqlite` (pure Go) — kein CGO-Zwang im Build, bewusst analog zur Hermes-`state.db`-Entscheidung (lokaler Single-Process-Store, kein Netzwerk-Overhead)
+- **Shortcode-DB**: `id_registry.db` (SQLite/WAL) im `-data-dir`, gleicher Treiber wie `costs.db`; hält Provider-Kürzel und Modell-Shortcodes assign-once fest (nie wiederverwendet) — Details unter "ID-/Shortcode-Registry"
 - **Scope-Grenze**: sigoREST bleibt schlanker Proxy, kein Agent-Harness — bewusst kein Tool-Call-Repair o.ä.
 - **IPv6**: Geblockt (außer `::1` loopback)
 - **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start

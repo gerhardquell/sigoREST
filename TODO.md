@@ -38,7 +38,17 @@ jedem Boot, eine Positions-Nummer verschiebt sich bei jeder Änderung der
 Live-Liste. Ersetzt durch eine persistente SQLite-Registry mit
 assign-once Provider-/Modell-Kürzeln (Format `{provider3}-{semanticCode}
 [-{channel}]`, z.B. `zai-glm45-2`) — siehe Spec für Details.
-```
+
+**Achtung beim Upgrade (Breaking Change für Clients):** Beim ersten Boot
+mit dieser Version vergibt die Registry alle Shortcodes einmalig neu. Sie
+unterscheiden sich praktisch immer von den bisherigen, pro Boot
+berechneten: aus `glm46` wird `zai-glm46`, aus `cl45-s` wird `mam-cl45-s`.
+Es gibt bewusst keine Kompatibilitätsschicht und keine Alias-Tabelle für
+die alten Kürzel. Jeder Client, der Shortcodes fest verdrahtet hat
+(Skripte, `ANTHROPIC_BASE_URL`-Konfigurationen, der C++-Client), muss nach
+dem Upgrade einmal `/api/shortcodes` neu abrufen. Ab dann sind die Kürzel
+über Boots und Provider-Listen-Änderungen hinweg stabil — genau das ist
+der Zweck der Registry.
 
 ---
 

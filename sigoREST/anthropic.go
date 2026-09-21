@@ -406,9 +406,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
+	// lookupModel sperrt selbst (bis in die SQLite-Registry) — kein
+	// umschließendes s.mu.RLock hier.
 	lr, exists := s.lookupModel(req.Model)
-	s.mu.RUnlock()
 	if !exists {
 		writeAnthropicError(w, "not_found_error", fmt.Sprintf("Model '%s' nicht gefunden", req.Model), http.StatusNotFound)
 		return

@@ -82,7 +82,7 @@ CREATE TABLE providers (
 CREATE TABLE models (
   provider     TEXT NOT NULL,       -- FK auf providers.name
   upstream_id  TEXT NOT NULL,       -- Original-Modellname vom Provider
-  shortcode    TEXT UNIQUE NOT NULL, -- z.B. "zai-glm45" oder "zai-glm45-2"
+  shortcode    TEXT UNIQUE NOT NULL, -- z.B. "zai-glm45" oder "zai-glm45.2"
   assigned_at  INTEGER NOT NULL,
   retired_at   INTEGER,             -- NULL = aktiv
   miss_streak  INTEGER NOT NULL DEFAULT 0, -- aufeinanderfolgende erfolgreiche Fetches ohne dieses Modell
@@ -101,7 +101,9 @@ CREATE TABLE models (
 **Modell** (pro entdecktem `(provider, upstream_id)`):
 1. Existiert der Eintrag bereits **und ist aktiv** (`retired_at IS NULL`) → Shortcode unverändert übernehmen, `miss_streak = 0`.
 2. Existiert der Eintrag bereits **und ist retired** → Modell ist zurückgekehrt (identischer `upstream_id`, also garantiert dasselbe Modell, kein Fremd-Zugriff auf einen alten Code): `retired_at = NULL`, `miss_streak = 0`, Shortcode bleibt unverändert.
-3. Existiert der Eintrag nicht → semantischen Code via `GenerateShortcode(upstream_id)` berechnen, `shortcode = provider.code + "-" + semanticCode`. Bei `UNIQUE`-Kollision numerischen Suffix anhängen (`-2`, `-3`, ...) bis frei. `INSERT` mit `miss_streak = 0`, `retired_at = NULL`.
+3. Existiert der Eintrag nicht → semantischen Code übernehmen (der Fetcher hat ihn mit einer fetch-weiten `used`-Map berechnet; ohne Hint Fallback auf `GenerateShortcode(upstream_id)`), `shortcode = provider.code + "-" + semanticCode`. Bei `UNIQUE`-Kollision numerischen Suffix anhängen (`.2`, `.3`, ...) bis frei. `INSERT` mit `miss_streak = 0`, `retired_at = NULL`.
+
+> **Warum `.` und nicht `-` als Kollisions-Suffix (Commit `91b6a38`):** `-` trennt auch den Kanal ab (`{shortcode}-{channel}`, siehe "Shortcode-Format"), `zai-glm45-2` wäre damit zweideutig — "Kollisionsvariante 2" oder "Kanal 2". `GenerateShortcode` erzeugt nie einen Punkt, deshalb kann `.` niemals mit dem Kanal-Suffix-Parser kollidieren.
 
 **Retire-Erkennung** (nach jedem Fetch-Zyklus):
 - Provider-Fetch **erfolgreich** (kein Fehler) und ein zuvor bekanntes Modell fehlt in der aktuellen Liste → `miss_streak += 1`. Erreicht `miss_streak` einen Schwellwert (Vorschlag: 3 aufeinanderfolgende erfolgreiche Fetches ohne dieses Modell) → `retired_at = now`.

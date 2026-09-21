@@ -391,11 +391,23 @@ func loadModelsFromProviders(reg *sigoengine.IDRegistry) map[string]ModelInfo {
 
 		var entries map[string]sigoengine.ModelEntry
 		if reg != nil {
-			ids := make([]string, len(ms))
+			// Der Fetcher hat den semantischen Code bereits mit einer über
+			// den ganzen Fetch mitlaufenden used-Map berechnet — die
+			// Registry übernimmt ihn als Hint, statt ihn pro ID blind neu
+			// zu berechnen (das lieferte bei cheaperinference/Longcat für
+			// alle Modelle denselben Cutter-Code). Das "ci-"-Präfix von
+			// cheaperinference wird abgeschnitten: die Registry stellt dem
+			// Code ohnehin ihr 3-Zeichen-Provider-Kürzel voran ("che-"),
+			// sonst entstünde doppelt markiertes "che-ci-cl-o51".
+			// TrimPrefix ist für alle anderen Provider ein No-Op.
+			seeds := make([]sigoengine.ProviderModelSeed, len(ms))
 			for i, m := range ms {
-				ids[i] = m.ID
+				seeds[i] = sigoengine.ProviderModelSeed{
+					UpstreamID:   m.ID,
+					SemanticHint: strings.TrimPrefix(m.Shortcode, "ci-"),
+				}
 			}
-			entries, err = reg.SyncProvider(f.provider, ids)
+			entries, err = reg.SyncProvider(f.provider, seeds)
 			if err != nil {
 				sigoengine.LogWarn("ID-Registry-Sync fehlgeschlagen", map[string]interface{}{
 					"provider": f.provider, "error": err.Error(),
@@ -513,18 +525,16 @@ type lookupResult struct {
 	RetiredAt time.Time
 }
 
-// lookupModel sucht case-insensitiv nach ID (Map-Key) oder Shortcode.
-// Aufrufer muss s.mu (RLock) halten. Provider-Modell-IDs sind
+// lookupModelMemory sucht case-insensitiv nach ID (Map-Key) oder
+// Shortcode — ausschließlich in s.models, ohne Registry-Zugriff.
+// Aufrufer muss s.mu halten (Lock oder RLock). Provider-Modell-IDs sind
 // überwiegend lowercase; Sigil/CLI können aber andere Casing mitschicken
 // (z.B. "GLM-4.5"), die ansonsten am exakten Map-Key-Lookup scheitern
 // würden.
 //
-// Reihenfolge: (1) exakte ID, (2) exakter Shortcode aus s.models — beide
-// decken den aktiven Default-Kanal-Fall ohne Registry-Zugriff ab. Erst
-// danach (3) die persistente ID-Registry, die zusätzlich Shortcodes mit
-// Kanal-Suffix ("zai-glm45-2") und retired Modelle auflöst, welche per
-// Definition nicht mehr in s.models stehen.
-func (s *Server) lookupModel(query string) (lookupResult, bool) {
+// Reihenfolge: (1) exakte ID, (2) exakter Shortcode — beide decken den
+// aktiven Default-Kanal-Fall ab.
+func (s *Server) lookupModelMemory(query string) (lookupResult, bool) {
 	q := strings.ToLower(query)
 	for id, info := range s.models {
 		if strings.ToLower(id) == q {
@@ -536,11 +546,34 @@ func (s *Server) lookupModel(query string) (lookupResult, bool) {
 			return lookupResult{Info: info, ID: info.ID}, true
 		}
 	}
+	return lookupResult{}, false
+}
 
-	if s.idRegistry == nil {
+// lookupModel ist die vollständige Auflösung: erst der In-Memory-Teil
+// (lookupModelMemory), dann die persistente ID-Registry, die zusätzlich
+// Shortcodes mit Kanal-Suffix ("zai-glm45-2") und retired Modelle
+// auflöst, welche per Definition nicht mehr in s.models stehen.
+//
+// Diese Funktion nimmt s.mu SELBST (RLock) — Aufrufer dürfen den Lock
+// NICHT halten. Grund: die Registry-Abfrage geht auf Platte (SQLite mit
+// busy_timeout(5000)); würde sie unter dem server-weiten RWMutex laufen,
+// könnte ein langsamer DB-Zugriff bis zu 5s lang alle Reader blockieren
+// (Go's RWMutex lässt neue Reader hinter einem wartenden Writer
+// verhungern). Aufrufer, die den Lock bereits halten, nutzen
+// lookupModelMemory.
+func (s *Server) lookupModel(query string) (lookupResult, bool) {
+	s.mu.RLock()
+	if lr, ok := s.lookupModelMemory(query); ok {
+		s.mu.RUnlock()
+		return lr, true
+	}
+	reg := s.idRegistry
+	s.mu.RUnlock()
+
+	if reg == nil {
 		return lookupResult{}, false
 	}
-	entry, channel, err := s.idRegistry.ResolveShortcode(q)
+	entry, channel, err := reg.ResolveShortcode(strings.ToLower(query))
 	if err != nil {
 		return lookupResult{}, false
 	}
@@ -550,6 +583,9 @@ func (s *Server) lookupModel(query string) (lookupResult, bool) {
 		res.RetiredAt = *entry.RetiredAt
 		return res, true
 	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for id, info := range s.models {
 		if strings.ToLower(info.Shortcode) == entry.Shortcode {
 			res.Info = info
@@ -567,10 +603,9 @@ func (s *Server) lookupModel(query string) (lookupResult, bool) {
 // providerForModel returns the provider name for a given model ID/shortcode.
 // Delegiert an sigoengine.ResolveProvider (einzige kanonische Quelle,
 // geteilt mit sigoE-CLI und Kosten-Tracking).
+// Nimmt KEINEN Lock: lookupModel sperrt selbst (siehe dort).
 func (s *Server) providerForModel(modelID string) string {
-	s.mu.RLock()
 	lr, ok := s.lookupModel(modelID)
-	s.mu.RUnlock()
 	endpoint := ""
 	if ok {
 		endpoint = lr.Info.Endpoint
@@ -582,9 +617,13 @@ func (s *Server) providerForModel(modelID string) string {
 // s.mu bereits halten (z.B. handleModels/handleShortlist unter
 // "defer s.mu.RUnlock()") — vermeidet einen rekursiven RLock, den
 // Go's RWMutex nicht sicher garantiert (Deadlock-Risiko, wenn ein
-// Writer dazwischen wartet).
+// Writer dazwischen wartet). Nutzt deshalb lookupModelMemory und nicht
+// das selbst sperrende lookupModel. Das ist für diesen Pfad auch
+// inhaltlich richtig: hier werden ausschließlich bereits bekannte
+// Modelle aus s.models angezeigt, nie Kanal-Suffixe oder retired
+// Einträge aufgelöst.
 func (s *Server) providerForModelLocked(modelID string) string {
-	lr, ok := s.lookupModel(modelID)
+	lr, ok := s.lookupModelMemory(modelID)
 	endpoint := ""
 	if ok {
 		endpoint = lr.Info.Endpoint
@@ -679,12 +718,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Modell-Validierung (ID oder Shortcode, case-insensitiv)
 	modelID := req.Model
 
-	// Case-insensitiv nach ID oder Shortcode suchen
-	s.mu.RLock()
+	// Case-insensitiv nach ID oder Shortcode suchen. lookupModel sperrt
+	// selbst (kann bis in die SQLite-Registry laufen) — hier darf s.mu
+	// deshalb NICHT gehalten werden.
 	lr, exists := s.lookupModel(modelID)
 	if exists {
 		modelID = lr.ID
 	}
+
+	s.mu.RLock()
 	mem := s.memory
 	globalSystemPrompt := s.systemPrompt
 	s.mu.RUnlock()

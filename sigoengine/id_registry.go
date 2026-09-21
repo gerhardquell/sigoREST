@@ -46,6 +46,23 @@ type IDRegistry struct {
 	mu   sync.Mutex
 }
 
+// ProviderModelSeed verbindet eine Live-Upstream-Modell-ID mit dem
+// semantischen Shortcode-Bestandteil, den der Aufrufer für dieses Modell
+// bereits berechnet hat (typischerweise Model.Shortcode aus einem
+// Provider-Fetcher). Der Unterschied ist wesentlich: die Fetcher rufen
+// GenerateShortcode mit einer über den gesamten Fetch mitlaufenden
+// used-Map auf, ihre Codes sind daher innerhalb eines Providers
+// tatsächlich verschieden. Eine blinde Neuberechnung pro ID (used == nil)
+// ist das nicht — bei Providern ohne Familien-Präfix (cheaperinference,
+// unbekannte Longcat-Modelle) fällt GenerateShortcode auf cutterCode über
+// die ganze ID zurück und liefert für alle Modelle denselben Code.
+// Leerer SemanticHint fällt auf genau diese Neuberechnung in AssignModel
+// zurück.
+type ProviderModelSeed struct {
+	UpstreamID   string
+	SemanticHint string
+}
+
 // ErrShortcodeNotFound signalisiert, dass ein Shortcode (auch mit
 // Kanal-Suffix) in der Registry nicht gefunden wurde.
 var ErrShortcodeNotFound = errors.New("id_registry: shortcode not found")
@@ -123,56 +140,80 @@ func (r *IDRegistry) migrate() error {
 // Provider-Kürzel-Verwaltung (Task 2+)
 
 func (r *IDRegistry) providerCodeLocked(provider string) (string, error) {
-	var code string
-	err := r.db.QueryRow(`SELECT code FROM providers WHERE name = ?`, provider).Scan(&code)
-	if err == nil {
-		return code, nil
-	}
-	if err != sql.ErrNoRows {
-		return "", fmt.Errorf("id_registry: provider-code lesen fehlgeschlagen: %w", err)
-	}
-
-	candidate := normalizeCode(provider, 3)
-	taken, err := r.providerCodeTakenLocked(candidate)
+	code, err := r.lookupProviderCodeLocked(provider)
 	if err != nil {
 		return "", err
 	}
-	if taken {
-		candidate = normalizeCode(cutterCode(provider), 3)
-		taken, err = r.providerCodeTakenLocked(candidate)
+	if code != "" {
+		return code, nil
+	}
+
+	// Kandidaten in Prioritätsreihenfolge: 3-Zeichen-Präfix, danach der
+	// Cutter-Sanborn-Code, danach dessen letzte Stelle numerisch
+	// durchprobiert (extrem unwahrscheinlicher Doppel-Kollisionsfall).
+	cutter := normalizeCode(cutterCode(provider), 3)
+	candidates := []string{normalizeCode(provider, 3), cutter}
+	for i := 0; i < 10; i++ {
+		candidates = append(candidates, fmt.Sprintf("%s%d", cutter[:2], i))
+	}
+
+	for _, candidate := range candidates {
+		taken, err := r.providerCodeTakenLocked(candidate)
 		if err != nil {
 			return "", err
 		}
 		if taken {
-			// Extrem unwahrscheinlicher Doppel-Kollisionsfall: letzte Stelle
-			// numerisch durchprobieren.
-			base := candidate[:2]
-			found := false
-			for i := 0; i < 10; i++ {
-				alt := fmt.Sprintf("%s%d", base, i)
-				altTaken, err := r.providerCodeTakenLocked(alt)
-				if err != nil {
-					return "", err
-				}
-				if !altTaken {
-					candidate = alt
-					found = true
-					break
-				}
-			}
-			if !found {
-				return "", fmt.Errorf("id_registry: kein freier 3-Zeichen-Code für Provider %q gefunden", provider)
-			}
+			continue
+		}
+		_, err = r.db.Exec(
+			`INSERT INTO providers (name, code, assigned_at) VALUES (?, ?, ?)`,
+			provider, candidate, time.Now().Unix(),
+		)
+		if err == nil {
+			return candidate, nil
+		}
+		if !isUniqueConstraintErr(err) {
+			return "", fmt.Errorf("id_registry: provider anlegen fehlgeschlagen: %w", err)
+		}
+		// UNIQUE-Konflikt: zwischen SELECT und INSERT war ein zweiter
+		// Prozess schneller (r.mu serialisiert nur in-process, nicht gegen
+		// eine zweite sigoREST-Instanz auf derselben id_registry.db).
+		// Entweder hat er denselben Provider angelegt — dann gilt sein Code
+		// (assign-once bleibt gewahrt) — oder er hat sich nur diesen Code
+		// gegriffen, dann weiter mit dem nächsten Kandidaten.
+		code, lookupErr := r.lookupProviderCodeLocked(provider)
+		if lookupErr != nil {
+			return "", lookupErr
+		}
+		if code != "" {
+			return code, nil
 		}
 	}
+	return "", fmt.Errorf("id_registry: kein freier 3-Zeichen-Code für Provider %q gefunden", provider)
+}
 
-	if _, err := r.db.Exec(
-		`INSERT INTO providers (name, code, assigned_at) VALUES (?, ?, ?)`,
-		provider, candidate, time.Now().Unix(),
-	); err != nil {
-		return "", fmt.Errorf("id_registry: provider anlegen fehlgeschlagen: %w", err)
+// lookupProviderCodeLocked liefert den gespeicherten Code oder "" wenn der
+// Provider noch nicht in der Tabelle steht.
+func (r *IDRegistry) lookupProviderCodeLocked(provider string) (string, error) {
+	var code string
+	err := r.db.QueryRow(`SELECT code FROM providers WHERE name = ?`, provider).Scan(&code)
+	if err == sql.ErrNoRows {
+		return "", nil
 	}
-	return candidate, nil
+	if err != nil {
+		return "", fmt.Errorf("id_registry: provider-code lesen fehlgeschlagen: %w", err)
+	}
+	return code, nil
+}
+
+// isUniqueConstraintErr erkennt eine verletzte UNIQUE-/PRIMARY-KEY-
+// Bedingung. Der Treiber modernc.org/sqlite reicht hier keinen
+// typisierten Sentinel-Fehler durch (kein errors.Is-Ziel, nur ein
+// generischer *sqlite.Error mit Textmeldung), daher bleibt als Test nur
+// der String-Vergleich auf die von SQLite erzeugte Meldung
+// "UNIQUE constraint failed: <tabelle>.<spalte>".
+func isUniqueConstraintErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 func (r *IDRegistry) providerCodeTakenLocked(code string) (bool, error) {
@@ -225,7 +266,13 @@ func (r *IDRegistry) getModelLocked(provider, upstreamID string) (*ModelEntry, e
 // existiert er aktiv -> unverändert zurückgeben; existiert er retired ->
 // reaktivieren (gleicher Shortcode, miss_streak=0, retired_at=NULL);
 // existiert er nicht -> neu anlegen mit einmalig vergebenem Shortcode.
-func (r *IDRegistry) AssignModel(provider, upstreamID string) (ModelEntry, error) {
+//
+// semanticHint ist der vom Aufrufer bereits berechnete semantische
+// Shortcode-Bestandteil (siehe ProviderModelSeed); leer = selbst per
+// GenerateShortcode berechnen. Der Hint wird NUR beim allerersten
+// Anlegen eines Modells ausgewertet — bestehende und reaktivierte
+// Einträge behalten ihren Shortcode unverändert (assign-once).
+func (r *IDRegistry) AssignModel(provider, upstreamID, semanticHint string) (ModelEntry, error) {
 	if r == nil || r.db == nil {
 		return ModelEntry{}, fmt.Errorf("id_registry: registry nicht geöffnet")
 	}
@@ -256,29 +303,59 @@ func (r *IDRegistry) AssignModel(provider, upstreamID string) (ModelEntry, error
 		return *existing, nil
 	}
 
-	semantic := GenerateShortcode(upstreamID, nil)
+	semantic := semanticHint
+	if semantic == "" {
+		semantic = GenerateShortcode(upstreamID, nil)
+	}
 	base := providerCode + "-" + semantic
+
+	// Kollisionsauflösung: Suffix ".2", ".3", ... (bewusst "." und nicht
+	// "-", siehe ResolveShortcode — "-" trennt den Kanal ab). Die Schleife
+	// ist gedeckelt, damit ein unerwartet dauerhaft scheiternder INSERT
+	// irgendwann einen Fehler liefert statt endlos zu laufen.
+	const maxShortcodeAttempts = 1000
 	shortcode := base
-	for suffix := 2; ; suffix++ {
+	for attempt := 0; attempt < maxShortcodeAttempts; attempt++ {
+		if attempt > 0 {
+			shortcode = fmt.Sprintf("%s.%d", base, attempt+1)
+		}
 		taken, err := r.shortcodeTakenLocked(shortcode)
 		if err != nil {
 			return ModelEntry{}, err
 		}
-		if !taken {
-			break
+		if taken {
+			continue
 		}
-		shortcode = fmt.Sprintf("%s.%d", base, suffix)
-	}
 
-	now := time.Now()
-	if _, err := r.db.Exec(
-		`INSERT INTO models (provider, upstream_id, shortcode, assigned_at, retired_at, miss_streak)
-		 VALUES (?, ?, ?, ?, NULL, 0)`,
-		provider, upstreamID, shortcode, now.Unix(),
-	); err != nil {
-		return ModelEntry{}, fmt.Errorf("id_registry: modell anlegen fehlgeschlagen: %w", err)
+		now := time.Now()
+		_, err = r.db.Exec(
+			`INSERT INTO models (provider, upstream_id, shortcode, assigned_at, retired_at, miss_streak)
+			 VALUES (?, ?, ?, ?, NULL, 0)`,
+			provider, upstreamID, shortcode, now.Unix(),
+		)
+		if err == nil {
+			return ModelEntry{Provider: provider, UpstreamID: upstreamID, Shortcode: shortcode, AssignedAt: now}, nil
+		}
+		if !isUniqueConstraintErr(err) {
+			return ModelEntry{}, fmt.Errorf("id_registry: modell anlegen fehlgeschlagen: %w", err)
+		}
+		// UNIQUE-Konflikt zwischen Prüfung und INSERT (zweiter Prozess auf
+		// derselben DB, r.mu serialisiert nur in-process). Zwei Fälle:
+		// (a) er hat dasselbe Modell angelegt -> PRIMARY-KEY-Konflikt, sein
+		// Eintrag gilt (assign-once); (b) er hat nur denselben Shortcode
+		// belegt -> nächster Kandidat.
+		existing, getErr := r.getModelLocked(provider, upstreamID)
+		if getErr != nil {
+			return ModelEntry{}, getErr
+		}
+		if existing != nil {
+			return *existing, nil
+		}
 	}
-	return ModelEntry{Provider: provider, UpstreamID: upstreamID, Shortcode: shortcode, AssignedAt: now}, nil
+	return ModelEntry{}, fmt.Errorf(
+		"id_registry: kein freier Shortcode für %s/%s nach %d Versuchen (Basis %q)",
+		provider, upstreamID, maxShortcodeAttempts, base,
+	)
 }
 
 func (r *IDRegistry) shortcodeTakenLocked(shortcode string) (bool, error) {
@@ -298,20 +375,34 @@ func (r *IDRegistry) shortcodeTakenLocked(shortcode string) (bool, error) {
 // fehlgeschlagenen Fetch (Netzwerkfehler) diese Funktion einfach nicht
 // aufrufen, damit miss_streak unverändert bleibt (schützt vor der
 // dokumentierten ZAI/Longcat-Fallback-Asymmetrie).
-func (r *IDRegistry) SyncProvider(provider string, seenUpstreamIDs []string) (map[string]ModelEntry, error) {
+//
+// Fehler-Semantik (bewusst asymmetrisch): scheitert AssignModel für ein
+// EINZELNES Modell, wird das nur geloggt und das Modell übersprungen —
+// es fehlt dann in der Ergebnis-Map und der Aufrufer fällt für genau
+// dieses Modell auf seinen pro-Boot berechneten Shortcode zurück. Früher
+// brach der erste Fehler den kompletten Provider-Sync ab, womit ALLE
+// Modelle des Providers ihren stabilen Shortcode für diesen Boot
+// verloren. Der error-Rückgabewert ist deshalb strukturellen Fehlern
+// vorbehalten (Registry nicht geöffnet, Scan-/Update-Query gescheitert).
+func (r *IDRegistry) SyncProvider(provider string, seeds []ProviderModelSeed) (map[string]ModelEntry, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("id_registry: registry nicht geöffnet")
 	}
 
-	result := make(map[string]ModelEntry, len(seenUpstreamIDs))
-	seen := make(map[string]bool, len(seenUpstreamIDs))
-	for _, id := range seenUpstreamIDs {
-		seen[id] = true
-		entry, err := r.AssignModel(provider, id)
+	result := make(map[string]ModelEntry, len(seeds))
+	seen := make(map[string]bool, len(seeds))
+	for _, seed := range seeds {
+		// Auch ein fehlgeschlagenes Modell zählt als "gesehen": es steht
+		// live beim Provider, sein miss_streak darf nicht hochlaufen.
+		seen[seed.UpstreamID] = true
+		entry, err := r.AssignModel(provider, seed.UpstreamID, seed.SemanticHint)
 		if err != nil {
-			return nil, err
+			LogWarn("ID-Registry: Modell-Zuweisung übersprungen", map[string]interface{}{
+				"provider": provider, "upstream_id": seed.UpstreamID, "error": err.Error(),
+			})
+			continue
 		}
-		result[id] = entry
+		result[seed.UpstreamID] = entry
 	}
 
 	r.mu.Lock()
@@ -398,7 +489,7 @@ func (r *IDRegistry) ResolveShortcode(input string) (ModelEntry, string, error) 
 	}
 	lower := strings.ToLower(input)
 
-	if entry, err := r.getByShortcodeLocked(lower); err == nil {
+	if entry, err := r.getByShortcode(lower); err == nil {
 		return entry, "", nil
 	} else if !errors.Is(err, ErrShortcodeNotFound) {
 		return ModelEntry{}, "", err
@@ -412,14 +503,14 @@ func (r *IDRegistry) ResolveShortcode(input string) (ModelEntry, string, error) 
 	if !isChannelSuffix(channel) {
 		return ModelEntry{}, "", ErrShortcodeNotFound
 	}
-	entry, err := r.getByShortcodeLocked(base)
+	entry, err := r.getByShortcode(base)
 	if err != nil {
 		return ModelEntry{}, "", err
 	}
 	return entry, channel, nil
 }
 
-func (r *IDRegistry) getByShortcodeLocked(shortcode string) (ModelEntry, error) {
+func (r *IDRegistry) getByShortcode(shortcode string) (ModelEntry, error) {
 	row := r.db.QueryRow(
 		`SELECT provider, upstream_id, assigned_at, retired_at, miss_streak FROM models WHERE shortcode = ?`,
 		shortcode,

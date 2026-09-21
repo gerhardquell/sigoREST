@@ -438,6 +438,12 @@ git commit -m "feat: Provider-Kürzel assign-once mit Cutter-Sanborn-Kollisionsf
 
 ### Task 3: Modell-Shortcode-Vergabe (`AssignModel`)
 
+> **Nachtrag (Commit `91b6a38`):** Das Kollisions-Suffix ist `.2`/`.3`, nicht
+> `-2`/`-3`. Grund: `-` trennt auch den Kanal ab (`{shortcode}-{channel}`),
+> damit wäre `zai-glm45-2` zweideutig ("Kollisionsvariante 2" vs. "Kanal 2").
+> `GenerateShortcode` erzeugt nie einen Punkt, deshalb kann `.` niemals mit
+> dem Kanal-Suffix-Parser kollidieren.
+
 **Files:**
 - Modify: `sigoengine/id_registry.go` (ersetzt `getModelLocked`-Platzhalter, ergänzt `AssignModel`)
 - Modify: `sigoengine/id_registry_test.go`
@@ -504,9 +510,9 @@ func TestAssignModel_CollisionAppendsNumericSuffix(t *testing.T) {
 	if first.Shortcode == second.Shortcode {
 		t.Fatalf("Kollision nicht aufgelöst: beide Modelle bekamen %q", first.Shortcode)
 	}
-	wantSecond := first.Shortcode + "-2"
+	wantSecond := first.Shortcode + ".2"
 	if second.Shortcode != wantSecond {
-		t.Errorf("second.Shortcode = %q, erwartet %q (erste Kollision -> Suffix -2)", second.Shortcode, wantSecond)
+		t.Errorf("second.Shortcode = %q, erwartet %q (erste Kollision -> Suffix .2)", second.Shortcode, wantSecond)
 	}
 }
 
