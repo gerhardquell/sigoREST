@@ -321,3 +321,73 @@ func TestRecordUsage(t *testing.T) {
 		t.Fatalf("unexpected channel stats: %+v", chStats)
 	}
 }
+
+func TestLookupModel_ChannelSuffixAndRetired(t *testing.T) {
+	srv, dir := newTestServer(t)
+
+	reg, err := sigoengine.OpenIDRegistry(dir)
+	if err != nil {
+		t.Fatalf("OpenIDRegistry: %v", err)
+	}
+	t.Cleanup(func() { reg.Close() })
+	srv.idRegistry = reg
+
+	active, err := reg.AssignModel("zai", "glm-4.5")
+	if err != nil {
+		t.Fatalf("AssignModel(active): %v", err)
+	}
+	srv.models["glm-4.5"] = ModelInfo{ID: "glm-4.5", Shortcode: active.Shortcode}
+
+	retired, err := reg.AssignModel("zai", "glm-4.4-old")
+	if err != nil {
+		t.Fatalf("AssignModel(retired): %v", err)
+	}
+	if _, err := reg.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+		t.Fatalf("SyncProvider: %v", err)
+	}
+	for i := 0; i < 2; i++ { // insgesamt 3 Misses inkl. des Sync oben
+		if _, err := reg.SyncProvider("zai", []string{"glm-4.5"}); err != nil {
+			t.Fatalf("SyncProvider (miss %d): %v", i, err)
+		}
+	}
+
+	t.Run("exact ID match", func(t *testing.T) {
+		lr, ok := srv.lookupModel("glm-4.5")
+		if !ok || lr.ID != "glm-4.5" || lr.Retired {
+			t.Fatalf("lookupModel(glm-4.5) = %+v, ok=%v", lr, ok)
+		}
+	})
+
+	t.Run("channel suffix on shortcode", func(t *testing.T) {
+		lr, ok := srv.lookupModel(active.Shortcode + "-2")
+		if !ok {
+			t.Fatal("lookupModel mit Kanal-Suffix nicht gefunden")
+		}
+		if lr.ID != "glm-4.5" {
+			t.Errorf("ID = %q, erwartet glm-4.5", lr.ID)
+		}
+		if lr.Channel != "2" {
+			t.Errorf("Channel = %q, erwartet '2'", lr.Channel)
+		}
+	})
+
+	t.Run("retired model resolves with Retired flag", func(t *testing.T) {
+		lr, ok := srv.lookupModel(retired.Shortcode)
+		if !ok {
+			t.Fatal("lookupModel für retired Shortcode nicht gefunden")
+		}
+		if !lr.Retired {
+			t.Error("erwarte Retired == true")
+		}
+		if lr.RetiredAt.IsZero() {
+			t.Error("erwarte gesetztes RetiredAt")
+		}
+	})
+
+	t.Run("unknown shortcode", func(t *testing.T) {
+		_, ok := srv.lookupModel("does-not-exist")
+		if ok {
+			t.Error("erwarte ok=false für unbekannten Shortcode")
+		}
+	})
+}

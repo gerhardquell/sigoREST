@@ -501,24 +501,67 @@ type ErrorResponse struct {
 	} `json:"error"`
 }
 
+// lookupResult ist das Ergebnis einer lookupModel-Auflösung.
+// Bei Retired == true ist Info ggf. leer (das Modell ist nicht mehr in
+// s.models, weil es aus der Live-Provider-Liste verschwunden ist) —
+// Aufrufer müssen Retired vor Info prüfen.
+type lookupResult struct {
+	Info      ModelInfo
+	ID        string
+	Channel   string // "" = Default-Kanal, sonst Kanal-Override aus Shortcode-Suffix
+	Retired   bool
+	RetiredAt time.Time
+}
+
 // lookupModel sucht case-insensitiv nach ID (Map-Key) oder Shortcode.
-// Aufrufer muss s.mu (RLock) halten. Liefert ModelInfo + kanonische ID.
-// Provider-Modell-IDs sind überwiegend lowercase; Sigil/CLI können aber
-// andere Casing mitschicken (z.B. "GLM-4.5"), die ansonsten am exakten
-// Map-Key-Lookup scheitern würden.
-func (s *Server) lookupModel(query string) (ModelInfo, string, bool) {
+// Aufrufer muss s.mu (RLock) halten. Provider-Modell-IDs sind
+// überwiegend lowercase; Sigil/CLI können aber andere Casing mitschicken
+// (z.B. "GLM-4.5"), die ansonsten am exakten Map-Key-Lookup scheitern
+// würden.
+//
+// Reihenfolge: (1) exakte ID, (2) exakter Shortcode aus s.models — beide
+// decken den aktiven Default-Kanal-Fall ohne Registry-Zugriff ab. Erst
+// danach (3) die persistente ID-Registry, die zusätzlich Shortcodes mit
+// Kanal-Suffix ("zai-glm45-2") und retired Modelle auflöst, welche per
+// Definition nicht mehr in s.models stehen.
+func (s *Server) lookupModel(query string) (lookupResult, bool) {
 	q := strings.ToLower(query)
 	for id, info := range s.models {
 		if strings.ToLower(id) == q {
-			return info, id, true
+			return lookupResult{Info: info, ID: id}, true
 		}
 	}
 	for _, info := range s.models {
 		if strings.ToLower(info.Shortcode) == q {
-			return info, info.ID, true
+			return lookupResult{Info: info, ID: info.ID}, true
 		}
 	}
-	return ModelInfo{}, "", false
+
+	if s.idRegistry == nil {
+		return lookupResult{}, false
+	}
+	entry, channel, err := s.idRegistry.ResolveShortcode(q)
+	if err != nil {
+		return lookupResult{}, false
+	}
+	res := lookupResult{ID: entry.UpstreamID, Channel: channel}
+	if entry.RetiredAt != nil {
+		res.Retired = true
+		res.RetiredAt = *entry.RetiredAt
+		return res, true
+	}
+	for id, info := range s.models {
+		if strings.ToLower(info.Shortcode) == entry.Shortcode {
+			res.Info = info
+			res.ID = id
+			return res, true
+		}
+	}
+	// Registry kennt den Shortcode, aber das Modell ist aktuell nicht in
+	// s.models (z.B. Race zwischen Registry-Sync und einem sehr kurzen
+	// Fetch-Ausfall) — als nicht gefunden behandeln statt mit leerer
+	// ModelInfo weiterzumachen.
+	return lookupResult{}, false
 }
 
 // providerForModel returns the provider name for a given model ID/shortcode.
@@ -526,11 +569,11 @@ func (s *Server) lookupModel(query string) (ModelInfo, string, bool) {
 // geteilt mit sigoE-CLI und Kosten-Tracking).
 func (s *Server) providerForModel(modelID string) string {
 	s.mu.RLock()
-	info, _, ok := s.lookupModel(modelID)
+	lr, ok := s.lookupModel(modelID)
 	s.mu.RUnlock()
 	endpoint := ""
 	if ok {
-		endpoint = info.Endpoint
+		endpoint = lr.Info.Endpoint
 	}
 	return sigoengine.ResolveProvider(endpoint, modelID)
 }
@@ -541,10 +584,10 @@ func (s *Server) providerForModel(modelID string) string {
 // Go's RWMutex nicht sicher garantiert (Deadlock-Risiko, wenn ein
 // Writer dazwischen wartet).
 func (s *Server) providerForModelLocked(modelID string) string {
-	info, _, ok := s.lookupModel(modelID)
+	lr, ok := s.lookupModel(modelID)
 	endpoint := ""
 	if ok {
-		endpoint = info.Endpoint
+		endpoint = lr.Info.Endpoint
 	}
 	return sigoengine.ResolveProvider(endpoint, modelID)
 }
@@ -638,18 +681,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Case-insensitiv nach ID oder Shortcode suchen
 	s.mu.RLock()
-	modelInfo, resolvedID, exists := s.lookupModel(modelID)
+	lr, exists := s.lookupModel(modelID)
 	if exists {
-		modelID = resolvedID
-	}
-	if !exists {
-		s.mu.RUnlock()
-		writeError(w, fmt.Sprintf("Model '%s' nicht gefunden", req.Model), "model_not_found", http.StatusBadRequest)
-		return
+		modelID = lr.ID
 	}
 	mem := s.memory
 	globalSystemPrompt := s.systemPrompt
 	s.mu.RUnlock()
+
+	if !exists {
+		writeError(w, fmt.Sprintf("Model '%s' nicht gefunden", req.Model), "model_not_found", http.StatusBadRequest)
+		return
+	}
+	if lr.Retired {
+		writeError(w, fmt.Sprintf(
+			"Modell '%s' ist seit %s nicht mehr verfügbar. Kein automatischer Fallback auf ein anderes Modell.",
+			modelID, lr.RetiredAt.Format("2006-01-02"),
+		), "model_retired", http.StatusGone)
+		return
+	}
+	modelInfo := lr.Info
+	if lr.Channel != "" && req.Channel == "" {
+		req.Channel = lr.Channel
+	}
 
 	// Streaming-Modus erkennen (OpenAI-Standard)
 	isStreaming := req.Stream

@@ -407,15 +407,23 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	modelInfo, modelID, exists := s.lookupModel(req.Model)
+	lr, exists := s.lookupModel(req.Model)
 	s.mu.RUnlock()
 	if !exists {
 		writeAnthropicError(w, "not_found_error", fmt.Sprintf("Model '%s' nicht gefunden", req.Model), http.StatusNotFound)
 		return
 	}
+	if lr.Retired {
+		writeAnthropicError(w, "not_found_error", fmt.Sprintf(
+			"Modell '%s' ist seit %s nicht mehr verfügbar. Kein automatischer Fallback auf ein anderes Modell.",
+			req.Model, lr.RetiredAt.Format("2006-01-02"),
+		), http.StatusGone)
+		return
+	}
+	modelInfo, modelID := lr.Info, lr.ID
 
 	provider := s.providerForModel(modelID)
-	ch, err := s.channelManager.Resolve(provider, "")
+	ch, err := s.channelManager.Resolve(provider, lr.Channel)
 	if err != nil {
 		writeAnthropicError(w, anthropicErrorType(sigoengine.ClassifyError(err).Type), err.Error(), http.StatusServiceUnavailable)
 		return
