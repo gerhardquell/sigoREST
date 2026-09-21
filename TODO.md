@@ -3,16 +3,18 @@
 \plan
 \brainstorming
 
-## ID Vereinfachung 
+## ID Vereinfachung
 
 lass uns die ID komplett ändern. In zukunft soll das Format der api-id sein:
  "provider:model:channe" ==>  "omnir:cl-haiku45:0:"
-- provider => 5stelliger Providercode, 
+- provider => 5stelliger Providercode,
   wichtig: zai wird zu zai00 oder zai__  beides erlaubt (5stellig)
-- model => 10stelliger Modellcode, wie sonnet5 -> sonnet5__
+- model => 10stelliger Modellcode, wie sonnet5 -> sonnet5___
 - channel => 0==default und >0 die Nummer des channels
 
-Alle ID-Codes bestehen aus Großbuchstaben und Zahlen und : und _
+Alle ID-Codes bestehen aus Großbuchstaben und Zahlen und : und _ ;
+im Modell-Feld zusätzlich `-` erlaubt (Upstream-Modellnamen wie
+"gpt-4o"/"glm-4.5" enthalten routinemäßig Bindestriche).
 
 Beispiel
 ```python
@@ -27,12 +29,16 @@ chn = st[17:18] # 0
 
 ## Shortcode
 
-Der Shortcode darf maximal 10 stellig sein! Nur alphanumerische Zeichen aus:
-a-z0-9 , A-Z wird zu a-z , also tolower
-"omnir:cl-haiku45:0" wird zu "p1m1c0":
-p1 = 1.Provider bei sortierter Liste der Provider 
-m1 = 1.Modell bei sortierter liste der Modelle des Providers!
-c0 = Channel, 0 == default
+**Erledigt, siehe `docs/superpowers/specs/2026-09-20-id-shortcode-registry-design.md`
+und `docs/superpowers/plans/2026-09-20-id-shortcode-registry.md`.**
+
+Ursprünglicher Positions-Vorschlag (`p1m1c0`, Position in sortierter
+Provider-/Modell-Liste) verworfen: sigoREST lädt Modelle dynamisch bei
+jedem Boot, eine Positions-Nummer verschiebt sich bei jeder Änderung der
+Live-Liste. Ersetzt durch eine persistente SQLite-Registry mit
+assign-once Provider-/Modell-Kürzeln (Format `{provider3}-{semanticCode}
+[-{channel}]`, z.B. `zai-glm45-2`) — siehe Spec für Details.
+```
 
 ---
 
