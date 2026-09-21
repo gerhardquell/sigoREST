@@ -4,6 +4,59 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-09-21: Persistente ID-/Shortcode-Registry — Subagent-Driven Development bis zum finalen Review
+
+**Zielsetzung:**
+Eine vorherige Session hatte Tasks 1-6 eines 8-Task-Plans (SQLite-Registry für stabile, assign-once Shortcodes) implementiert und mitten im Plan pausiert (Budget-Stop). Diese Session: Tasks 7-8 fertigstellen, finalen Whole-Branch-Review durchführen, gefundene Bugs fixen, nach `main` mergen, pushen.
+
+**Was erreicht wurde:**
+
+### 1. Resume aus Ledger
+Das SDD-Ledger (`.superpowers/sdd/2026-09-20-id-shortcode-registry/progress.md`) zeigte exakten Stand: Tasks 1-6 committed und reviewed, Task 7 (Brief bereits vorbereitet) und Task 8 offen. `HEAD` gegen die Ledger-Notiz (`9feabee`) verifiziert — sauberer Resume ohne Re-Arbeit oder verlorenen Kontext.
+
+### 2. Task 7 — Retired-Fehlerpfad + Kanal-Suffix in `lookupModel`
+`lookupModel` von `(ModelInfo, string, bool)` auf einen `lookupResult`-Struct umgebaut: Retired Modelle liefern `HTTP 410` (`model_retired` bzw. Anthropic `not_found_error`) statt stillem Fallback auf ein anderes Modell; ein Kanal-Suffix im Shortcode (`zai-glm45-2`) wird aufgelöst und an `channelManager.Resolve` durchgereicht. Der Implementer fand einen Selbstwiderspruch im vorbereiteten Plan-Brief (der Anthropic-Request-Typ hat kein `Channel`-Feld, ein Codeblock im Brief widersprach der eigenen Prosa direkt daneben) und folgte der Prosa — vom Task-Reviewer als einzig kompilierbare Interpretation bestätigt.
+
+### 3. Task 8 — TODO.md-Dokufehler
+Reiner Doku-Task: Zeichensatz-/Padding-Fehler in der alten Format-Spezifikation korrigiert, der verworfene Positions-Shortcode-Vorschlag (`p1m1c0`) durch einen Verweis auf die neue Registry-Spec ersetzt.
+
+### 4. Finaler Whole-Branch-Review — zwei echte Bugs, erst hier sichtbar
+Alle 8 Einzel-Tasks waren je für sich review-approved. Der finale Review über den gesamten Branch (Opus) fand trotzdem zwei Defekte, die keiner der Einzel-Reviews sehen konnte, weil sie erst im Zusammenspiel mehrerer Tasks entstehen:
+
+- **Critical — Shortcode-Kollisionen bei cheaperinference/longcat:** `AssignModel` berechnete den semantischen Code-Teil selbst neu (`GenerateShortcode(upstreamID, nil)`), ohne die Dedup-Map, die die echten Provider-Fetcher pro Batch mitführen. Für ~60 cheaperinference-Modelle und unbekannte Longcat-Modelle hat `GenerateShortcode` keinen Familien-Präfix-Treffer und fällt auf `cutterCode()` über die *ganze* ID zurück — alle Modelle eines Providers bekamen denselben Code, nur durch einen numerischen Suffix unterscheidbar (`che-c01`, `che-c01.2`, … `.60`). Durch Assign-Once für immer eingefroren — genau das Problem, das die Registry eigentlich lösen sollte.
+- **Important — Check-then-INSERT nicht atomar über Prozessgrenzen:** ein UNIQUE-Konflikt riss bislang den kompletten Provider-Sync für diesen Boot ab, statt nur das eine Modell zu überspringen.
+- **Important — `lookupModel` hielt `s.mu.RLock()` während einer SQLite-Query:** dieselbe Gefahrenklasse wie ein bereits dokumentierter, bereits gefixter rekursiver-RLock-Bug (siehe unten, "Provider-Kennzeichnung"-Session) — unter Last (~100 parallele Verbindungen, das dokumentierte Server-Ziel) hätte eine langsame Registry-Query den kompletten Server für Leser blockieren können.
+- **Important — kein Hinweis auf Breaking Change:** Shortcodes ändern sich beim Upgrade einmalig, `CLAUDE.md` war nicht aktualisiert.
+
+### 5. Eine Fix-Welle, ein skalierter Re-Review
+Alle Findings in *einem* Fix-Dispatch (Opus) gebündelt behoben, statt pro Finding einen eigenen Durchlauf zu fahren:
+- Semantischer Code kommt jetzt vom Fetcher (`Model.Shortcode` als `SemanticHint` statt Neuberechnung durch die Registry).
+- Retry-on-Conflict statt Hard-Fail bei INSERT-Kollision; `SyncProvider` überspringt nur das eine gescheiterte Modell statt den ganzen Provider abzubrechen.
+- `lookupModel` in ein selbstsperrendes `lookupModel` (macht die Registry-Query *ohne* gehaltenen Lock) und ein lockfreies `lookupModelMemory` (für Aufrufer, die `s.mu` bereits halten) aufgeteilt — das exakte Design wurde dem Implementer vom Controller vorgegeben (inkl. Beispielcode), um den dokumentierten rekursiven-RLock-Fehler nicht ein zweites Mal einzubauen.
+- `CLAUDE.md` + `TODO.md` um die neue Registry, ihre Semantik und die zwei operativen Eigenheiten (Breaking Change beim Upgrade, Retirement zählt Boots statt Fetch-Zyklen) ergänzt.
+
+Der anschließende skalierte Re-Review (Sonnet) verifizierte unabhängig — nicht nur den Implementer-Report gegenlesend, sondern von Hand nachverfolgt —, dass an keiner der elf `lookupModel`-Aufrufstellen ein rekursiver Lock entstehen kann. Ein Punkt blieb bewusst offen: das Longcat-Kollisionsproblem greift auch nach dem Fix noch für *künftige, noch nicht handkuratierte* Longcat-Modelle (der No-Family-Zweig von `GenerateShortcode` liest die Dedup-Map nie) — als dokumentierte, aktuell folgenlose Einschränkung geparkt statt in einer zweiten Fix-Runde nachgejagt.
+
+### 6. Merge + Push
+Fast-Forward-Merge nach `main` (`f994343`), volle Test-Suite grün (100 Tests, 5 Pakete), SDD-Workspace + Worktree + Feature-Branch aufgeräumt, nach `origin/main` gepusht.
+
+**Learnings:**
+
+1. **Task-Reviews fangen nicht alles ab — der Whole-Branch-Review ist kein Ritual, er findet echte Bugs.** Beide Critical/Important-Findings entstanden aus dem Zusammenspiel mehrerer, je für sich korrekt reviewter Tasks (Kollisionsauflösung aus Task 2/3 + Boot-Verdrahtung aus Task 6 + reale Provider-ID-Muster, die kein Einzel-Task-Diff je gleichzeitig zeigte).
+2. **"Alle Shortcodes eindeutig" ist der falsche Test.** `TestAssignModel_CollisionAppendsNumericSuffix` bestand acht Reviews lang, weil er nur Eindeutigkeit prüfte, nicht Aussagekraft — `che-c01.2` ist eindeutig *und* bedeutungslos. Ein Regressionstest gegen einen realistischen Modell-Batch (mehrere echte cheaperinference-IDs) hätte den Bug sofort gezeigt; genau ein solcher Test wurde Teil der Fix-Welle.
+3. **Bekannte Bug-Klassen wiederholen sich, wenn der Fix nicht explizit mitgegeben wird.** Der rekursive-RLock-Bug war in `CLAUDE.md` bereits dokumentiert. Der naheliegendste Fix für Task 7s neuen Lock-Hazard (`lookupModel` selbst sperren lassen) hätte ihn exakt reproduziert, weil `providerForModelLocked` von Aufrufern kommt, die `s.mu` schon halten. Nur weil der Fix-Dispatch das Design vorab im Detail (mit Beispielcode) vorgab statt dem Implementer freie Hand zu lassen, blieb die Falle aus.
+4. **Ledger-basiertes Resume funktioniert zuverlässig über Session-Grenzen hinweg.** Budget-Stop mitten im Plan, neue Session, Ledger gelesen, `HEAD` gegen die Ledger-Notiz verifiziert, exakt bei Task 7 weitergemacht — kein Re-Dispatch bereits fertiger Tasks, kein verlorener Kontext.
+5. **"Ready to merge? No" ist beim finalen Review ein gutes Zeichen, kein Fehlschlag.** Der Reviewer fand echte, vorher unsichtbare Bugs in Code, der sonst mit stillen Shortcode-Kollisionen und einem Lock-Hazard produktiv gegangen wäre — genau der Zweck des zusätzlichen Reviewschritts nach acht bereits grünen Einzel-Reviews.
+
+**Nächste mögliche Schritte:**
+- Longcat-Kollisionsproblem für unbekannte/künftige Modelle richtig lösen (eigener Design-Pass für `GenerateShortcode`s No-Family-Fallback, ohne die gerade erst beseitigte Kanal-Suffix-Zweideutigkeit zurückzubringen).
+- Retirement-Kadenz überdenken: aktuell zählt `SyncProvider` nur Boots, auf einem langlaufenden Deployment praktisch träge (3 Neustarts statt 3 Fetch-Zyklen bis zum Retire) — bewusste Scope-Entscheidung, aber wert, im Auge zu behalten.
+- `chinese/README.md` (Marketing-Landingpage) ist von dieser Doku-Ergänzung unberührt geblieben — bei Bedarf separat nachziehen.
+
+**Co-Autor**: Claude Sonnet 5 (Anthropic) — Session vom 21. September 2026.
+
+---
+
 ## Session 2026-08-18: Pro-Kanal Rate-Limiter (hybrid) + zentralisiertes ./build/
 
 **Zielsetzung:**

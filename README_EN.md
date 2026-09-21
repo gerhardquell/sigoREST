@@ -329,6 +329,14 @@ curl -s http://localhost:9080/v1/chat/completions \
 - `retries` — Number of retry attempts per channel.
 - `system_prompt` — Per-request system prompt (highest priority).
 
+`model` accepts an ID, a shortcode, or a shortcode with a channel suffix
+(`zai-glm45-2` → model `zai-glm45`, channel override `2`; if `channel` is
+also set, `channel` wins). If the model is **retired** (permanently gone
+from the provider, see
+[Persistent Shortcode Registry](#persistent-shortcode-registry) below),
+the server responds with `HTTP 410` and `"model_retired"` instead of
+silently falling back to a different model.
+
 #### Vision Support
 
 sigoREST supports the OpenAI Vision API format. Images can be sent as Base64-encoded data URLs:
@@ -404,6 +412,35 @@ OpenAI-compatible model list (ID + Shortcode).
 curl -s http://localhost:9080/api/models
 ```
 Full model info: prices, token limits, temperature range.
+
+### Persistent Shortcode Registry
+
+sigoREST loads its models dynamically from the provider APIs on every boot
+(see [Dynamic Model Discovery](#dynamic-model-discovery)) — without extra
+care, a shortcode recomputed on every boot would shift whenever the live
+list changes. To prevent that, a persistent SQLite database
+(`id_registry.db` in `-data-dir`, same driver as `costs.db`:
+`modernc.org/sqlite`, WAL) assigns each `(provider, model)` pair a
+shortcode **exactly once**, in the format `{provider3}-{semanticCode}`
+(e.g. `zai-glm45`, `mam-cl45-s`) — once assigned, it stays with that model
+forever, across restarts and provider outages, and is never reused.
+
+If a model is absent from a provider's live list for 3 consecutive
+**successful** boots, it becomes *retired* — its shortcode stays reserved
+(if the model reappears, it gets the same shortcode back), and calls to it
+return `HTTP 410` instead of silently falling back to a different model
+(see `POST /v1/chat/completions` above). A failed provider fetch never
+counts as "a boot without the model" — this protects against the
+[documented ZAI/Longcat fallback asymmetry](#dynamic-model-discovery).
+
+If opening `id_registry.db` fails (e.g. disk full), the server keeps
+running — shortcodes are then recomputed per boot as before this feature
+(nil-safe, same pattern as `costs.db`).
+
+**Breaking change on upgrade:** existing shortcodes change once on the
+first boot with this version (e.g. `glm46` becomes `zai-glm46`). There is
+no compatibility shim — clients (scripts, `ANTHROPIC_BASE_URL` configs,
+custom tools) need to re-fetch the model list once after upgrading.
 
 ### GET /api/version
 ```bash

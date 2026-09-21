@@ -330,6 +330,14 @@ curl -s http://localhost:9080/v1/chat/completions \
 - `retries` — Anzahl Wiederholungsversuche pro Kanal.
 - `system_prompt` — Per-Request System-Prompt (höchste Priorität).
 
+`model` akzeptiert ID, Shortcode, oder Shortcode mit Kanal-Suffix
+(`zai-glm45-2` → Modell `zai-glm45`, Kanal-Override `2`, überschreibt
+`channel` nicht wenn beide gesetzt sind — `channel` gewinnt). Ist das
+Modell **retired** (vom Provider dauerhaft verschwunden, siehe
+[Persistente Shortcode-Registry](#persistente-shortcode-registry)),
+antwortet der Server mit `HTTP 410` und `"model_retired"` statt eines
+stillen Fallbacks auf ein anderes Modell.
+
 #### Vision-Unterstützung
 
 sigoREST unterstützt das OpenAI Vision-API-Format. Bilder können als Base64-kodierte Daten-URLs gesendet werden:
@@ -433,6 +441,37 @@ sortiert nach Provider dann Shortcode:
   {"shortcode": "zai-glm51", "provider": "zai", "code": "zai__"}
 ]
 ```
+
+### Persistente Shortcode-Registry
+
+sigoREST lädt seine Modelle bei jedem Boot dynamisch von den Provider-APIs
+(siehe [Dynamische Modell-Discovery](#dynamische-modell-discovery)) — ohne
+weitere Vorkehrung würde sich ein pro-Boot berechneter Shortcode bei jeder
+Änderung der Live-Liste verschieben. Deshalb vergibt eine persistente
+SQLite-Datenbank (`id_registry.db` im `-data-dir`, gleicher Treiber wie
+`costs.db`: `modernc.org/sqlite`, WAL) jedem `(provider, modell)`-Paar
+**einmalig** einen Shortcode im Format `{provider3}-{semanticCode}`
+(z.B. `zai-glm45`, `mam-cl45-s`) — einmal vergeben, bleibt er für immer bei
+seinem Modell, auch über Neustarts und Provider-Ausfälle hinweg, und wird
+nie wiederverwendet.
+
+Verschwindet ein Modell 3 aufeinanderfolgende **erfolgreiche** Boots lang
+aus der Live-Liste eines Providers, wird es *retired* — der Shortcode
+bleibt reserviert (kommt das Modell zurück, bekommt es ihn zurück), Aufrufe
+liefern `HTTP 410` statt eines stillen Fallbacks auf ein anderes Modell
+(siehe `POST /v1/chat/completions` oben). Ein fehlgeschlagener Provider-Fetch
+zählt nie als "Boot ohne Modell" — schützt vor der
+[dokumentierten ZAI/Longcat-Fallback-Asymmetrie](#dynamische-modell-discovery).
+
+Schlägt das Öffnen von `id_registry.db` fehl (z.B. Disk voll), läuft der
+Server trotzdem weiter — Shortcodes werden dann wie vor diesem Feature pro
+Boot neu berechnet (nil-safe, analog zu `costs.db`).
+
+**Breaking Change beim Upgrade:** existierende Shortcodes ändern sich
+einmalig beim ersten Boot mit dieser Version (`glm46` wird z.B. zu
+`zai-glm46`). Es gibt keine Kompatibilitätsschicht — Clients (Skripte,
+`ANTHROPIC_BASE_URL`-Configs, eigene Tools) müssen einmal `/api/shortcodes`
+neu abrufen.
 
 ### GET /api/version
 ```bash

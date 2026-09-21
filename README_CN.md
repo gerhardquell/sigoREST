@@ -331,6 +331,12 @@ curl -s http://localhost:9080/v1/chat/completions \
 - `retries` — 每个渠道的重试次数。
 - `system_prompt` — 每个请求的系统提示词（最高优先级）。
 
+`model` 可以是 ID、简码，或带渠道后缀的简码（如 `zai-glm45-2` → 模型
+`zai-glm45`，渠道覆盖为 `2`；若同时设置了 `channel`，以 `channel` 为准）。
+如果该模型已被**下线**（从 Provider 的列表中永久消失，参见下方
+[持久化简码注册表](#持久化简码注册表)），服务器返回 `HTTP 410` 和
+`"model_retired"`，而不是静默回退到其他模型。
+
 #### 视觉支持
 
 sigoREST 支持 OpenAI Vision API 格式。图像可以作为 Base64 编码的数据 URL 发送：
@@ -403,6 +409,32 @@ curl -s http://localhost:9080/v1/models
 curl -s http://localhost:9080/api/models
 ```
 完整的模型信息：价格、令牌限制、温度范围。
+
+### 持久化简码注册表
+
+sigoREST 在每次启动时都会从 Provider API 动态加载模型列表（参见
+[动态模型发现](#动态模型发现)）——如果不加处理，每次启动重新计算的简码会
+随着在线列表的变化而漂移。为此，一个持久化的 SQLite 数据库
+（`-data-dir` 下的 `id_registry.db`，与 `costs.db` 使用相同的驱动：
+`modernc.org/sqlite`，WAL 模式）为每个 `(provider, 模型)` 组合**仅分配
+一次**简码，格式为 `{provider3}-{语义代码}`（例如 `zai-glm45`、
+`mam-cl45-s`）——一旦分配，该简码将永远属于这个模型，历经重启和 Provider
+故障也不变，且永不重复使用。
+
+如果某个模型连续 3 次**成功的**启动都未出现在 Provider 的在线列表中，
+它就会被标记为**已下线**（retired）——它的简码仍会保留（如果该模型重新
+出现，会拿回同一个简码），对它的调用会返回 `HTTP 410`，而不是静默回退
+到其他模型（参见上文 `POST /v1/chat/completions`）。Provider 拉取失败
+永远不计入"一次没有该模型的启动"——这样可以防范
+[文档中提到的 ZAI/Longcat 回退不对称问题](#动态模型发现)。
+
+如果 `id_registry.db` 打开失败（例如磁盘已满），服务器仍会继续运行——
+简码会像引入此功能之前一样按每次启动重新计算（nil-safe，与 `costs.db`
+的处理方式相同）。
+
+**升级时的破坏性变更：** 现有简码会在使用此版本首次启动时一次性变更
+（例如 `glm46` 会变为 `zai-glm46`）。这里没有兼容层——客户端（脚本、
+`ANTHROPIC_BASE_URL` 配置、自定义工具）升级后需要重新获取一次模型列表。
 
 ### GET /api/version
 ```bash
