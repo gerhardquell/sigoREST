@@ -380,10 +380,19 @@ berechnete Kürzel sich bei jeder Änderung der Live-Liste verschoben.
   `SemanticHint` (= `Model.Shortcode` aus `provider_fetchers.go`, bei
   cheaperinference ohne das `ci-`-Präfix). Die Fetcher berechnen ihre
   Codes mit einer fetch-weiten `used`-Map und liefern deshalb innerhalb
-  eines Providers unterscheidbare Kürzel. Eine blinde Neuberechnung pro
-  ID (`GenerateShortcode(id, nil)`) tut das **nicht**: IDs ohne
-  Familien-Präfix (`ci-...`, `LongCat-...`) fallen auf `cutterCode` über
-  die ganze ID zurück und liefern für alle Modelle denselben Code.
+  eines Providers unterscheidbare Kürzel.
+- **Bug behoben (war bis 2026-09-21 live): IDs ohne Familien-Präfix
+  kollabierten auf denselben Code.** `GenerateShortcode`s No-Family-Zweig
+  (`shortcode.go`) rief bei fehlendem Präfix-Treffer (`ci-...`,
+  `LongCat-...`) `cutterCode(modelID)` auf und gab sofort zurück, OHNE
+  die `used`-Map zu konsultieren — Schritt 6 (Kollisionsauflösung) griff
+  nur im Familien-Pfad. Da `cutterCode` nur den längsten Tabellen-Präfix
+  zurückgibt (nicht den Rest der ID), bekamen z.B. alle unbekannten
+  Longcat-Modelle denselben Code (`l62`). Fix: gemeinsamer
+  `resolveCollision(sc, used)`-Helper, jetzt von beiden Zweigen genutzt
+  — No-Family-IDs bekommen bei Kollision denselben `-2`/`-3`-Suffix wie
+  familien-basierte Codes (`l62`, `l62-2`, `l62-3`). Regressionstest:
+  `TestGenerateShortcode_NoFamilyMatchStillDeduplicates`.
 - **Kollisions-Suffix ist `.2`/`.3`**, nicht `-2` — `-` trennt den Kanal
   ab, `zai-glm45-2` wäre sonst zweideutig.
 - **Retire nach 3 aufeinanderfolgenden ERFOLGREICHEN Fetches ohne das

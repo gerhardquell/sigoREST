@@ -121,6 +121,45 @@ func TestGenerateShortcodeNoCollisions(t *testing.T) {
 	fmt.Printf("  %d Modelle, %d eindeutige Shortcodes – keine Kollisionen\n", len(models), len(shortcodes))
 }
 
+func TestGenerateShortcode_NoFamilyMatchStillDeduplicates(t *testing.T) {
+	// Regression: IDs ohne Familien-Präfix-Treffer fielen früher auf
+	// cutterCode(modelID) zurück, OHNE die used-Map zu konsultieren (das
+	// geschah erst in Schritt 6, den der No-Family-Zweig per frühem
+	// return übersprang). Da cutterCode nur den längsten Tabellen-Präfix
+	// zurückgibt, kollabierten so ALLE Longcat-Modelle auf denselben Code
+	// ("l62"), weil "long" der einzige matchende Cutter-Präfix ist und
+	// nichts danach differenziert. Betraf real: alle unbekannten Longcat-
+	// Modelle und alle 60 cheaperinference-Modelle (letzteres inzwischen
+	// über einen anderen Mechanismus behoben, siehe id_registry.go
+	// SemanticHint — dieser Test sichert den tieferliegenden
+	// GenerateShortcode-Bug selbst ab, unabhängig vom Aufrufer).
+	models := []string{
+		"LongCat-Flash-Chat", "LongCat-Flash-Thinking", "LongCat-Video",
+	}
+
+	used := make(map[string]bool)
+	seen := make(map[string]string)
+	for _, m := range models {
+		sc := GenerateShortcode(m, used)
+		if sc == "" {
+			t.Fatalf("GenerateShortcode(%q) lieferte leeren Code", m)
+		}
+		if existing, ok := seen[sc]; ok {
+			t.Errorf("Kollision! %q und %q → beide %q (No-Family-Zweig dedupliziert nicht)", existing, m, sc)
+		}
+		seen[sc] = m
+	}
+	if len(seen) != len(models) {
+		t.Errorf("%d Modelle, aber nur %d eindeutige Shortcodes", len(models), len(seen))
+	}
+
+	// used == nil (kein Dedup gewünscht) muss weiterhin den reinen
+	// Cutter-Code liefern, unverändert vom vorherigen Verhalten.
+	if sc := GenerateShortcode("LongCat-Flash-Chat", nil); sc == "" {
+		t.Error("GenerateShortcode mit used=nil lieferte leeren Code")
+	}
+}
+
 func TestCutterCode(t *testing.T) {
 	tests := []struct {
 		word string

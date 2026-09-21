@@ -268,8 +268,15 @@ func GenerateShortcode(modelID string, used map[string]bool) string {
 	}
 
 	if family == "" {
-		// Keine bekannte Familie: Cutter auf ganzen Namen
-		return strings.ToLower(cutterCode(modelID))
+		// Keine bekannte Familie: Cutter auf ganzen Namen. Läuft durch
+		// dieselbe Kollisionsauflösung wie der Familien-Pfad (Schritt 6) —
+		// sonst kollabieren IDs ohne Familien-Treffer (z.B.
+		// "LongCat-Flash-Chat", "LongCat-Flash-Thinking", "LongCat-Video")
+		// auf denselben Cutter-Code, weil cutterCode() nur den längsten
+		// Tabellen-Präfix zurückgibt und den Rest der ID ignoriert — vor
+		// diesem Fix bekamen so alle Modelle eines Providers ohne
+		// Familien-Präfix denselben, nicht unterscheidbaren Shortcode.
+		return resolveCollision(strings.ToLower(cutterCode(modelID)), used)
 	}
 
 	// 2. Parts splitten
@@ -372,16 +379,23 @@ func GenerateShortcode(modelID string, used map[string]bool) string {
 	}
 
 	// 6. Kollisionsauflösung
-	if used != nil {
-		base := sc
-		i := 2
-		for used[sc] {
-			sc = fmt.Sprintf("%s-%d", base, i)
-			i++
-		}
-		used[sc] = true
-	}
+	return resolveCollision(sc, used)
+}
 
+// resolveCollision hängt bei Bedarf einen numerischen Bindestrich-Suffix
+// an (z.B. "l62" -> "l62-2"), um Eindeutigkeit innerhalb von used
+// sicherzustellen. used == nil bedeutet "keine Kollisionsauflösung
+// gewünscht" (z.B. Ollama-Discovery, AssignModels Fallback ohne
+// Fetcher-Hint) — sc kommt unverändert zurück, used wird nie geschrieben.
+func resolveCollision(sc string, used map[string]bool) string {
+	if used == nil {
+		return sc
+	}
+	base := sc
+	for i := 2; used[sc]; i++ {
+		sc = fmt.Sprintf("%s-%d", base, i)
+	}
+	used[sc] = true
 	return sc
 }
 
