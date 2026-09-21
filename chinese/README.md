@@ -14,6 +14,7 @@ sigoREST 是一个开源的 AI 模型统一网关，让你可以同时使用多�
 🔌 **OpenAI 兼容的 API**
 - 一行代码切换模型
 - 支持 Python、Go、JavaScript、Common Lisp 等所有 OpenAI SDK
+- 简码持久化：每个模型的简码只分配一次，重启服务后依然不变（详见[完整中文文档](../README_CN.md#持久化简码注册表)）
 
 🔀 **多渠道与故障转移**
 - 每个 Provider 支持多个 API-Key 渠道
@@ -33,10 +34,10 @@ sigoREST 是一个开源的 AI 模型统一网关，让你可以同时使用多�
 make build
 ./build/sigoREST -v debug
 
-# 使用 Kimi
+# 使用 Kimi（用完整模型 ID，简码请先用 /api/shortcodes 查询当前值）
 curl http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"kimi","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"kimi-k2.5","messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ## 关于开发者
