@@ -1314,7 +1314,11 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		"model": ollamaInfo.OllamaName,
 		"input": inputs,
 	}
-	body, _ := json.Marshal(ollamaReq)
+	body, err := json.Marshal(ollamaReq)
+	if err != nil {
+		writeError(w, "interner Fehler beim Serialisieren der Anfrage: "+err.Error(), "internal_error", http.StatusInternalServerError)
+		return
+	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Post(ollamaEndpoint+"/api/embed", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -1329,7 +1333,15 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			sigoengine.LogWarn("Antwort von Ollama nicht lesbar", map[string]interface{}{
+				"model":  ollamaInfo.OllamaName,
+				"error":  err.Error(),
+			})
+			writeError(w, "Antwort des Providers nicht lesbar: "+err.Error(), "provider_error", http.StatusBadGateway)
+			return
+		}
 		sigoengine.LogWarn("Ollama /api/embed Fehler", map[string]interface{}{
 			"model":  ollamaInfo.OllamaName,
 			"status": resp.StatusCode,
@@ -1370,7 +1382,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	embResp := EmbeddingResponse{
 		Object: "list",
 		Data:   data,
-		Model:  ollamaInfo.OllamaName,
+		Model:  modelID,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

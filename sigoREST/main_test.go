@@ -530,6 +530,34 @@ func TestHandleEmbeddings_SingleInput(t *testing.T) {
 	}
 }
 
+// TestHandleEmbeddings_ModelRoundTrip stellt sicher, dass response.model exakt
+// dem Shortcode/Modell-ID entspricht, den der Client geschickt hat — nicht dem
+// internen OllamaName (z.B. "nomic-embed-text-v2-moe:latest"). OpenAI-Vertrag:
+// was der Client als model schickt, bekommt er als model zurück.
+func TestHandleEmbeddings_ModelRoundTrip(t *testing.T) {
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	body := fmt.Sprintf(`{"model":"%s","input":"hallo welt"}`, shortcode)
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp EmbeddingResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Model != shortcode {
+		t.Errorf("response.model = %q, expected shortcode %q (round-trip)", resp.Model, shortcode)
+	}
+	if strings.HasSuffix(resp.Model, ":latest") {
+		t.Errorf("response.model = %q darf nicht das ollama :latest-Suffix enthalten", resp.Model)
+	}
+}
+
 func TestHandleEmbeddings_ArrayInput(t *testing.T) {
 	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
 
