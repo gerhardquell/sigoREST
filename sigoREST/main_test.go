@@ -391,3 +391,305 @@ func TestLookupModel_ChannelSuffixAndRetired(t *testing.T) {
 		}
 	})
 }
+
+// **********************************************************************
+// Tests für POST /v1/embeddings
+// **********************************************************************
+
+// fakeOllamaConfig steuert das Verhalten des Test-Ollama-Servers.
+type fakeOllamaConfig struct {
+	embedCount int    // Anzahl Embeddings die /api/embed zurückgibt (-1 = len(input))
+	modelName  string // Ollama-Modellname für /api/tags (Default: nomic-embed-text-v2-moe:latest)
+}
+
+// startFakeOllama startet einen httptest.Server, der /api/tags, /api/show
+// und /api/embed bedient — als Test-Double für echtes Ollama.
+func startFakeOllama(t *testing.T, cfg fakeOllamaConfig) *httptest.Server {
+	t.Helper()
+	if cfg.modelName == "" {
+		cfg.modelName = "nomic-embed-text-v2-moe:latest"
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"models": []map[string]interface{}{
+					{"name": cfg.modelName, "size": int64(957680763)},
+				},
+			})
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"modelinfo":{}}`))
+		case "/api/embed":
+			var req struct {
+				Model string   `json:"model"`
+				Input []string `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("fake ollama: invalid /api/embed body: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			count := cfg.embedCount
+			if count < 0 {
+				count = len(req.Input)
+			}
+			embeddings := make([][]float64, count)
+			for i := range embeddings {
+				embeddings[i] = []float64{float64(i) + 0.1, float64(i) + 0.2, float64(i) + 0.3}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"model":      req.Model,
+				"embeddings": embeddings,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	return srv
+}
+
+// setupEmbeddingTestServer richtet einen Test-Server mit Fake-Ollama ein.
+// Gibt (server, shortcode) zurück. Räumt ollamaEndpoint und Ollama-Registry
+// automatisch per t.Cleanup auf.
+func setupEmbeddingTestServer(t *testing.T, cfg fakeOllamaConfig) (*Server, string) {
+	t.Helper()
+
+	fake := startFakeOllama(t, cfg)
+	t.Cleanup(fake.Close)
+
+	// Ollama-Endpoint auf Fake umleiten
+	oldEndpoint := ollamaEndpoint
+	ollamaEndpoint = fake.URL
+	t.Cleanup(func() { ollamaEndpoint = oldEndpoint })
+
+	// Ollama-Discovery über Fake ausführen (füllt die globale Registry)
+	sigoengine.DiscoverOllamaModels(fake.URL)
+	t.Cleanup(func() {
+		// Registry aufräumen: unreachable Endpoint leert sie
+		sigoengine.DiscoverOllamaModels("http://127.0.0.1:1")
+	})
+
+	srv, _ := newTestServer(t)
+
+	// Gefundene Ollama-Modelle in srv.models übernehmen (wie main() es tut)
+	for sc := range sigoengine.GetOllamaModels() {
+		srv.models[sc] = ModelInfo{
+			ID:        sc,
+			Shortcode: sc,
+			Endpoint:  fake.URL + "/v1/chat/completions",
+		}
+	}
+
+	var shortcode string
+	for sc := range sigoengine.GetOllamaModels() {
+		shortcode = sc
+		break
+	}
+
+	return srv, shortcode
+}
+
+func TestHandleEmbeddings_SingleInput(t *testing.T) {
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	body := fmt.Sprintf(`{"model":"%s","input":"hallo welt"}`, shortcode)
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp EmbeddingResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Object != "list" {
+		t.Errorf("object = %q, expected 'list'", resp.Object)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected 1 embedding, got %d", len(resp.Data))
+	}
+	if resp.Data[0].Object != "embedding" {
+		t.Errorf("data[0].object = %q, expected 'embedding'", resp.Data[0].Object)
+	}
+	if resp.Data[0].Index != 0 {
+		t.Errorf("data[0].index = %d, expected 0", resp.Data[0].Index)
+	}
+	if len(resp.Data[0].Embedding) != 3 {
+		t.Errorf("embedding dim = %d, expected 3", len(resp.Data[0].Embedding))
+	}
+	if resp.Model == "" {
+		t.Error("model field is empty")
+	}
+}
+
+func TestHandleEmbeddings_ArrayInput(t *testing.T) {
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	body := fmt.Sprintf(`{"model":"%s","input":["text eins","text zwei","text drei"]}`, shortcode)
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp EmbeddingResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp.Data) != 3 {
+		t.Fatalf("expected 3 embeddings, got %d", len(resp.Data))
+	}
+	for i, d := range resp.Data {
+		if d.Index != i {
+			t.Errorf("data[%d].index = %d, expected %d", i, d.Index, i)
+		}
+		if d.Object != "embedding" {
+			t.Errorf("data[%d].object = %q, expected 'embedding'", i, d.Object)
+		}
+	}
+}
+
+func TestHandleEmbeddings_UnknownModel(t *testing.T) {
+	srv, _ := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	body := `{"model":"does-not-exist","input":"hallo"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleEmbeddings_EmptyInput(t *testing.T) {
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty string", fmt.Sprintf(`{"model":"%s","input":""}`, shortcode)},
+		{"empty array", fmt.Sprintf(`{"model":"%s","input":[]}`, shortcode)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(tc.body))
+			rr := httptest.NewRecorder()
+			srv.handleEmbeddings(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleEmbeddings_NonOllamaModel(t *testing.T) {
+	// Sicherstellen, dass die Ollama-Registry leer ist (kein false-positive Match).
+	sigoengine.DiscoverOllamaModels("http://127.0.0.1:1")
+
+	srv, _ := newTestServer(t)
+	srv.models["claude-h"] = ModelInfo{
+		ID:        "claude-h",
+		Shortcode: "claude-h",
+		Endpoint:  "https://api.example.com/v1/chat/completions",
+	}
+
+	body := `{"model":"claude-h","input":"hallo"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "ollama") {
+		t.Fatalf("expected error mentioning ollama, got: %s", rr.Body.String())
+	}
+}
+
+func TestHandleEmbeddings_OllamaDown(t *testing.T) {
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	// ollamaEndpoint auf tote Adresse umstellen (Registry bleibt erhalten).
+	ollamaEndpoint = "http://127.0.0.1:1"
+
+	body := fmt.Sprintf(`{"model":"%s","input":"hallo"}`, shortcode)
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleEmbeddings_WrongEmbeddingCount(t *testing.T) {
+	// Fake gibt immer 1 Embedding zurück, unabhängig von Input-Anzahl.
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: 1})
+
+	body := fmt.Sprintf(`{"model":"%s","input":["a","b"]}`, shortcode)
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleEmbeddings_WrongMethod(t *testing.T) {
+	srv, _ := setupEmbeddingTestServer(t, fakeOllamaConfig{embedCount: -1})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/embeddings", nil)
+	rr := httptest.NewRecorder()
+	srv.handleEmbeddings(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestHandleHelp_ListsEmbeddingsEndpoint(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/help", nil)
+	rr := httptest.NewRecorder()
+	srv.handleHelp(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var help map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &help); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	endpoints, ok := help["endpoints"].([]interface{})
+	if !ok {
+		t.Fatalf("expected endpoints array, got %+v", help["endpoints"])
+	}
+	found := false
+	for _, e := range endpoints {
+		entry, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if entry["path"] == "/v1/embeddings" && entry["method"] == "POST" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected /api/help to list POST /v1/embeddings, got: %s", rr.Body.String())
+	}
+}

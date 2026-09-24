@@ -16,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -183,6 +184,12 @@ var (
 	rateMinInterval       = flag.Duration("rate-min-interval", 500*time.Millisecond, "Default Mindest-Abstand zwischen Calls pro Kanal (0=deaktiviert)")
 	rateMaxWait           = flag.Duration("rate-max-wait", 1000*time.Millisecond, "Default max Queue-Wartezeit bis HTTP 429 pro Kanal")
 )
+
+// ollamaEndpoint ist der Default-Endpoint für lokale Ollama-Modelle.
+// Paket-Level-Variable (kein Server-Feld), damit Tests den Endpoint auf
+// einen httptest.Server umleiten können — minimale Änderung, kein Eingriff
+// in die Server-Struct.
+var ollamaEndpoint = "http://localhost:11434"
 
 // **********************************************************************
 // IP-Zugriffskontrolle
@@ -1192,6 +1199,185 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
+// POST /v1/embeddings - OpenAI-kompatible Embedding-API (Proxy auf Ollama)
+//
+// Unterstützt ausschließlich lokale Ollama-Modelle (via DiscoverOllamaModels
+// bekannt). Externe Embedding-Provider sind bewusst nicht integriert (YAGNI).
+// Kosten-Tracking entfällt: ollama = 0 USD, Budget-Check nicht erforderlich.
+
+// EmbeddingRequest — OpenAI-kompatible Embedding-Anfrage.
+// Input kann ein String oder ein Array von Strings sein.
+type EmbeddingRequest struct {
+	Model string      `json:"model"`
+	Input interface{} `json:"input"`
+}
+
+// EmbeddingData — ein Embedding-Eintrag in der OpenAI-Response.
+type EmbeddingData struct {
+	Object    string    `json:"object"`
+	Index     int       `json:"index"`
+	Embedding []float64 `json:"embedding"`
+}
+
+// EmbeddingResponse — OpenAI-kompatible Embedding-Antwort.
+type EmbeddingResponse struct {
+	Object string          `json:"object"`
+	Data   []EmbeddingData `json:"data"`
+	Model  string          `json:"model"`
+}
+
+// handleEmbeddings verarbeitet POST /v1/embeddings.
+// Löst das Modell über die bestehende Lookup-Infrastruktur auf, leitet die
+// Anfrage an Ollama /api/embed weiter und mappt die Antwort ins OpenAI-Format.
+func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, "Method not allowed", "invalid_request", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req EmbeddingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, "Invalid JSON: "+err.Error(), "invalid_request", http.StatusBadRequest)
+		return
+	}
+
+	// Input normalisieren: String oder Array von Strings.
+	// Leerer String oder leeres Array → 400.
+	var inputs []string
+	switch v := req.Input.(type) {
+	case string:
+		if v == "" {
+			writeError(w, "input darf nicht leer sein", "invalid_request", http.StatusBadRequest)
+			return
+		}
+		inputs = []string{v}
+	case []interface{}:
+		if len(v) == 0 {
+			writeError(w, "input darf nicht leer sein", "invalid_request", http.StatusBadRequest)
+			return
+		}
+		inputs = make([]string, 0, len(v))
+		for _, item := range v {
+			s, ok := item.(string)
+			if !ok {
+				writeError(w, "input-Array darf nur Strings enthalten", "invalid_request", http.StatusBadRequest)
+				return
+			}
+			inputs = append(inputs, s)
+		}
+	case []string:
+		if len(v) == 0 {
+			writeError(w, "input darf nicht leer sein", "invalid_request", http.StatusBadRequest)
+			return
+		}
+		inputs = v
+	default:
+		writeError(w, "input muss ein String oder ein Array von Strings sein", "invalid_request", http.StatusBadRequest)
+		return
+	}
+
+	// Modell auflösen (ID oder Shortcode, wie bei Chat). lookupModel sperrt
+	// selbst — s.mu darf hier NICHT gehalten werden.
+	modelID := req.Model
+	lr, exists := s.lookupModel(modelID)
+	if exists {
+		modelID = lr.ID
+	}
+	if !exists {
+		writeError(w, fmt.Sprintf("Model '%s' nicht gefunden", req.Model), "model_not_found", http.StatusBadRequest)
+		return
+	}
+	if lr.Retired {
+		writeError(w, fmt.Sprintf(
+			"Modell '%s' ist seit %s nicht mehr verfügbar. Kein automatischer Fallback auf ein anderes Modell.",
+			modelID, lr.RetiredAt.Format("2006-01-02"),
+		), "model_retired", http.StatusGone)
+		return
+	}
+
+	// Ollama-Modell? Embedding derzeit nur für lokale ollama-Modelle.
+	ollamaModels := sigoengine.GetOllamaModels()
+	ollamaInfo, isOllama := ollamaModels[lr.Info.Shortcode]
+	if !isOllama {
+		// Fallback: bei Ollama-Modellen ist ID == Shortcode.
+		ollamaInfo, isOllama = ollamaModels[lr.Info.ID]
+	}
+	if !isOllama {
+		writeError(w, "Embedding derzeit nur für lokale ollama-Modelle unterstützt", "invalid_request", http.StatusBadRequest)
+		return
+	}
+
+	// Ollama /api/embed aufrufen.
+	// Body:   {"model": "<OllamaName>", "input": [<alle Eingabetexte>]}
+	// Antwort: {"model": "...", "embeddings": [[...], [...]]}
+	ollamaReq := map[string]interface{}{
+		"model": ollamaInfo.OllamaName,
+		"input": inputs,
+	}
+	body, _ := json.Marshal(ollamaReq)
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Post(ollamaEndpoint+"/api/embed", "application/json", bytes.NewReader(body))
+	if err != nil {
+		sigoengine.LogWarn("Ollama nicht erreichbar", map[string]interface{}{
+			"model":    ollamaInfo.OllamaName,
+			"endpoint": ollamaEndpoint,
+			"error":    err.Error(),
+		})
+		writeError(w, "Provider nicht erreichbar: "+err.Error(), "provider_unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		sigoengine.LogWarn("Ollama /api/embed Fehler", map[string]interface{}{
+			"model":  ollamaInfo.OllamaName,
+			"status": resp.StatusCode,
+			"body":   string(respBody),
+		})
+		writeError(w, fmt.Sprintf("Ollama-Fehler (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody))), "api_error", http.StatusBadGateway)
+		return
+	}
+
+	var ollamaResp struct {
+		Model      string      `json:"model"`
+		Embeddings [][]float64 `json:"embeddings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
+		writeError(w, "Ollama-Antwort nicht parsebar: "+err.Error(), "api_error", http.StatusBadGateway)
+		return
+	}
+
+	// Anzahl Embeddings muss mit Input-Anzahl übereinstimmen.
+	if len(ollamaResp.Embeddings) != len(inputs) {
+		writeError(w, fmt.Sprintf(
+			"Anzahl Embeddings (%d) entspricht nicht Input-Anzahl (%d)",
+			len(ollamaResp.Embeddings), len(inputs),
+		), "api_error", http.StatusBadGateway)
+		return
+	}
+
+	// In OpenAI-Format mappen: ein data-Element pro input, index aufsteigend.
+	data := make([]EmbeddingData, len(ollamaResp.Embeddings))
+	for i, emb := range ollamaResp.Embeddings {
+		data[i] = EmbeddingData{
+			Object:    "embedding",
+			Index:     i,
+			Embedding: emb,
+		}
+	}
+
+	embResp := EmbeddingResponse{
+		Object: "list",
+		Data:   data,
+		Model:  ollamaInfo.OllamaName,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(embResp)
+}
+
+// **********************************************************************
 // GET /v1/models - OpenAI-kompatible Modell-Liste
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -1696,6 +1882,18 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
   -d '{"model":"claude-h","max_tokens":1024,"messages":[{"role":"user","content":"Hallo"}]}'`,
 			},
 			{
+				"path":        "/v1/embeddings",
+				"method":      "POST",
+				"description": "OpenAI-kompatible Embedding-API (Proxy auf lokale Ollama-Modelle)",
+				"parameters": map[string]string{
+					"model": "Modell-ID oder Shortcode (z.B. 'ollama-nomic-embed-text-v2-moe')",
+					"input": "String oder Array von Strings; leeres input → 400",
+				},
+				"example": `curl -s http://localhost:9080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model":"ollama-nomic-embed-text-v2-moe","input":"Hallo Welt"}'`,
+			},
+			{
 				"path":        "/v1/models",
 				"method":      "GET",
 				"description": "Liste aller verfügbaren Modelle (OpenAI-kompatibel)",
@@ -1975,7 +2173,6 @@ func main() {
 	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, *channelHealthInterval)
 
 	// Ollama Auto-Discovery
-	ollamaEndpoint := "http://localhost:11434"
 	if n := sigoengine.DiscoverOllamaModels(ollamaEndpoint); n > 0 {
 		srv.mu.Lock()
 		ollamaModels := sigoengine.GetOllamaModels()
@@ -2004,6 +2201,7 @@ func main() {
 	mux.HandleFunc("/ping", srv.handlePing)
 	mux.HandleFunc("/api/version", srv.handleVersion)
 	mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
+	mux.HandleFunc("/v1/embeddings", srv.handleEmbeddings)
 	mux.HandleFunc("/v1/messages", srv.handleMessages)
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/api/models", srv.handleAPIModels)
