@@ -48,10 +48,17 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   Alle Punkte oben wirken im Live-Dienst erst danach.
 - [ ] **`-comm-log` live einschalten** (optional, nur zur Fehlersuche):
   `LogsDirectory=sigoREST` in die Unit, dazu das Flag an `ExecStart` anhängen.
-- [ ] **Reserve-Kanäle für Longcat/cheaperinference/Ollama werden nie aktiviert:**
-  `modelsEndpointForProvider` (`sigoengine/engine.go`) kennt nur
-  mammouth/moonshot/zai. Für alle anderen meldet die Health-Probe
-  „unavailable“, und der Health-Monitor schaltet keine Reserve zu.
+- [x] **Health-Probe für Longcat/cheaperinference** (`modelsEndpointForProvider`
+  kannte nur mammouth/moonshot/zai): behoben, beide Endpoints ergänzt,
+  `TestModelsEndpointForProvider` gleicht gegen `knownProviders` ab. Ollama
+  braucht keinen Endpoint (ein Kanal, keine Reserven).
+- [ ] **Manuell deaktivierter Kanal wird vom Health-Monitor zurückgeholt:**
+  Deaktiviert man per API den einzigen aktiven Kanal eines Providers, findet
+  `runHealthChecks` „kein aktiver Kanal“ und aktiviert den ersten inaktiven
+  gesunden (nach `Order`), also meist genau den gerade abgeschalteten
+  `default`. Ein manuelles `disable` hält so nur ein Health-Intervall
+  (Default 30 s). Beobachtet am 27.09.; klären, ob das gewollt ist (Verfügbarkeit
+  vor manuellem Eingriff) oder ob ein manuelles `disable` Vorrang haben soll.
 - [ ] **Shortcode-Kuriosum** `che-cl-f025` für `claude-fable-5`:
   `GenerateShortcode` kennt „fable“ nicht als Unterfamilie. Wegen
   Assign-Once ist das Kürzel eingefroren und betrifft nur künftige Modelle.

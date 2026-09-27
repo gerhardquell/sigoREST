@@ -1144,6 +1144,10 @@ func modelsEndpointForProvider(provider string) (string, bool) {
 		return moonshotModelsEndpoint, true
 	case "zai":
 		return zaiModelsEndpoint, true
+	case "longcat":
+		return longcatModelsEndpoint, true
+	case "cheaperinference":
+		return cheaperinferenceModelsEndpoint, true
 	default:
 		return "", false
 	}

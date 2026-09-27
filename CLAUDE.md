@@ -562,9 +562,18 @@ Server: Modelle kommen dynamisch vom Provider — bekannte Modelle werden in
 ### Neuen Provider hinzufügen
 Reicht NICHT nur: `Fetch*`-Funktion in `provider_fetchers.go` + Eintrag in
 `channel.go` (`knownProviders`) + Aufruf in `loadModelsFromProviders()`.
-**`providerForModel()` in `sigoREST/main.go` muss ebenfalls einen `case` für
-den neuen Provider bekommen** (beide Zweige: Endpoint-Match und
-Namens-Heuristik-Fallback) — sonst fällt jedes Modell des neuen Providers auf
+Zusätzlich nötig:
+
+- **`modelsEndpointForProvider()` in `sigoengine/engine.go`** braucht einen
+  `case` mit dem `/models`-Endpoint — sonst meldet die Health-Probe immer
+  "unavailable" und der Health-Monitor aktiviert nie einen Kanal des
+  Providers (bis 2026-09-27 bei longcat/cheaperinference so; abgesichert
+  durch `TestModelsEndpointForProvider`, der `knownProviders` gegenprüft).
+- **Provider-Erkennung** (heute `sigoengine/provider_id.go`:
+  `ProviderFromEndpoint` + `ProviderFromModelID` + `providerCodes`; die
+  Server-Funktion `providerForModel()` ist nur noch ein Wrapper darum)
+  braucht den neuen Provider in beiden Zweigen (Endpoint-Match und
+  Namens-Heuristik-Fallback) — sonst fällt jedes Modell des neuen Providers auf
 den Default-Zweig (`mammouth`) zurück und Chat-Calls gehen mit falschem
 API-Key raus (Symptom: HTTP 401 "incorrect api key", obwohl der Key gültig
 ist — beim Longcat-Rollout genau so live aufgetreten). Nach jedem neuen

@@ -156,3 +156,33 @@ func TestCheckChannel_AuthFailureDeactivatesChannel(t *testing.T) {
 		t.Fatalf("expected channels.json to be written: %v", err)
 	}
 }
+
+// TestModelsEndpointForProvider: jeder Provider mit Reserve-Kanälen (API-Key
+// aus knownProviders) braucht einen Probe-Endpoint — sonst meldet
+// ProbeProviderModelList immer "unavailable" und der Health-Monitor schaltet
+// nie eine Reserve zu (war bis 2026-09-27 bei longcat/cheaperinference so).
+func TestModelsEndpointForProvider(t *testing.T) {
+	cases := []struct {
+		provider  string
+		endpoint  string
+		needsAuth bool
+	}{
+		{"mammouth", mammouthModelsEndpoint, false},
+		{"moonshot", moonshotModelsEndpoint, true},
+		{"zai", zaiModelsEndpoint, true},
+		{"longcat", longcatModelsEndpoint, true},
+		{"cheaperinference", cheaperinferenceModelsEndpoint, true},
+	}
+	for _, c := range cases {
+		ep, auth := modelsEndpointForProvider(c.provider)
+		if ep != c.endpoint || auth != c.needsAuth {
+			t.Errorf("%s: bekommen (%q, %v), erwartet (%q, %v)", c.provider, ep, auth, c.endpoint, c.needsAuth)
+		}
+	}
+	// Vollständigkeit: kein Key-Provider ohne Probe-Endpoint.
+	for _, p := range knownProviders {
+		if ep, _ := modelsEndpointForProvider(p.Provider); ep == "" {
+			t.Errorf("knownProviders-Eintrag %q hat keinen Probe-Endpoint", p.Provider)
+		}
+	}
+}
