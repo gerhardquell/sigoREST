@@ -100,6 +100,7 @@ sigorest/
 │   ├── rate_limiter.go          #   Pro-Kanal Rate-Limiter (hybrid, siehe unten)
 │   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
 │   ├── models_csv.go            #   WriteModelsCSV (Export im Registry-CSV-Format)
+│   ├── commlog.go               #   Kommunikationsprotokoll (-comm-log, JSONL, RoundTripper)
 │   ├── env.go                   #   Optionale ./.env Datei (veraltete ./env mit Warnung)
 │   ├── costdb.go                #   Kosten-Tracking (SQLite, WAL) + Budget-Check
 │   ├── id_registry.go           #   Persistente Shortcode-Registry (SQLite, assign-once)
@@ -477,6 +478,27 @@ erreichbar, unabhängig vom Provider-Wire-Format. Modellwahl ist 1:1 wie bei
 `/v1/chat/completions` (ID/Shortcode, kein Alias). Keine Memory-/System-
 Prompt-/Session-Injektion in diesem Pfad — der Client verwaltet seinen
 eigenen Kontext. Details: `docs/superpowers/specs/2026-09-12-anthropic-messages-bridge-design.md`.
+
+### Kommunikationsprotokoll (`sigoengine/commlog.go`, Flag `-comm-log`)
+
+Optional (`-comm-log <pfad>`, leer = aus): jeder Chat-/Embedding-Call zum
+Provider wird mit vollständigem Request/Response als JSONL geschrieben.
+Umsetzung als `http.RoundTripper` (`NewCommLogTransport`), der in
+`chatHTTPClient` (`CallAPI`/`CallAPIStream`, also auch `/v1/messages`) und
+im Embedding-Client von `handleEmbeddings` steckt. Provider-Pings
+(`defaultHTTPClient`), Health-Monitor und Boot-Modellabrufe laufen bewusst
+**nicht** darüber — deshalb der eigene `chatHTTPClient`.
+
+- Eintrag wird beim `Close()` des Response-Bodys geschrieben (Tee-Reader),
+  sonst fehlte bei SSE alles nach den Headern. Aufrufer müssen den Body
+  schließen (tun sie: `defer stream.Close()`).
+- Gültiges JSON landet als eingebettetes Objekt (`json.RawMessage`, wird
+  beim Marshal kompaktiert → bleibt eine Zeile), SSE/Sonstiges als String.
+- Secret-Header → `[REDACTED]`; Bodies > 10 MiB abgeschnitten; Datei `0600`,
+  Append-Modus (logrotate mit `copytruncate`).
+- Öffnen fehlgeschlagen → Server-Start bricht ab (explizit angefordert,
+  kein stilles Weiterlaufen ohne Protokoll). Ohne Flag: Transport reicht
+  unverändert durch (`activeCommLog` = nil).
 
 ### Session-Management
 

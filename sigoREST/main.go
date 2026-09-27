@@ -183,6 +183,7 @@ var (
 	channelHealthInterval = flag.Duration("channel-health-interval", 30*time.Second, "Intervall für Kanal-Health-Checks")
 	rateMinInterval       = flag.Duration("rate-min-interval", 500*time.Millisecond, "Default Mindest-Abstand zwischen Calls pro Kanal (0=deaktiviert)")
 	rateMaxWait           = flag.Duration("rate-max-wait", 1000*time.Millisecond, "Default max Queue-Wartezeit bis HTTP 429 pro Kanal")
+	commLogPath           = flag.String("comm-log", "", "Provider-Kommunikation (Chat+Embeddings, volle Bodies) als JSONL protokollieren, z.B. /var/log/sigoREST/communication.jsonl (leer=aus)")
 )
 
 // ollamaEndpoint ist der Default-Endpoint für lokale Ollama-Modelle.
@@ -1338,7 +1339,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "interner Fehler beim Serialisieren der Anfrage: "+err.Error(), "internal_error", http.StatusInternalServerError)
 		return
 	}
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second, Transport: sigoengine.NewCommLogTransport(nil)}
 	resp, err := client.Post(ollamaEndpoint+"/api/embed", "application/json", bytes.NewReader(body))
 	if err != nil {
 		sigoengine.LogWarn("Ollama nicht erreichbar", map[string]interface{}{
@@ -2160,6 +2161,21 @@ func main() {
 	sigoengine.SetQuietMode(*quiet)
 	if envWarning != "" {
 		sigoengine.LogWarn(envWarning)
+	}
+
+	// Kommunikationsprotokoll (optional). Explizit angefordert → Fehler beim
+	// Öffnen ist fatal statt still ohne Protokoll weiterzulaufen.
+	if *commLogPath != "" {
+		commLog, err := sigoengine.OpenCommLog(*commLogPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Fehler beim Öffnen des Kommunikationsprotokolls: %v\n", err)
+			os.Exit(1)
+		}
+		defer commLog.Close()
+		sigoengine.SetCommLog(commLog)
+		sigoengine.LogWarn("Kommunikationsprotokoll aktiv — enthält vollständige Prompts/Antworten", map[string]interface{}{
+			"path": *commLogPath,
+		})
 	}
 
 	sigoengine.LogInfo("sigoREST startet", map[string]interface{}{

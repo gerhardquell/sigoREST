@@ -78,6 +78,7 @@ make clean
 | `-channel-health-interval` | `30s` | Intervall für Kanal-Health-Checks |
 | `-rate-min-interval` | `500ms` | Default Mindest-Abstand zwischen Calls pro Kanal (`0`=deaktiviert) |
 | `-rate-max-wait` | `1000ms` | Default max Queue-Wartezeit bis HTTP 429 pro Kanal |
+| `-comm-log` | — (aus) | Kommunikationsprotokoll: alle Chat-/Embedding-Calls zum Provider mit vollständigem Request/Response als JSONL, z.B. `/var/log/sigoREST/communication.jsonl`. API-Key-Header werden maskiert, Datei `0600`. Siehe `docs/systemd-install.md` |
 | `-v` | `info` | Log-Level: `debug\|info\|warn\|error` |
 | `-q` | — | Quiet Mode (nur Fehler) |
 | `-j` | — | JSON-Logs |

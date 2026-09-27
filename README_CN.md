@@ -80,6 +80,7 @@ make clean
 | `-channel-health-interval` | `30s` | 渠道健康检查间隔 |
 | `-rate-min-interval` | `500ms` | 每渠道调用间默认最小间隔（`0`=禁用） |
 | `-rate-max-wait` | `1000ms` | 每渠道触发 HTTP 429 前的默认最大排队等待时间 |
+| `-comm-log` | —（关闭） | 通信日志：以 JSONL 记录所有发往 Provider 的聊天/嵌入调用的完整请求/响应，例如 `/var/log/sigoREST/communication.jsonl`。API 密钥请求头会被脱敏，文件权限 `0600`。参见 `docs/systemd-install.md` |
 | `-v` | `info` | 日志级别：`debug\|info\|warn\|error` |
 | `-q` | — | 静默模式（仅错误） |
 | `-j` | — | JSON 格式日志 |

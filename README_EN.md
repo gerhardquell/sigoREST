@@ -78,6 +78,7 @@ make clean
 | `-channel-health-interval` | `30s` | Interval for channel health checks |
 | `-rate-min-interval` | `500ms` | Default minimum spacing between calls per channel (`0`=disabled) |
 | `-rate-max-wait` | `1000ms` | Default max queue wait before HTTP 429 per channel |
+| `-comm-log` | — (off) | Communication log: every chat/embedding call to the provider with full request/response as JSONL, e.g. `/var/log/sigoREST/communication.jsonl`. API key headers are redacted, file mode `0600`. See `docs/systemd-install.md` |
 | `-v` | `info` | Log level: `debug\|info\|warn\|error` |
 | `-q` | — | Quiet mode (errors only) |
 | `-j` | — | JSON logs |

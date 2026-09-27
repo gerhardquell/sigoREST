@@ -1170,8 +1170,13 @@ func isContextLimitError(errText string) bool {
 	return false
 }
 
-// defaultHTTPClient wird von CallAPI wiederverwendet, um Connection-Pooling zu ermöglichen.
+// defaultHTTPClient wird für Provider-Pings wiederverwendet (Connection-Pooling).
 var defaultHTTPClient = &http.Client{}
+
+// chatHTTPClient wird von CallAPI/CallAPIStream genutzt. Eigener Client, weil
+// nur Chat-Calls (nicht Pings) ins Kommunikationsprotokoll gehören; ohne
+// aktiven Logger reicht der Transport unverändert durch.
+var chatHTTPClient = &http.Client{Transport: NewCommLogTransport(nil)}
 
 // **********************************************************************
 // CallAPI führt einen HTTP-Call zu einem AI-Provider durch
@@ -1210,7 +1215,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 		req.Header.Set(k, v)
 	}
 
-	resp, err := defaultHTTPClient.Do(req)
+	resp, err := chatHTTPClient.Do(req)
 	if err != nil {
 		LogError("HTTP request failed", err, logF)
 		return "", nil, "", nil, NewError(ErrAPIFailed, "HTTP request failed", err, logF)
@@ -1354,7 +1359,7 @@ func CallAPIStream(ctx context.Context, cfg *ProviderConfig, request map[string]
 		req.Header.Set(k, v)
 	}
 
-	resp, err := defaultHTTPClient.Do(req)
+	resp, err := chatHTTPClient.Do(req)
 	if err != nil {
 		return nil, NewError(ErrAPIFailed, "HTTP request failed", err, logF)
 	}

@@ -131,3 +131,45 @@ curl -X PUT http://localhost:9080/api/memory \
 - Zusätzliche Kanäle (z.B. `MAMMOUTH_API_KEY_0`) sind standardmäßig inaktiv.
   Aktivierung via REST: `curl -X POST http://localhost:9080/api/channels/mammouth/0/enable`
 - Der Health-Monitor prüft alle aktiven Kanäle im `-channel-health-interval` und schaltet bei Bedarf Reservekanäle zu
+
+## Optional: Kommunikationsprotokoll (`-comm-log`)
+
+Protokolliert jeden Chat- und Embedding-Call zum Provider (inkl. Streaming
+und `/v1/messages`) mit vollständigem Request und Response als JSON Lines —
+ein Objekt pro Zeile. Provider-Pings, Health-Checks und Modellabrufe beim
+Boot werden **nicht** protokolliert. API-Key-Header (`Authorization`,
+`x-api-key`, …) werden als `[REDACTED]` geschrieben; Bodies über 10 MiB
+werden abgeschnitten (`*_truncated: true`).
+
+**Achtung:** Die Datei enthält alle Prompts und Antworten im Klartext und
+wächst schnell. Nur zur Fehlersuche einschalten.
+
+In der Unit ergänzen — `LogsDirectory` legt `/var/log/sigoREST` mit
+Besitzer `sigorest` an (ohne das darf der Dienst-User dort nicht schreiben
+und sigoREST bricht beim Start ab):
+```ini
+[Service]
+LogsDirectory=sigoREST
+LogsDirectoryMode=0750
+ExecStart=/usr/local/sbin/sigoREST \
+    ... \
+    -comm-log /var/log/sigoREST/communication.jsonl
+```
+
+Rotation per logrotate (`/etc/logrotate.d/sigoREST`). sigoREST hält die
+Datei offen und schreibt im Append-Modus, daher `copytruncate`:
+```
+/var/log/sigoREST/communication.jsonl {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+Auswerten, z.B. alle fehlgeschlagenen Calls:
+```bash
+jq -c 'select(.status != 200) | {ts, url, status, error}' /var/log/sigoREST/communication.jsonl
+```
