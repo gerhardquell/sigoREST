@@ -41,6 +41,12 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   `404 CONFIG_NOT_FOUND: no active channel for provider`, betroffen war auch
   der Live-Dienst. Jetzt gibt es den keylosen Kanal `ollama-default`.
 - **Doppeltes `data: [DONE]`** in allen OpenAI-kompatiblen Streams (`5500406`).
+- **Health-Probe für Longcat/cheaperinference** fehlte (`b5a9acb`).
+- **Modellabrufe ignorierten `.env`**: Die Fetcher für Moonshot, Z.ai, Longcat
+  und cheaperinference lasen `os.Getenv` statt `GetEnvWithFile`. Das betraf
+  nur manuelle Starts mit Keys ausschließlich in `./.env` (unter systemd setzt
+  `EnvironmentFile=` echte Umgebungsvariablen). `TestNoDirectOsGetenv`
+  verhindert per AST-Prüfung, dass das wiederkommt.
 
 ## Offen
 
@@ -48,10 +54,6 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   Alle Punkte oben wirken im Live-Dienst erst danach.
 - [ ] **`-comm-log` live einschalten** (optional, nur zur Fehlersuche):
   `LogsDirectory=sigoREST` in die Unit, dazu das Flag an `ExecStart` anhängen.
-- [x] **Health-Probe für Longcat/cheaperinference** (`modelsEndpointForProvider`
-  kannte nur mammouth/moonshot/zai): behoben, beide Endpoints ergänzt,
-  `TestModelsEndpointForProvider` gleicht gegen `knownProviders` ab. Ollama
-  braucht keinen Endpoint (ein Kanal, keine Reserven).
 - [ ] **Manuell deaktivierter Kanal wird vom Health-Monitor zurückgeholt:**
   Deaktiviert man per API den einzigen aktiven Kanal eines Providers, findet
   `runHealthChecks` „kein aktiver Kanal“ und aktiviert den ersten inaktiven

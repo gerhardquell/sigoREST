@@ -1,8 +1,12 @@
 package sigoengine
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +64,37 @@ func TestResolveEnvFile_BothPreferDotEnv(t *testing.T) {
 	}
 	if warn == "" {
 		t.Fatal("Warnung für ignorierte ./env erwartet")
+	}
+}
+
+// TestNoDirectOsGetenv: API-Keys müssen über GetEnvWithFile gelesen werden,
+// sonst werden Keys, die nur in ./.env stehen, ignoriert. Bis 2026-09-27
+// lasen die Provider-Fetcher os.Getenv direkt: bei manuellem Start mit Keys
+// nur in .env bekamen die Kanäle ihre Keys, der Modellabruf aber nicht
+// (Moonshot/cheaperinference → 0 Modelle). Einzige erlaubte Stelle: env.go.
+func TestNoDirectOsGetenv(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		if f == "env.go" || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		node, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(node, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Getenv" {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "os" {
+				t.Errorf("%s: os.Getenv statt GetEnvWithFile", fset.Position(sel.Pos()))
+			}
+			return true
+		})
 	}
 }

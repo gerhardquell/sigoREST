@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 )
@@ -222,7 +221,7 @@ func firstNonZeroFloat(vals ...float64) float64 {
 // OpenAI-Format: Response enthält nur Model-IDs, keine Preise.
 // Bekannte Modelle werden aus moonshotKnownModels angereichert.
 func FetchMoonshotModels() ([]Model, error) {
-	apiKey := os.Getenv("MOONSHOT_API_KEY")
+	apiKey := GetEnvWithFile("MOONSHOT_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("moonshot: MOONSHOT_API_KEY nicht gesetzt")
 	}
@@ -298,7 +297,7 @@ func FetchMoonshotModels() ([]Model, error) {
 // Fallback: zaiStaticModels (13 Modelle) wenn API nicht antwortet oder
 // keinen /models-Endpoint hat (nicht dokumentiert).
 func FetchZAIModels() ([]Model, error) {
-	apiKey := os.Getenv("ZAI_API_KEY")
+	apiKey := GetEnvWithFile("ZAI_API_KEY")
 	if apiKey == "" {
 		LogWarn("ZAI_API_KEY nicht gesetzt, verwende statische ZAI-Modelle")
 		return zaiStaticModels, nil
@@ -389,7 +388,7 @@ var longcatKnownModels = map[string]Model{
 // OpenAI-Format: Response enthält nur Model-IDs, keine Preise.
 // Bekannte Modelle werden aus longcatKnownModels angereichert.
 func FetchLongcatModels() ([]Model, error) {
-	apiKey := os.Getenv("LONGCAT_API_KEY")
+	apiKey := GetEnvWithFile("LONGCAT_API_KEY")
 	if apiKey == "" {
 		LogWarn("LONGCAT_API_KEY nicht gesetzt, verwende statische Longcat-Modelle")
 		result := make([]Model, 0, len(longcatKnownModels))
@@ -479,7 +478,7 @@ func FetchLongcatModels() ([]Model, error) {
 // unpräfixten Original-Namen, den main.go beim Request-Aufbau als
 // tatsächliches "model"-Feld verwendet (die API kennt "ci-..." nicht).
 func FetchCheaperinferenceModels() ([]Model, error) {
-	apiKey := os.Getenv("OMNIROUTE_API_KEY")
+	apiKey := GetEnvWithFile("OMNIROUTE_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("cheaperinference: OMNIROUTE_API_KEY nicht gesetzt")
 	}
