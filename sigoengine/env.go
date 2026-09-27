@@ -1,7 +1,8 @@
 //**********************************************************************
 //      sigoengine/env.go
 //**********************************************************************
-//  Beschreibung: Unterstützung für env-Datei im Startverzeichnis
+//  Beschreibung: Unterstützung für .env-Datei im Startverzeichnis
+//                (veraltete ./env wird mit Warnung noch geladen)
 //**********************************************************************
 
 package sigoengine
@@ -10,9 +11,64 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
+
+const (
+	// DotEnvFileName ist der bevorzugte Dateiname (versteckt, nicht im ls sichtbar).
+	DotEnvFileName = ".env"
+	// LegacyEnvFileName ist der veraltete, sichtbare Dateiname.
+	LegacyEnvFileName = "env"
+)
+
+// ResolveEnvFile wählt die im Verzeichnis dir zu ladende Env-Datei.
+// Rückgabe:
+//   - path:    zu ladender Pfad, "" wenn keine Env-Datei existiert
+//   - warning: Hinweis für den Aufrufer (z.B. veraltete ./env), "" wenn keiner
+//
+// Reine Funktion (nur os.Stat), kein globaler Zustand — dadurch testbar.
+func ResolveEnvFile(dir string) (path string, warning string) {
+	dotEnv := filepath.Join(dir, DotEnvFileName)
+	legacy := filepath.Join(dir, LegacyEnvFileName)
+	_, errDot := os.Stat(dotEnv)
+	_, errLegacy := os.Stat(legacy)
+	hasDot := errDot == nil
+	hasLegacy := errLegacy == nil
+
+	// Absoluter Pfad nur für die Warnung: unter systemd sieht man sonst
+	// nicht, in welchem Arbeitsverzeichnis die Datei liegt.
+	legacyAbs := legacy
+	if abs, err := filepath.Abs(legacy); err == nil {
+		legacyAbs = abs
+	}
+
+	switch {
+	case hasDot && hasLegacy:
+		return dotEnv, fmt.Sprintf("veraltete Env-Datei %q wird ignoriert, %s hat Vorrang — bitte löschen",
+			legacyAbs, DotEnvFileName)
+	case hasDot:
+		return dotEnv, ""
+	case hasLegacy:
+		return legacy, fmt.Sprintf("veraltete Env-Datei %q geladen — bitte in %s umbenennen",
+			legacyAbs, DotEnvFileName)
+	default:
+		return "", ""
+	}
+}
+
+// LoadDefaultEnvFile lädt die Env-Datei aus dir (siehe ResolveEnvFile).
+// Die Warnung wird NICHT selbst geloggt, weil die Aufrufer die Env-Datei
+// vor SetLogLevel/SetQuietMode laden — sie sollen sie danach per LogWarn
+// ausgeben, damit -q/-v respektiert werden.
+func LoadDefaultEnvFile(dir string) (warning string, err error) {
+	path, warning := ResolveEnvFile(dir)
+	if path == "" {
+		return warning, nil
+	}
+	return warning, LoadEnvFile(path)
+}
 
 var (
 	envFileVars  = make(map[string]string)

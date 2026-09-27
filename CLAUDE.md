@@ -99,7 +99,7 @@ sigorest/
 │   ├── loadconfig_channel.go    #   LoadConfig-Erweiterung für Kanal-Auswahl
 │   ├── rate_limiter.go          #   Pro-Kanal Rate-Limiter (hybrid, siehe unten)
 │   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
-│   ├── env.go                   #   Optionale ./env Datei
+│   ├── env.go                   #   Optionale ./.env Datei (veraltete ./env mit Warnung)
 │   ├── costdb.go                #   Kosten-Tracking (SQLite, WAL) + Budget-Check
 │   ├── id_registry.go           #   Persistente Shortcode-Registry (SQLite, assign-once)
 │   ├── provider_id.go           #   Kanonische Provider-Erkennung + 5-Zeichen-Code

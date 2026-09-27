@@ -32,7 +32,7 @@ sudo useradd -r -s /usr/sbin/nologin sigorest
 ## 3. Environment-Datei anlegen
 
 ```bash
-sudo nano /usr/local/slib/sigoREST/env
+sudo nano /usr/local/slib/sigoREST/.env
 ```
 
 Inhalt:
@@ -46,7 +46,7 @@ ZAI_API_KEY=dein-key-hier
 
 Berechtigungen einschränken:
 ```bash
-sudo chmod 600 /usr/local/slib/sigoREST/env
+sudo chmod 600 /usr/local/slib/sigoREST/.env
 ```
 
 ## 4. systemd Unit-Datei anlegen
@@ -70,7 +70,7 @@ Type=simple
 User=sigorest
 Group=sigorest
 WorkingDirectory=/usr/local/slib/sigoREST
-EnvironmentFile=/usr/local/slib/sigoREST/env
+EnvironmentFile=/usr/local/slib/sigoREST/.env
 ExecStart=/usr/local/sbin/sigoREST \
     -http-port 9080 \
     -https-port 9443 \

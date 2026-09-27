@@ -16,7 +16,7 @@ sigorest/
 │   ├── channel_manager.go     # Kanal-Auflösung und Failover
 │   ├── channel_health.go      # Hintergrund-Health-Monitor
 │   ├── session_memory.go      # Session-/Memory-Pfade pro Kanal
-│   ├── env.go                 # Optionale ./env Datei
+│   ├── env.go                 # Optionale ./.env Datei
 │   └── version.go             # Zentrale Versions-Konstante
 ├── cmd/sigoE/main.go          # CLI-Wrapper
 └── sigoREST/
@@ -118,7 +118,9 @@ make clean
 
 sigoREST liest API-Keys in dieser Reihenfolge:
 
-1. Optionale `env`-Datei im Startverzeichnis (`./env`)
+1. Optionale `.env`-Datei im Startverzeichnis (`./.env`). Eine veraltete
+   `./env` wird noch geladen, erzeugt aber eine Warnung (liegen beide vor,
+   gewinnt `.env` und `env` wird ignoriert).
 2. Echte Environment-Variablen
 
 ```bash
@@ -826,7 +828,7 @@ rm /var/sigoREST/sessions/mammouth/default/cl46-s-mein-projekt.json
 Für Produktiv-Umgebungen wird sigoREST als systemd-Service empfohlen:
 - Binary: `/usr/local/sbin/sigoREST`
 - Daten: `/var/sigoREST/`
-- Konfiguration/Env: `/usr/local/slib/sigoREST/env`
+- Konfiguration/Env: `/usr/local/slib/sigoREST/.env`
 - CLI Client: `/usr/local/bin/sigoE`
 
 Service-File Beispiel (`/etc/systemd/system/sigorest.service`):
@@ -843,7 +845,7 @@ ExecStart=/usr/local/sbin/sigoREST -data-dir /var/sigoREST -channel-health-inter
 Restart=on-failure
 User=sigorest
 Group=sigorest
-EnvironmentFile=/usr/local/slib/sigoREST/env
+EnvironmentFile=/usr/local/slib/sigoREST/.env
 
 [Install]
 WantedBy=multi-user.target

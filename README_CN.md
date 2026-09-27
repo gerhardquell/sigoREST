@@ -18,7 +18,7 @@ sigorest/
 │   ├── channel_manager.go     # 渠道解析和故障转移
 │   ├── channel_health.go      # 后台健康监控
 │   ├── session_memory.go      # 每个渠道的会话/记忆路径
-│   ├── env.go                 # 可选的 ./env 文件
+│   ├── env.go                 # 可选的 ./.env 文件
 │   └── version.go             # 中央版本常量
 ├── cmd/sigoE/main.go          # CLI 包装器
 └── sigoREST/
@@ -120,7 +120,8 @@ make clean
 
 sigoREST 按以下顺序读取 API 密钥：
 
-1. 启动目录中的可选 `env` 文件（`./env`）
+1. 启动目录中的可选 `.env` 文件（`./.env`）。旧的 `./env` 仍会被加载，但会输出警告
+   （两者同时存在时以 `.env` 为准，`env` 被忽略）。
 2. 真实的环境变量
 
 ```bash
@@ -668,7 +669,7 @@ rm /var/sigoREST/sessions/mammouth/default/cl46-s-mein-projekt.json
 对于生产环境，建议将 sigoREST 作为 systemd 服务运行：
 - 二进制文件：`/usr/local/sbin/sigoREST`
 - 数据：`/var/sigoREST/`
-- 配置/环境变量：`/usr/local/slib/sigoREST/env`
+- 配置/环境变量：`/usr/local/slib/sigoREST/.env`
 - CLI 客户端：`/usr/local/bin/sigoE`
 
 服务文件示例（`/etc/systemd/system/sigorest.service`）：
@@ -685,7 +686,7 @@ ExecStart=/usr/local/sbin/sigoREST -data-dir /var/sigoREST -channel-health-inter
 Restart=on-failure
 User=sigorest
 Group=sigorest
-EnvironmentFile=/usr/local/slib/sigoREST/env
+EnvironmentFile=/usr/local/slib/sigoREST/.env
 
 [Install]
 WantedBy=multi-user.target

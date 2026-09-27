@@ -7,6 +7,10 @@
 *.a
 *.so
 
+# Env-Dateien mit API-Keys (.env aktuell, env veraltet)
+.env
+/env
+
 # Session files
 .sessions/
 
