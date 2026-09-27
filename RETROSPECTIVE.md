@@ -40,7 +40,11 @@ Chat, Stream und `/v1/messages` liefern HTTP 200 mit korrekter Antwort. Die Kost
 5. **Den Fix gegenprüfen:** Den Fix testweise entfernen und zusehen, wie der Test mit dem echten Fehlertext rot wird. Das ist der billigste Nachweis, dass der Test das Richtige prüft.
 6. **Beim Ausprobieren gefundene Altlasten nicht nebenbei mitreparieren.** Der Ollama-Kanal und das doppelte `[DONE]` sind erst als Fund gemeldet und dann als eigene, getrennt getestete Commits behoben worden, nicht im Commit von Punkt 3 versteckt.
 
-**Nächste mögliche Schritte:** siehe `TODO.md`, Abschnitt „Offen“ (Deployment, `-comm-log` live einschalten, Health-Probe-Endpoints für Longcat/cheaperinference/Ollama, Shortcode-Kuriosum `che-cl-f025`, Fallback-Provider).
+**Nachtrag (noch am 27. September 2026):** Zwei weitere Funde behoben.
+- **Health-Probe für Longcat und cheaperinference** (`b5a9acb`): `modelsEndpointForProvider` kannte nur mammouth, moonshot und zai. Ein Kanal dieser beiden Provider wurde deshalb nie aktiviert, weder eine Reserve noch ein ausgefallener Default. Im Vergleich auf zwei Test-Servern blieben die Kanäle mit dem Binary vor dem Fix tot und erholten sich mit dem neuen. Der Test prüft gegen `knownProviders` (ein Key-Provider ohne Probe-Endpoint wird rot), und die `CLAUDE.md`-Checkliste „Neuen Provider hinzufügen“ ist ergänzt.
+- **Fetcher lasen `.env` nicht** (`ce4244a`): Die Modellabrufe nutzten `os.Getenv`, die Kanäle `GetEnvWithFile`. `TestNoDirectOsGetenv` prüft per `go/ast`, dass in `sigoengine` außer `env.go` niemand `os.Getenv` aufruft. Beim E2E-Test zunächst gegen das alte Binary getestet, weil `go build ./...` `build/sigoREST` nicht neu schreibt. Das fiel nur auf, weil der Test das erwartete Ergebnis explizit geprüft hat. **Learning:** Vor jedem E2E-Test gegen `./build/` erst `make sigorest` ausführen.
+
+**Nächste mögliche Schritte:** siehe `TODO.md`, Abschnitt „Offen“ (Deployment, `-comm-log` live einschalten, Rückholen eines manuell deaktivierten Kanals durch den Health-Monitor klären, Shortcode-Kuriosum `che-cl-f025`, Fallback-Provider).
 
 **Co-Autor**: Claude Opus 5.5 (Anthropic) — Session vom 27. September 2026.
 
