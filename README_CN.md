@@ -411,6 +411,16 @@ curl -s http://localhost:9080/api/models
 ```
 完整的模型信息：价格、令牌限制、温度范围。
 
+CSV 格式（分号分隔，按 Provider + 短代码排序）：
+```bash
+curl -s 'http://localhost:9080/api/models?format=csv' > models.csv
+```
+前 11 列与 CLI 注册表格式一致
+（`id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens`），
+其后为 `provider;provider_code;upstream_id`。表头以 `#` 开头（解析器视为注释），
+因此该文件可直接作为 `sigoE` 的 `models.csv` 使用，并包含服务器的实时短代码。
+`apikey` 仅包含环境变量名，绝不包含密钥本身。未知的 `format` → HTTP 400。
+
 ### 持久化简码注册表
 
 sigoREST 在每次启动时都会从 Provider API 动态加载模型列表（参见

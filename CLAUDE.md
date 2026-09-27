@@ -99,6 +99,7 @@ sigorest/
 │   ├── loadconfig_channel.go    #   LoadConfig-Erweiterung für Kanal-Auswahl
 │   ├── rate_limiter.go          #   Pro-Kanal Rate-Limiter (hybrid, siehe unten)
 │   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
+│   ├── models_csv.go            #   WriteModelsCSV (Export im Registry-CSV-Format)
 │   ├── env.go                   #   Optionale ./.env Datei (veraltete ./env mit Warnung)
 │   ├── costdb.go                #   Kosten-Tracking (SQLite, WAL) + Budget-Check
 │   ├── id_registry.go           #   Persistente Shortcode-Registry (SQLite, assign-once)
@@ -186,7 +187,7 @@ sie nicht.
 | `/v1/chat/completions` | POST | OpenAI-kompatible Chat API |
 | `/v1/models` | GET | Modell-Liste (ID + Shortcode), `owned_by` = kanonischer Provider |
 | `/v1/messages` | POST | Anthropic-Messages-API-Bridge (Claude Code o.ä.), Tool-Calling, alle Provider |
-| `/api/models` | GET | Volle Modell-Infos (Preise, Limits, `provider`/`provider_code`) |
+| `/api/models` | GET | Volle Modell-Infos (Preise, Limits, `provider`/`provider_code`); `?format=csv` → Registry-CSV (als CLI-`models.csv` nutzbar) |
 | `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
 | `/api/shortlist` | GET | Kompakt: Shortcode + Provider + 5-Zeichen-Code, sortiert |
 | `/api/channels` | GET | Status aller Kanäle (inkl. `min_interval_ms`/`max_wait_ms`) |
@@ -265,6 +266,10 @@ Lade-Reihenfolge der Registry: JSON → CSV → `CoreModels`. Semikolon-getrennt
 ```
 id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
 ```
+Optional danach `;provider;provider_code;upstream_id` — so exportiert
+`GET /api/models?format=csv` (`sigoengine.WriteModelsCSV`, Kopfzeile mit
+`#` = Parser-Kommentar). Beim Laden wird nur `upstream_id` übernommen
+(nötig für `ci-*`), Provider wird neu berechnet.
 `requires_completion_tokens=true` → Modell nutzt `max_completion_tokens` statt
 `max_tokens` (z.B. GPT-5). `apikey` ist der ENV-Var-Name (leer bei Ollama).
 

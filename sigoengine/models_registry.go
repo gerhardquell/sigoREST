@@ -161,6 +161,8 @@ func loadModelsFromCSV(path string) ([]Model, error) {
 
 // parseCSVRecord parst einen CSV-Record zu einem Model
 // Format: id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
+// Optional (Export von WriteModelsCSV): ;provider;provider_code;upstream_id —
+// provider/provider_code werden beim Laden neu berechnet, upstream_id übernommen.
 func parseCSVRecord(record []string) (Model, error) {
 	// Trimme Whitespace von allen Feldern
 	for i := range record {
@@ -216,6 +218,10 @@ func parseCSVRecord(record []string) (Model, error) {
 
 	if len(record) > 10 && record[10] != "" {
 		m.RequiresCompletionTokens = strings.ToLower(record[10]) == "true"
+	}
+
+	if len(record) > 13 {
+		m.UpstreamID = record[13]
 	}
 
 	return m, nil

@@ -360,6 +360,25 @@ func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
 	return info
 }
 
+// modelInfoToEngine ist die Umkehrung von modelInfoFromEngine
+// (für den CSV-Export über sigoengine.WriteModelsCSV).
+func modelInfoToEngine(id string, info ModelInfo) sigoengine.Model {
+	return sigoengine.Model{
+		ID:                       id,
+		Shortcode:                info.Shortcode,
+		Endpoint:                 info.Endpoint,
+		APIKeyEnv:                info.APIKey,
+		MaxInputTokens:           info.MaxInputTokens,
+		MaxOutputTokens:          info.MaxOutputTokens,
+		InputCost:                info.InputCost,
+		OutputCost:               info.OutputCost,
+		MinTemperature:           info.MinTemperature,
+		MaxTemperature:           info.MaxTemperature,
+		RequiresCompletionTokens: info.RequiresCompletionTokens,
+		UpstreamID:               info.UpstreamID,
+	}
+}
+
 // loadModelsFromProviders ruft alle Provider-APIs beim Start ab.
 // Fehler bei einzelnen Providern werden geloggt; der Server startet
 // trotzdem mit den verfügbaren Modellen.
@@ -1435,10 +1454,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // **********************************************************************
-// GET /api/models - Volle Modell-Infos
+// GET /api/models - Volle Modell-Infos (JSON, oder ?format=csv)
 func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	switch r.URL.Query().Get("format") {
+	case "", "json":
+	case "csv":
+		s.writeModelsCSV(w)
+		return
+	default:
+		writeError(w, "unsupported format (erlaubt: json, csv)", "invalid_request", http.StatusBadRequest)
 		return
 	}
 
@@ -1469,6 +1498,25 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(models)
+}
+
+// writeModelsCSV liefert die Live-Modellliste im Registry-CSV-Format
+// (semikolon-getrennt, als CLI-models.csv wiederverwendbar). Snapshot unter
+// RLock, Schreiben aufs Netz danach — ein langsamer Client blockiert so
+// keine Writer auf s.mu.
+func (s *Server) writeModelsCSV(w http.ResponseWriter) {
+	s.mu.RLock()
+	models := make([]sigoengine.Model, 0, len(s.models))
+	for id, info := range s.models {
+		models = append(models, modelInfoToEngine(id, info))
+	}
+	s.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="models.csv"`)
+	if err := sigoengine.WriteModelsCSV(w, models); err != nil {
+		sigoengine.LogWarn("CSV-Export der Modellliste fehlgeschlagen", map[string]interface{}{"error": err.Error()})
+	}
 }
 
 // **********************************************************************
@@ -1914,8 +1962,8 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 			{
 				"path":        "/api/models",
 				"method":      "GET",
-				"description": "Detaillierte Modell-Informationen (Preise, Limits)",
-				"example":     "curl -s http://localhost:9080/api/models",
+				"description": "Detaillierte Modell-Informationen (Preise, Limits); ?format=csv liefert Registry-CSV (Semikolon, als models.csv nutzbar)",
+				"example":     "curl -s http://localhost:9080/api/models  |  curl -s 'http://localhost:9080/api/models?format=csv' > models.csv",
 			},
 			{
 				"path":        "/api/health",

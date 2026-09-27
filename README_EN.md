@@ -415,6 +415,17 @@ curl -s http://localhost:9080/api/models
 ```
 Full model info: prices, token limits, temperature range.
 
+As CSV (semicolon-separated, sorted by provider + shortcode):
+```bash
+curl -s 'http://localhost:9080/api/models?format=csv' > models.csv
+```
+The first 11 columns match the CLI registry format
+(`id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens`),
+followed by `provider;provider_code;upstream_id`. The header line starts
+with `#` (a comment for the parser), so the file can be used directly as
+`models.csv` for `sigoE`, carrying the server's live shortcodes. `apikey`
+holds only the ENV variable name, never the key. Unknown `format` → HTTP 400.
+
 ### Persistent Shortcode Registry
 
 sigoREST loads its models dynamically from the provider APIs on every boot

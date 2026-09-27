@@ -423,6 +423,18 @@ Volle Modell-Infos: Preise, Token-Limits, Temperatur-Range — inkl.
 5-Zeichen-Code, siehe [Provider-Kennzeichnung](#provider-kennzeichnung)
 unten).
 
+Als CSV (Semikolon, sortiert nach Provider + Shortcode):
+```bash
+curl -s 'http://localhost:9080/api/models?format=csv' > models.csv
+```
+Die ersten 11 Spalten entsprechen dem Registry-Format der CLI
+(`id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens`),
+danach `provider;provider_code;upstream_id`. Die Kopfzeile beginnt mit
+`#` (Kommentar für den Parser) — die Datei ist damit direkt als
+`models.csv` für `sigoE` verwendbar und bringt die Live-Shortcodes des
+Servers mit. `apikey` enthält nur den Namen der ENV-Variable, nie den
+Key. Unbekanntes `format` → HTTP 400.
+
 ### GET /api/shortcodes
 ```bash
 curl -s http://localhost:9080/api/shortcodes
