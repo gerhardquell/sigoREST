@@ -61,6 +61,10 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 	}
 
 	var responseText strings.Builder
+	// sawDone: Upstream hat seinen eigenen [DONE]-Terminator geschickt (wird
+	// wie jede Zeile durchgereicht). Dann keinen zweiten anhängen — Clients
+	// sahen sonst "data: [DONE]" doppelt.
+	sawDone := false
 	scanner := bufio.NewScanner(stream)
 	// Große Chunks unterstützen (z.B. lange JSON-Zeilen)
 	const maxScanTokenSize = 1024 * 1024
@@ -77,7 +81,11 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 		// Text aus data:-Zeilen akkumulieren
 		if strings.HasPrefix(line, "data: ") {
 			dataStr := strings.TrimPrefix(line, "data: ")
-			if dataStr == "" || dataStr == "[DONE]" {
+			if dataStr == "[DONE]" {
+				sawDone = true
+				continue
+			}
+			if dataStr == "" {
 				continue
 			}
 			var chunk map[string]interface{}
@@ -101,16 +109,20 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 		// mindestens einen Chunk erhalten. Bestmöglich sauber schließen
 		// (dasselbe "data: [DONE]"-Terminator-Pattern wie im Erfolgsfall),
 		// statt die Verbindung ohne Abschluss-Marker offen hängen zu lassen.
-		fmt.Fprintln(w, "data: [DONE]")
-		fmt.Fprintln(w)
-		flusher.Flush()
+		if !sawDone {
+			fmt.Fprintln(w, "data: [DONE]")
+			fmt.Fprintln(w)
+			flusher.Flush()
+		}
 		return responseText.String(), err
 	}
 
-	// Sicherstellen, dass [DONE] gesendet wird
-	fmt.Fprintln(w, "data: [DONE]")
-	fmt.Fprintln(w)
-	flusher.Flush()
+	// Sicherstellen, dass [DONE] genau einmal gesendet wird
+	if !sawDone {
+		fmt.Fprintln(w, "data: [DONE]")
+		fmt.Fprintln(w)
+		flusher.Flush()
+	}
 
 	return responseText.String(), nil
 }

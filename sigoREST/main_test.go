@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -761,5 +762,32 @@ func TestNewChannelRegistry_NoOllamaNoChannel(t *testing.T) {
 	r := newChannelRegistry(t.TempDir(), false)
 	if n := len(r.Channels("ollama")); n != 0 {
 		t.Fatalf("erwartet 0 Ollama-Kanäle, bekommen %d", n)
+	}
+}
+
+// TestStreamProviderResponse_ExactlyOneDone: Regression — der Server reichte
+// das [DONE] des Upstreams durch und hängte danach ein eigenes an, Clients
+// sahen "data: [DONE]" zweimal. Sendet der Upstream keins, muss der Server
+// es weiterhin selbst ergänzen.
+func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
+	cases := map[string]string{
+		"upstream mit [DONE]": "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n",
+		"upstream ohne [DONE]": "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+	}
+	for name, upstream := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newTestServer(t)
+			rr := httptest.NewRecorder()
+			text, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text != "Hi" {
+				t.Errorf("Text = %q", text)
+			}
+			if n := strings.Count(rr.Body.String(), "data: [DONE]"); n != 1 {
+				t.Fatalf("erwartet genau 1x [DONE], bekommen %d:\n%s", n, rr.Body.String())
+			}
+		})
 	}
 }
