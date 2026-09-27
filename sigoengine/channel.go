@@ -216,6 +216,21 @@ func (r *ChannelRegistry) DiscoverFromEnv() {
 	}
 }
 
+// AddKeylessChannel registriert für einen lokalen Provider ohne API-Key
+// (Ollama) den aktiven Kanal "default". DiscoverFromEnv kennt nur Provider
+// mit Key; ohne diesen Kanal scheitert jeder Chat-Call bereits in
+// ChannelManager.Resolve. Vor LoadState aufrufen, damit ein per API
+// deaktivierter Kanal deaktiviert bleibt.
+func (r *ChannelRegistry) AddKeylessChannel(provider string) {
+	r.AddChannel(&Channel{
+		Provider: provider,
+		Name:     "default",
+		Active:   true,
+		Order:    0,
+		Healthy:  true,
+	})
+}
+
 // persistedState is the on-disk shape of channels.json.
 type persistedState struct {
 	Providers map[string]map[string]struct {

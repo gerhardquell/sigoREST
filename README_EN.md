@@ -627,6 +627,8 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 ## Ollama (local LLMs)
 
 Ollama models are automatically discovered on server startup — no API key, no configuration needed.
+If models are found, sigoREST registers the keyless channel `ollama-default`
+(visible under `/api/channels`, can be switched off via `.../ollama/default/disable`).
 
 **Prerequisite:** Ollama running on `http://localhost:11434`
 

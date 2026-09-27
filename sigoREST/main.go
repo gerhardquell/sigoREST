@@ -2137,6 +2137,23 @@ func jsonEscapeString(s string) string {
 	return string(b[1 : len(b)-1])
 }
 
+// newChannelRegistry baut die Kanal-Registry: Provider mit API-Key aus ENV,
+// Ollama als keyloser Kanal (nur wenn beim Start Modelle gefunden wurden),
+// danach der persistierte Status aus channels.json. Reihenfolge wichtig:
+// erst registrieren, dann LoadState — sonst würde ein per API deaktivierter
+// Kanal beim Neustart wieder aktiv.
+func newChannelRegistry(baseDir string, ollamaAvailable bool) *sigoengine.ChannelRegistry {
+	registry := sigoengine.NewChannelRegistry(filepath.Join(baseDir, "channels.json"))
+	registry.DiscoverFromEnv()
+	if ollamaAvailable {
+		registry.AddKeylessChannel("ollama")
+	}
+	if err := registry.LoadState(); err != nil {
+		sigoengine.LogWarn("Kanal-Status konnte nicht geladen werden", map[string]interface{}{"error": err.Error()})
+	}
+	return registry
+}
+
 // **********************************************************************
 // main
 func main() {
@@ -2234,28 +2251,10 @@ func main() {
 		sigoengine.LogInfo("Kosten-DB aktiv", map[string]interface{}{"path": costDB.Path()})
 	}
 
-	// Kanal-Registry initialisieren
-	registry := sigoengine.NewChannelRegistry(filepath.Join(srv.baseDir, "channels.json"))
-	registry.DiscoverFromEnv()
-	if err := registry.LoadState(); err != nil {
-		sigoengine.LogWarn("Kanal-Status konnte nicht geladen werden", map[string]interface{}{"error": err.Error()})
-	}
-	srv.channelManager = sigoengine.NewChannelManager(registry)
-	srv.rateLimiter = sigoengine.NewRateLimiter()
-	srv.rateMinInterval = *rateMinInterval
-	srv.rateMaxWait = *rateMaxWait
-	sigoengine.LogInfo("Rate-Limiter aktiv", map[string]interface{}{
-		"min_interval_ms": srv.rateMinInterval.Milliseconds(),
-		"max_wait_ms":     srv.rateMaxWait.Milliseconds(),
-	})
-
-	// Health-Monitor starten. Health-Status aktiver Kanäle wird lazy aus
-	// echten User-Requests gesetzt (handleChatCompletions → MarkChannelHealth).
-	// Der Ticker aktiviert nur noch Reserven per kostenlosem /models-Probe.
-	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, *channelHealthInterval)
-
-	// Ollama Auto-Discovery
-	if n := sigoengine.DiscoverOllamaModels(ollamaEndpoint); n > 0 {
+	// Ollama Auto-Discovery — vor der Kanal-Registry, weil davon abhängt,
+	// ob ein (keyloser) Ollama-Kanal registriert wird.
+	ollamaAvailable := sigoengine.DiscoverOllamaModels(ollamaEndpoint) > 0
+	if ollamaAvailable {
 		srv.mu.Lock()
 		ollamaModels := sigoengine.GetOllamaModels()
 		for sc, info := range ollamaModels {
@@ -2272,6 +2271,21 @@ func main() {
 		}
 		srv.mu.Unlock()
 	}
+
+	// Kanal-Registry initialisieren
+	srv.channelManager = sigoengine.NewChannelManager(newChannelRegistry(srv.baseDir, ollamaAvailable))
+	srv.rateLimiter = sigoengine.NewRateLimiter()
+	srv.rateMinInterval = *rateMinInterval
+	srv.rateMaxWait = *rateMaxWait
+	sigoengine.LogInfo("Rate-Limiter aktiv", map[string]interface{}{
+		"min_interval_ms": srv.rateMinInterval.Milliseconds(),
+		"max_wait_ms":     srv.rateMaxWait.Milliseconds(),
+	})
+
+	// Health-Monitor starten. Health-Status aktiver Kanäle wird lazy aus
+	// echten User-Requests gesetzt (handleChatCompletions → MarkChannelHealth).
+	// Der Ticker aktiviert nur noch Reserven per kostenlosem /models-Probe.
+	sigoengine.StartHealthMonitor(context.Background(), srv.channelManager, *channelHealthInterval)
 
 	sigoengine.LogInfo("Konfiguration geladen", map[string]interface{}{
 		"available_models": len(srv.models),

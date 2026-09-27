@@ -422,6 +422,16 @@ func startFakeOllama(t *testing.T, cfg fakeOllamaConfig) *httptest.Server {
 		case "/api/show":
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"modelinfo":{}}`))
+		case "/v1/chat/completions":
+			if r.Method == http.MethodHead { // PingProvider-Preflight
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Header.Get("Authorization") != "" {
+				t.Errorf("fake ollama: unerwarteter Authorization-Header %q", r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"x","choices":[{"index":0,"message":{"role":"assistant","content":"Hallo von Ollama"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`))
 		case "/api/embed":
 			var req struct {
 				Model string   `json:"model"`
@@ -719,5 +729,37 @@ func TestHandleHelp_ListsEmbeddingsEndpoint(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected /api/help to list POST /v1/embeddings, got: %s", rr.Body.String())
+	}
+}
+
+// TestHandleChatCompletions_OllamaWithoutAPIKey: Regression — Ollama hat
+// keinen API-Key, bekam deshalb in DiscoverFromEnv keinen Kanal, und jeder
+// Chat-Call endete in ChannelManager.Resolve mit "no active channel for
+// provider", bevor Ollama überhaupt angefragt wurde. Die Registry wird hier
+// über denselben Weg gebaut wie in main() (newChannelRegistry).
+func TestHandleChatCompletions_OllamaWithoutAPIKey(t *testing.T) {
+	srv, shortcode := setupEmbeddingTestServer(t, fakeOllamaConfig{modelName: "llama3:latest"})
+	srv.channelManager = sigoengine.NewChannelManager(newChannelRegistry(srv.baseDir, true))
+	srv.rateLimiter = sigoengine.NewRateLimiter()
+
+	body := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, shortcode)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Status %d, Body: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Hallo von Ollama") {
+		t.Fatalf("Antwort fehlt: %s", rr.Body.String())
+	}
+}
+
+// TestNewChannelRegistry_NoOllamaNoChannel: ohne gefundene Ollama-Modelle
+// wird kein Ollama-Kanal registriert (kein toter Eintrag in /api/channels).
+func TestNewChannelRegistry_NoOllamaNoChannel(t *testing.T) {
+	r := newChannelRegistry(t.TempDir(), false)
+	if n := len(r.Channels("ollama")); n != 0 {
+		t.Fatalf("erwartet 0 Ollama-Kanäle, bekommen %d", n)
 	}
 }

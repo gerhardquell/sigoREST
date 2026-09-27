@@ -291,6 +291,18 @@ Ollama-Modelle: kein API-Key (`APIKey: ""`), nutzen `http://localhost:11434/v1/c
 
 **Limitation:** Nur Startzeit-Discovery → Neustart nötig nach `ollama pull`.
 
+**Kanal ohne Key (Bug bis 2026-09-27):** Chat läuft auch für Ollama über
+`ChannelManager.Resolve`, aber `DiscoverFromEnv` legt Kanäle nur für
+Provider mit API-Key an (`knownProviders`). Ollama hatte deshalb keinen
+Kanal — jeder Ollama-Chat (auch `/v1/messages`) endete mit `404
+CONFIG_NOT_FOUND: no active channel for provider`, ohne Ollama je zu
+erreichen (Embeddings liefen, weil `/v1/embeddings` keinen Kanal nutzt).
+Fix ohne Sonderweg im Handler: Discovery läuft jetzt VOR der Registry,
+`newChannelRegistry` (`sigoREST/main.go`) registriert bei gefundenen
+Modellen `AddKeylessChannel("ollama")` → Kanal `ollama-default`, danach
+`LoadState` (per API deaktiviert bleibt deaktiviert). Regressionstest:
+`TestHandleChatCompletions_OllamaWithoutAPIKey`.
+
 ### Circuit Breaker
 
 Pro Modell ein Circuit Breaker (nicht global):

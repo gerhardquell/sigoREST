@@ -619,6 +619,8 @@ curl -s http://localhost:9080/v1/models | jq '.data[].id'
 ## Ollama（本地大语言模型）
 
 Ollama 模型在服务器启动时自动发现 — 无需 API 密钥，无需配置。
+发现模型后，sigoREST 会注册无密钥渠道 `ollama-default`
+（可在 `/api/channels` 查看，可通过 `.../ollama/default/disable` 关闭）。
 
 **前提条件：** Ollama 在 `http://localhost:11434` 运行
 

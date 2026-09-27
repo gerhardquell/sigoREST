@@ -780,6 +780,8 @@ abgeschnitten — Tabellen bleiben so immer exakt ausgerichtet):
 ## Ollama (lokale LLMs)
 
 Ollama-Modelle werden beim Serverstart automatisch entdeckt — kein API-Key, keine Konfiguration nötig.
+Werden Modelle gefunden, legt sigoREST dafür den keylosen Kanal `ollama-default` an
+(sichtbar unter `/api/channels`, per `.../ollama/default/disable` abschaltbar).
 
 **Voraussetzung:** Ollama läuft auf `http://localhost:11434`
 

@@ -108,3 +108,37 @@ func TestChannelRegistry_LoadSaveState(t *testing.T) {
 		t.Errorf("expected channel 0 to be active after loading state")
 	}
 }
+
+// TestChannelRegistry_AddKeylessChannel: lokale Provider ohne API-Key (Ollama)
+// brauchen trotzdem einen aktiven Kanal, sonst scheitert jeder Chat-Call in
+// ChannelManager.Resolve mit "no active channel for provider". Ein per API
+// deaktivierter Kanal muss nach LoadState deaktiviert bleiben.
+func TestChannelRegistry_AddKeylessChannel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "channels.json")
+	r := NewChannelRegistry(path)
+	r.AddKeylessChannel("ollama")
+
+	chs := r.Channels("ollama")
+	if len(chs) != 1 {
+		t.Fatalf("erwartet 1 Kanal, bekommen %d", len(chs))
+	}
+	ch := chs[0]
+	if ch.Name != "default" || !ch.Active || !ch.Healthy || ch.APIKey != "" {
+		t.Fatalf("Kanal falsch: %+v", ch)
+	}
+	if _, err := NewChannelManager(r).Resolve("ollama", ""); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if err := r.SetActive("ollama", "default", false); err != nil {
+		t.Fatal(err)
+	}
+	r2 := NewChannelRegistry(path)
+	r2.AddKeylessChannel("ollama")
+	if err := r2.LoadState(); err != nil {
+		t.Fatal(err)
+	}
+	if r2.Channels("ollama")[0].Active {
+		t.Fatal("persistiert deaktivierter Kanal wurde nach Neustart wieder aktiv")
+	}
+}
