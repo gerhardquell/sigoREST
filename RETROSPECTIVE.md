@@ -4,6 +4,48 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-09-27: TODO-Nacharbeiten (.env, CSV-Export, Kommunikationsprotokoll) + zwei Altbugs
+
+**Zielsetzung:**
+Drei kleinere Punkte aus `TODO.md` (20260927) umsetzen: die Env-Datei von `env` auf `.env` umstellen, die Modellliste als CSV ausgeben und ein per CLI-Flag einschaltbares Protokoll der externen Kommunikation einführen.
+
+**Was erreicht wurde:**
+
+### 1. `.env` statt `env` (`01ef941`)
+`ResolveEnvFile` wählt die Datei als reine Funktion (nur `os.Stat`, ohne globalen Zustand), `LoadDefaultEnvFile` lädt sie. Eine veraltete `env` wird noch geladen, aber mit Warnung. Liegen beide vor, gewinnt `.env` und es wird ebenfalls gewarnt. Die Warnung wird als String zurückgegeben und erst nach `SetLogLevel`/`SetQuietMode` geloggt, weil beide `main()` die Env-Datei vor der Log-Konfiguration laden. Sie nennt den absoluten Pfad, weil unter systemd sonst unklar bleibt, welches Arbeitsverzeichnis gemeint ist.
+
+**Live-Zwischenfall:** Gerhard hatte `/usr/local/slib/sigoREST/env` während der Session in `.env` umbenannt. Die Unit zeigte aber noch mit `EnvironmentFile=` auf `env`. systemd liest diese Datei selbst, bevor der Prozess startet, und bricht bei fehlender Datei ohne `-`-Präfix ab (`Failed with result 'resources'`). Der Dienst lief in eine Neustart-Schleife (54 Restarts). Das war vorher angekündigt; der Fix bestand darin, `EnvironmentFile` in der Unit umzustellen und `daemon-reload` auszuführen.
+
+### 2. CSV-Export `GET /api/models?format=csv` (`298f9f5`)
+Entscheidung: Server-Endpoint statt CLI-Flag, weil `sigoE -l` nur die lokale Registry kennt und nicht die Live-Modelle mit den Registry-Shortcodes. Das Format ist das bestehende Registry-CSV (Semikolon), damit die Ausgabe als `models.csv` für die CLI wiederverwendbar ist. Die Kopfzeile beginnt mit `#`, weil der Parser `Comment = '#'` setzt; ohne `#` würde sie als Modell `id` eingelesen. Zusatzspalten stören nicht (`FieldsPerRecord = -1`). Der Round-Trip-Test durch den echten Parser zeigte, dass `upstream_id` beim Einlesen verloren ging. Ohne diese Spalte gingen `ci-*`-Modelle mit falschem `model`-Feld an die API, daher liest `parseCSVRecord` sie jetzt als Spalte 14 mit ein.
+
+### 3. Kommunikationsprotokoll `-comm-log` (`c0b9892`)
+Entscheidungen von Gerhard: nur Chat- und Embedding-Calls, vollständige Request- und Response-Bodies, JSONL. Die Umsetzung ist ein `http.RoundTripper`. Chat-Calls bekamen einen eigenen `chatHTTPClient`, weil der Provider-Ping denselben `defaultHTTPClient` nutzte und sonst mitprotokolliert worden wäre. Der Response-Body wird beim Lesen mitgeschnitten und der Eintrag einmalig beim `Close()` geschrieben, damit auch SSE-Streams vollständig drinstehen. Gültiges JSON kommt als `json.RawMessage` in den Eintrag; `encoding/json` kompaktiert das beim Marshal, sodass eine Zeile eine Zeile bleibt. Secret-Header werden maskiert, Bodies über 10 MiB gekürzt, die Datei hat `0600` und wird im Append-Modus beschrieben (logrotate mit `copytruncate`). Schlägt das Öffnen fehl, bricht der Start ab. Das ist bewusst anders als bei `costDB`: Ein angefordertes Debug-Protokoll, das unbemerkt fehlt, hilft niemandem.
+
+### 4. Altbug: Ollama-Chat ging nie (`f75956c`)
+Beim Testen von Punkt 3 gefunden. Chat läuft über `ChannelManager.Resolve`, aber `DiscoverFromEnv` legt Kanäle nur für Provider mit API-Key an. Ollama hatte deshalb keinen Kanal, und jeder Ollama-Chat (auch `/v1/messages`) endete mit `404 CONFIG_NOT_FOUND`, ohne Ollama je zu erreichen. Live ebenfalls betroffen: `channels.json` enthielt keinen Ollama-Eintrag. Embeddings gingen, weil `/v1/embeddings` keinen Kanal nutzt; das hat den Fehler verdeckt. Gerhards Vorgabe war „keinen Sonderweg“. Der Fix: `AddKeylessChannel`, die Ollama-Discovery läuft jetzt vor der Registry, und `newChannelRegistry` wird von `main()` und vom Test gemeinsam genutzt. Die Reihenfolge ist erst registrieren, dann `LoadState`, damit ein deaktivierter Kanal deaktiviert bleibt. Der Regressionstest schlägt ohne den Fix mit exakt dem Produktionsfehler fehl.
+
+### 5. Altbug: doppeltes `data: [DONE]` (`5500406`)
+`streamProviderResponse` reichte das `[DONE]` des Upstreams durch und hängte immer ein eigenes an. Jetzt merkt sich ein `sawDone`-Flag das empfangene `[DONE]`, und der eigene Terminator kommt nur noch, wenn der Upstream keinen geschickt hat. Der Test prüft beide Fälle, damit die Absicherung für Upstreams ohne `[DONE]` nicht verloren geht.
+
+### 6. Reality-Check mit echtem Ollama (gemma4:12b)
+Chat, Stream und `/v1/messages` liefern HTTP 200 mit korrekter Antwort. Die Kosten-DB bucht die Calls unter `ollama#ollama-default`, im Protokoll steht eine Zeile pro Call. Der erste Versuch mit `max_tokens` 40–60 brachte leere Antworten (`finish_reason: length`). Das Kommunikationsprotokoll zeigte sofort den Grund: Das Thinking-Modell hatte alle Tokens im `reasoning`-Feld verbraucht. Das Werkzeug aus Punkt 3 hat sich also schon im ersten Einsatz bezahlt gemacht.
+
+**Learnings:**
+
+1. **Zwei Wege zur Datei müssen zusammen umgestellt werden.** In der systemd-Installation wird die Env-Datei doppelt gelesen: von systemd (`EnvironmentFile=`) und von sigoREST selbst (`WorkingDirectory`). Wer nur die Datei umbenennt, legt den Dienst lahm. Das sollte bei jeder Pfadänderung ein Prüfpunkt sein.
+2. **Round-Trip-Tests finden, was Formattests übersehen.** Der CSV-Test „Ausgabe durch den echten Parser zurücklesen“ hat den `upstream_id`-Verlust aufgedeckt. Ein Test, der nur Spalten zählt, hätte ihn nicht gefunden.
+3. **Ein Pfad, der funktioniert, kann den kaputten verdecken.** Embeddings liefen, also galt „Ollama geht“. Chat nimmt aber einen anderen Weg (Kanal-Manager). Sobald es zwei Wege zum selben Provider gibt, braucht jeder seinen eigenen echten Test.
+4. **Regressionstests über den echten Startpfad führen.** Der Ollama-Fehler lag in der Verdrahtung in `main()`. Ein Test, der den Kanal von Hand anlegt, wäre auch vor dem Fix grün gewesen. Deshalb gibt es `newChannelRegistry` als gemeinsame Funktion für `main()` und Test.
+5. **Den Fix gegenprüfen:** Den Fix testweise entfernen und zusehen, wie der Test mit dem echten Fehlertext rot wird. Das ist der billigste Nachweis, dass der Test das Richtige prüft.
+6. **Beim Ausprobieren gefundene Altlasten nicht nebenbei mitreparieren.** Der Ollama-Kanal und das doppelte `[DONE]` sind erst als Fund gemeldet und dann als eigene, getrennt getestete Commits behoben worden, nicht im Commit von Punkt 3 versteckt.
+
+**Nächste mögliche Schritte:** siehe `TODO.md`, Abschnitt „Offen“ (Deployment, `-comm-log` live einschalten, Health-Probe-Endpoints für Longcat/cheaperinference/Ollama, Shortcode-Kuriosum `che-cl-f025`, Fallback-Provider).
+
+**Co-Autor**: Claude Opus 5.5 (Anthropic) — Session vom 27. September 2026.
+
+---
+
 ## Session 2026-09-21: Persistente ID-/Shortcode-Registry — Subagent-Driven Development bis zum finalen Review
 
 **Zielsetzung:**

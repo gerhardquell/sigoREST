@@ -77,8 +77,12 @@ go test ./...                              # alle Tests
 go test ./sigoengine/ -v                   # mit Details
 go test ./sigoengine/ -run TestFetchWithRetry   # einzelner Test (Regex)
 ```
-Abgedeckt u.a.: `retry`, `shortcode`, `usage`, `finish_reason`. Server +
-CLI selbst haben keine Go-Tests → manuell via CLI/REST-API testen.
+Abgedeckt u.a.: `retry`, `shortcode`, `usage`, `finish_reason`, `env`,
+`commlog`, `models_csv`. Der Server hat Handler-Tests in
+`sigoREST/main_test.go` (u.a. mit Fake-Ollama `startFakeOllama`); die CLI hat
+keine Go-Tests → manuell testen. Nach Server-Änderungen zusätzlich einen
+echten Call gegen einen Test-Server auf freiem Port (`-http-port 19080
+-https-port 19443 -data-dir <tmp>`) — der Live-Dienst belegt 9080/9443.
 
 ## Architecture
 

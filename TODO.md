@@ -1,61 +1,59 @@
-# TODO 20260920 - Vereinfachter API-Zugang
+# TODO 20260927 - Kleinere Nacharbeiten
 
-\plan
-\brainstorming
+## 1. Enviroment — ✅ erledigt (`01ef941`)
+Bisher wird die env - Datei für alle sichtbar angezeigt. Dieses soll geändert werden,
+so daß in Zukunft nur noch .env - Dateien akzeptiert werden.
 
-## ID Vereinfachung
+> Umgesetzt: `./.env` wird geladen. Eine veraltete `./env` wird noch geladen,
+> aber mit Warnung (absoluter Pfad, Hinweis zum Umbenennen). Liegen beide vor,
+> gewinnt `.env` und `env` wird mit Warnung ignoriert. Die Warnung kommt erst
+> nach der Log-Konfiguration, `-q` unterdrückt sie. systemd-Doku auf
+> `EnvironmentFile=.../.env` umgestellt, `.env` und `/env` in `.gitignore`.
 
-lass uns die ID komplett ändern. In zukunft soll das Format der api-id sein:
- "provider:model:channe" ==>  "omnir:cl-haiku45:0:"
-- provider => 5stelliger Providercode,
-  wichtig: zai wird zu zai00 oder zai__  beides erlaubt (5stellig)
-- model => 10stelliger Modellcode, wie sonnet5 -> sonnet5___
-- channel => 0==default und >0 die Nummer des channels
+## 2. Model-Liste — ✅ erledigt (`298f9f5`)
+Die Modelliste soll auch als csv-Datei ausgeben werden können.
 
-Alle ID-Codes bestehen aus Großbuchstaben und Zahlen und : und _ ;
-im Modell-Feld zusätzlich `-` erlaubt (Upstream-Modellnamen wie
-"gpt-4o"/"glm-4.5" enthalten routinemäßig Bindestriche).
+> Umgesetzt: `curl -s 'http://localhost:9080/api/models?format=csv' > models.csv`.
+> Das Format entspricht der CLI-Registry (Semikolon, 11 Felder) plus
+> `provider;provider_code;upstream_id`. Die Kopfzeile beginnt mit `#`. Damit
+> ist die Datei direkt als `models.csv` für `sigoE` nutzbar und bringt die
+> Live-Shortcodes des Servers mit.
 
-Beispiel
-```python
-st="omnir:cl-haiku45:0:"
-st=st.upper()
-prv = st[:5]    # omnir
-mod = st[6:16]  # cl-haiku45
-chn = st[17:18] # 0
-```
+## 3. Kommunikationsprotokoll — ✅ erledigt (`c0b9892`)
+Ich möchte die Möglichkeit haben, mit einem cli-Parameter die Protokollierung der
+gesamten externen Kommunikation von sigoREST einschalten zu können. Die Daten sollen
+in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communication.json
 
----
-
-## Shortcode
-
-**Erledigt, siehe `docs/superpowers/specs/2026-09-20-id-shortcode-registry-design.md`
-und `docs/superpowers/plans/2026-09-20-id-shortcode-registry.md`.**
-
-Ursprünglicher Positions-Vorschlag (`p1m1c0`, Position in sortierter
-Provider-/Modell-Liste) verworfen: sigoREST lädt Modelle dynamisch bei
-jedem Boot, eine Positions-Nummer verschiebt sich bei jeder Änderung der
-Live-Liste. Ersetzt durch eine persistente SQLite-Registry mit
-assign-once Provider-/Modell-Kürzeln (Format `{provider3}-{semanticCode}
-[-{channel}]`, z.B. `zai-glm45-2`) — siehe Spec für Details.
-
-**Achtung beim Upgrade (Breaking Change für Clients):** Beim ersten Boot
-mit dieser Version vergibt die Registry alle Shortcodes einmalig neu. Sie
-unterscheiden sich praktisch immer von den bisherigen, pro Boot
-berechneten: aus `glm46` wird `zai-glm46`, aus `cl45-s` wird `mam-cl45-s`.
-Es gibt bewusst keine Kompatibilitätsschicht und keine Alias-Tabelle für
-die alten Kürzel. Jeder Client, der Shortcodes fest verdrahtet hat
-(Skripte, `ANTHROPIC_BASE_URL`-Konfigurationen, der C++-Client), muss nach
-dem Upgrade einmal `/api/shortcodes` neu abrufen. Ab dann sind die Kürzel
-über Boots und Provider-Listen-Änderungen hinweg stabil — genau das ist
-der Zweck der Registry.
+> Umgesetzt: `-comm-log /var/log/sigoREST/communication.jsonl`. Protokolliert
+> werden alle Chat- und Embedding-Calls zu den Providern (inkl. Streaming und
+> `/v1/messages`) mit vollständigem Request und Response als JSONL.
+> API-Key-Header werden maskiert, die Datei hat `0600`. Pings,
+> Health-Checks und der Modellabruf beim Boot werden nicht protokolliert.
+> systemd (`LogsDirectory=`) und logrotate (`copytruncate`) stehen in
+> `docs/systemd-install.md`.
 
 ---
 
-## Fallback
+## Nebenbei gefunden und behoben
 
-Für jeden Zugang soll es einen Fallback-Provider geben können. 
+- **Ollama-Chat ging nie** (`f75956c`): Ollama hat keinen API-Key und bekam
+  deshalb keinen Kanal. Jeder Chat-Call endete mit
+  `404 CONFIG_NOT_FOUND: no active channel for provider`, betroffen war auch
+  der Live-Dienst. Jetzt gibt es den keylosen Kanal `ollama-default`.
+- **Doppeltes `data: [DONE]`** in allen OpenAI-kompatiblen Streams (`5500406`).
 
+## Offen
 
-
-
+- [ ] **Deployment:** `sudo cp build/sigoREST /usr/local/sbin/sigoREST && sudo systemctl restart sigoREST`.
+  Alle Punkte oben wirken im Live-Dienst erst danach.
+- [ ] **`-comm-log` live einschalten** (optional, nur zur Fehlersuche):
+  `LogsDirectory=sigoREST` in die Unit, dazu das Flag an `ExecStart` anhängen.
+- [ ] **Reserve-Kanäle für Longcat/cheaperinference/Ollama werden nie aktiviert:**
+  `modelsEndpointForProvider` (`sigoengine/engine.go`) kennt nur
+  mammouth/moonshot/zai. Für alle anderen meldet die Health-Probe
+  „unavailable“, und der Health-Monitor schaltet keine Reserve zu.
+- [ ] **Shortcode-Kuriosum** `che-cl-f025` für `claude-fable-5`:
+  `GenerateShortcode` kennt „fable“ nicht als Unterfamilie. Wegen
+  Assign-Once ist das Kürzel eingefroren und betrifft nur künftige Modelle.
+- [ ] **Fallback-Provider** (aus TODO 20260920, noch nicht umgesetzt): Für
+  jeden Zugang soll es einen Fallback-Provider geben können.
