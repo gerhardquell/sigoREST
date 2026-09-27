@@ -343,6 +343,17 @@ Hintergrund-Check, reaktiviert Reserve-Kanäle bei Bedarf. Probe läuft über
 GET `/models` (oder Äquivalent), **nicht** über einen echten Chat-Call — kein
 API-Kosten-Verbrauch im Leerlauf.
 
+**Manuelles disable hat Vorrang (Gerhards Vorgabe, 2026-09-27):**
+`/api/channels/.../disable` → `SetActiveManual` → `Channel.ManuallyDisabled`
+(persistiert in `channels.json`, sichtbar in `/api/channels`). Der
+Health-Monitor überspringt solche Kanäle bei der Reserve-Suche und
+aktiviert sie **nie** wieder — auch nicht, wenn es der einzige Kanal des
+Providers ist; eine andere Reserve darf einspringen. Nur `/enable`
+(`SetActiveManual(true)`) löscht das Flag. Automatische Übergänge
+(Health-Monitor, Auth-Fehler im Chat-Handler) nutzen `SetActive` und
+lassen das Flag unangetastet. Vorher holte `runHealthChecks` einen
+manuell abgeschalteten einzigen Kanal nach einem Intervall zurück.
+
 Details/Historie siehe `RETROSPECTIVE.md`, Session 2026-08-18.
 
 ### Kosten-Tracking (`sigoengine/costdb.go`, `sigoREST/costhandlers.go`)

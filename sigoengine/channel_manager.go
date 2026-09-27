@@ -116,6 +116,7 @@ func (m *ChannelManager) AllChannelStatus() []map[string]interface{} {
 				"last_health_check":  ch.LastHealthCheck,
 				"last_error":         ch.LastError,
 				"consecutive_errors": ch.ConsecutiveErrors,
+				"manually_disabled":  ch.ManuallyDisabled,
 				"min_interval_ms":    ch.MinInterval,
 				"max_wait_ms":        ch.MaxWait,
 			})

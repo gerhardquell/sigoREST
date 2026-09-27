@@ -1711,12 +1711,13 @@ func (s *Server) handleChannelDetail(w http.ResponseWriter, r *http.Request, pro
 		"last_health_check":  ch.LastHealthCheck,
 		"last_error":         ch.LastError,
 		"consecutive_errors": ch.ConsecutiveErrors,
+		"manually_disabled":  ch.ManuallyDisabled,
 	})
 }
 
 // POST /api/channels/:provider/:name/enable
 func (s *Server) handleChannelEnable(w http.ResponseWriter, r *http.Request, provider, name string) {
-	if err := s.channelManager.Registry().SetActive(provider, name, true); err != nil {
+	if err := s.channelManager.Registry().SetActiveManual(provider, name, true); err != nil {
 		writeError(w, err.Error(), "not_found", http.StatusNotFound)
 		return
 	}
@@ -1726,7 +1727,7 @@ func (s *Server) handleChannelEnable(w http.ResponseWriter, r *http.Request, pro
 
 // POST /api/channels/:provider/:name/disable
 func (s *Server) handleChannelDisable(w http.ResponseWriter, r *http.Request, provider, name string) {
-	if err := s.channelManager.Registry().SetActive(provider, name, false); err != nil {
+	if err := s.channelManager.Registry().SetActiveManual(provider, name, false); err != nil {
 		writeError(w, err.Error(), "not_found", http.StatusNotFound)
 		return
 	}

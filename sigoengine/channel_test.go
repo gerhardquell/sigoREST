@@ -142,3 +142,46 @@ func TestChannelRegistry_AddKeylessChannel(t *testing.T) {
 		t.Fatal("persistiert deaktivierter Kanal wurde nach Neustart wieder aktiv")
 	}
 }
+
+// TestChannelRegistry_ManualDisablePersists: das Manuell-Flag übersteht einen
+// Neustart (channels.json), manuelles Enable löscht es wieder, automatisches
+// SetActive(false) (z.B. Auth-Fehler) setzt es nicht.
+func TestChannelRegistry_ManualDisablePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "channels.json")
+	newReg := func() *ChannelRegistry {
+		r := NewChannelRegistry(path)
+		r.AddChannel(&Channel{Provider: "zai", Name: "default", APIKey: "k", Active: true, Healthy: true})
+		r.AddChannel(&Channel{Provider: "zai", Name: "0", APIKey: "k0", Active: true, Order: 1, Healthy: true})
+		if err := r.LoadState(); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	r := newReg()
+	if err := r.SetActiveManual("zai", "default", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetActive("zai", "0", false); err != nil { // automatisch
+		t.Fatal(err)
+	}
+
+	r2 := newReg()
+	def, _ := r2.GetChannel("zai", "default")
+	if def.Active || !def.ManuallyDisabled {
+		t.Fatalf("default nach Neustart: active=%v manual=%v, erwartet false/true", def.Active, def.ManuallyDisabled)
+	}
+	res, _ := r2.GetChannel("zai", "0")
+	if res.Active || res.ManuallyDisabled {
+		t.Fatalf("Kanal 0 nach Neustart: active=%v manual=%v, erwartet false/false", res.Active, res.ManuallyDisabled)
+	}
+
+	if err := r2.SetActiveManual("zai", "default", true); err != nil {
+		t.Fatal(err)
+	}
+	r3 := newReg()
+	def, _ = r3.GetChannel("zai", "default")
+	if !def.Active || def.ManuallyDisabled {
+		t.Fatalf("default nach manuellem Enable: active=%v manual=%v, erwartet true/false", def.Active, def.ManuallyDisabled)
+	}
+}

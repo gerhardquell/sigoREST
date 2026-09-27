@@ -47,6 +47,10 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   nur manuelle Starts mit Keys ausschließlich in `./.env` (unter systemd setzt
   `EnvironmentFile=` echte Umgebungsvariablen). `TestNoDirectOsGetenv`
   verhindert per AST-Prüfung, dass das wiederkommt.
+- **Manuelles `disable` wurde vom Health-Monitor zurückgenommen**: Jetzt hat
+  manuelles `disable` Vorrang (Gerhards Entscheidung). Das Flag
+  `manually_disabled` wird in `channels.json` gespeichert und ist in
+  `/api/channels` sichtbar. Nur `/enable` hebt es auf.
 
 ## Offen
 
@@ -54,13 +58,6 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   Alle Punkte oben wirken im Live-Dienst erst danach.
 - [ ] **`-comm-log` live einschalten** (optional, nur zur Fehlersuche):
   `LogsDirectory=sigoREST` in die Unit, dazu das Flag an `ExecStart` anhängen.
-- [ ] **Manuell deaktivierter Kanal wird vom Health-Monitor zurückgeholt:**
-  Deaktiviert man per API den einzigen aktiven Kanal eines Providers, findet
-  `runHealthChecks` „kein aktiver Kanal“ und aktiviert den ersten inaktiven
-  gesunden (nach `Order`), also meist genau den gerade abgeschalteten
-  `default`. Ein manuelles `disable` hält so nur ein Health-Intervall
-  (Default 30 s). Beobachtet am 27.09.; klären, ob das gewollt ist (Verfügbarkeit
-  vor manuellem Eingriff) oder ob ein manuelles `disable` Vorrang haben soll.
 - [ ] **Shortcode-Kuriosum** `che-cl-f025` für `claude-fable-5`:
   `GenerateShortcode` kennt „fable“ nicht als Unterfamilie. Wegen
   Assign-Once ist das Kürzel eingefroren und betrifft nur künftige Modelle.

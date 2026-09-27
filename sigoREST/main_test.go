@@ -791,3 +791,51 @@ func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleChannelDisable_IsManual: /disable über die API setzt das
+// Manuell-Flag (Health-Monitor lässt den Kanal dann in Ruhe), /enable löscht es.
+func TestHandleChannelDisable_IsManual(t *testing.T) {
+	srv, _ := newTestServer(t)
+	reg := srv.channelManager.Registry()
+
+	rr := httptest.NewRecorder()
+	srv.handleChannelDisable(rr, httptest.NewRequest(http.MethodPost, "/api/channels/mammouth/default/disable", nil), "mammouth", "default")
+	if ch, _ := reg.GetChannel("mammouth", "default"); ch.Active || !ch.ManuallyDisabled {
+		t.Fatalf("nach /disable: active=%v manual=%v", ch.Active, ch.ManuallyDisabled)
+	}
+
+	// Flag muss auch in der API-Ausgabe sichtbar sein (Liste + Detail).
+	rr = httptest.NewRecorder()
+	srv.handleChannels(rr, httptest.NewRequest(http.MethodGet, "/api/channels", nil))
+	var list []map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range list {
+		if c["full_name"] == "mammouth-default" {
+			found = true
+			if c["manually_disabled"] != true {
+				t.Errorf("/api/channels: manually_disabled = %v, erwartet true", c["manually_disabled"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mammouth-default fehlt in /api/channels")
+	}
+	rr = httptest.NewRecorder()
+	srv.handleChannelDetail(rr, httptest.NewRequest(http.MethodGet, "/api/channels/mammouth/default", nil), "mammouth", "default")
+	var detail map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["manually_disabled"] != true {
+		t.Errorf("Detail: manually_disabled = %v, erwartet true", detail["manually_disabled"])
+	}
+
+	rr = httptest.NewRecorder()
+	srv.handleChannelEnable(rr, httptest.NewRequest(http.MethodPost, "/api/channels/mammouth/default/enable", nil), "mammouth", "default")
+	if ch, _ := reg.GetChannel("mammouth", "default"); !ch.Active || ch.ManuallyDisabled {
+		t.Fatalf("nach /enable: active=%v manual=%v", ch.Active, ch.ManuallyDisabled)
+	}
+}

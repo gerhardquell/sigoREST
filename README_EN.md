@@ -479,6 +479,12 @@ Detailed status of a channel.
 curl -s -X POST http://localhost:9080/api/channels/mammouth/0/enable
 curl -s -X POST http://localhost:9080/api/channels/mammouth/0/disable
 ```
+A channel disabled via the API counts as **manually disabled**
+(`manually_disabled: true` in `/api/channels` and `channels.json`). This
+takes priority over automation: the health monitor never re-enables it,
+not even after a restart. A reserve channel of the same provider may
+still step in. Only a manual `/enable` lifts it. Automatic deactivations
+(e.g. auth errors) do not set the flag.
 
 ### GET/PUT /api/channels/:provider/:name/memory
 ```bash

@@ -511,6 +511,12 @@ Detail-Status eines Kanals.
 curl -s -X POST http://localhost:9080/api/channels/mammouth/0/enable
 curl -s -X POST http://localhost:9080/api/channels/mammouth/0/disable
 ```
+Ein per API deaktivierter Kanal gilt als **manuell deaktiviert**
+(`manually_disabled: true` in `/api/channels` und `channels.json`). Das hat
+Vorrang vor der Automatik: Der Health-Monitor aktiviert ihn nie wieder,
+auch nach einem Neustart nicht. Eine Reserve desselben Providers darf aber
+einspringen. Nur ein manuelles `/enable` hebt das auf. Automatische
+Abschaltungen (z.B. Auth-Fehler) setzen das Flag nicht.
 
 ### GET/PUT /api/channels/:provider/:name/memory
 ```bash

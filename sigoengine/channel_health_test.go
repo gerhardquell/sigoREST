@@ -186,3 +186,53 @@ func TestModelsEndpointForProvider(t *testing.T) {
 		}
 	}
 }
+
+// TestRunHealthChecks_ManualDisableHasPriority: ein per API (manuell)
+// deaktivierter Kanal darf vom Health-Monitor NIE wieder aktiviert werden —
+// auch nicht, wenn er der einzige Kanal des Providers ist. Bis 2026-09-27
+// holte runHealthChecks ihn nach einem Intervall zurück ("kein aktiver
+// Kanal" → erster inaktiver = gerade abgeschalteter default).
+func TestRunHealthChecks_ManualDisableHasPriority(t *testing.T) {
+	withMockHTTPClient(t, func(*http.Request) (*http.Response, error) {
+		return mockResponse(http.StatusOK, `{"data":[]}`), nil // Probe wäre "available"
+	})
+
+	registry := NewChannelRegistry("")
+	registry.AddChannel(&Channel{Provider: "zai", Name: "default", APIKey: "k", Active: true, Order: 0, Healthy: true})
+	if err := registry.SetActiveManual("zai", "default", false); err != nil {
+		t.Fatal(err)
+	}
+
+	runHealthChecks(NewChannelManager(registry))
+
+	ch, _ := registry.GetChannel("zai", "default")
+	if ch.Active {
+		t.Fatal("manuell deaktivierter Kanal wurde vom Health-Monitor reaktiviert")
+	}
+}
+
+// TestRunHealthChecks_ManualDisableFallsThroughToReserve: default manuell aus,
+// Reserve 0 (nicht manuell aus) → Reserve springt ein, default bleibt aus.
+func TestRunHealthChecks_ManualDisableFallsThroughToReserve(t *testing.T) {
+	withMockHTTPClient(t, func(*http.Request) (*http.Response, error) {
+		return mockResponse(http.StatusOK, `{"data":[]}`), nil
+	})
+
+	registry := NewChannelRegistry("")
+	registry.AddChannel(&Channel{Provider: "zai", Name: "default", APIKey: "k", Active: true, Order: 0, Healthy: true})
+	registry.AddChannel(&Channel{Provider: "zai", Name: "0", APIKey: "k0", Active: false, Order: 1})
+	if err := registry.SetActiveManual("zai", "default", false); err != nil {
+		t.Fatal(err)
+	}
+
+	runHealthChecks(NewChannelManager(registry))
+
+	def, _ := registry.GetChannel("zai", "default")
+	res, _ := registry.GetChannel("zai", "0")
+	if def.Active {
+		t.Error("manuell deaktivierter default wurde reaktiviert")
+	}
+	if !res.Active {
+		t.Error("Reserve 0 hätte einspringen sollen")
+	}
+}

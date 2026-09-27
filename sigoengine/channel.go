@@ -28,6 +28,11 @@ type Channel struct {
 	LastHealthCheck   time.Time `json:"last_health_check,omitempty"`
 	LastError         string    `json:"last_error,omitempty"`
 	ConsecutiveErrors int       `json:"consecutive_errors"`
+	// ManuallyDisabled: per API (/disable) abgeschaltet. Hat Vorrang vor der
+	// Automatik — der Health-Monitor aktiviert solche Kanäle nie wieder, nur
+	// ein manuelles /enable. Automatische Abschaltungen (Auth-Fehler) setzen
+	// das Flag nicht. Wird in channels.json persistiert.
+	ManuallyDisabled bool `json:"manually_disabled,omitempty"`
 	// Rate-Limit-Config pro Kanal (0 → Server-Default greift).
 	MinInterval int `json:"min_interval_ms,omitempty"` // Mindest-Abstand zwischen Calls (ms)
 	MaxWait     int `json:"max_wait_ms,omitempty"`     // max Queue-Wartezeit bis 429 (ms)
@@ -97,7 +102,19 @@ func (r *ChannelRegistry) GetChannelByFullName(fullName string) (*Channel, bool)
 }
 
 // SetActive changes the active flag of a channel and persists state.
+// Für automatische Übergänge (Health-Monitor, Auth-Fehler) — lässt
+// ManuallyDisabled unangetastet. Manuelle API-Aufrufe: SetActiveManual.
 func (r *ChannelRegistry) SetActive(provider, name string, active bool) error {
+	return r.setActive(provider, name, active, false)
+}
+
+// SetActiveManual ist SetActive für manuelle Eingriffe (API /enable,
+// /disable): disable setzt ManuallyDisabled, enable löscht es.
+func (r *ChannelRegistry) SetActiveManual(provider, name string, active bool) error {
+	return r.setActive(provider, name, active, true)
+}
+
+func (r *ChannelRegistry) setActive(provider, name string, active, manual bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, ch := range r.channels[provider] {
@@ -105,6 +122,9 @@ func (r *ChannelRegistry) SetActive(provider, name string, active bool) error {
 			ch.Active = active
 			if !active {
 				ch.Healthy = false
+			}
+			if manual {
+				ch.ManuallyDisabled = !active
 			}
 			return r.saveStateLocked()
 		}
@@ -231,13 +251,17 @@ func (r *ChannelRegistry) AddKeylessChannel(provider string) {
 	})
 }
 
+// persistedChannel is the on-disk shape of one channel in channels.json.
+type persistedChannel struct {
+	Active           bool `json:"active"`
+	ManuallyDisabled bool `json:"manually_disabled,omitempty"`
+	MinInterval      int  `json:"min_interval_ms,omitempty"`
+	MaxWait          int  `json:"max_wait_ms,omitempty"`
+}
+
 // persistedState is the on-disk shape of channels.json.
 type persistedState struct {
-	Providers map[string]map[string]struct {
-		Active      bool `json:"active"`
-		MinInterval int  `json:"min_interval_ms,omitempty"`
-		MaxWait     int  `json:"max_wait_ms,omitempty"`
-	} `json:"providers"`
+	Providers map[string]map[string]persistedChannel `json:"providers"`
 }
 
 // LoadState reads channels.json and applies saved active flags.
@@ -268,6 +292,7 @@ func (r *ChannelRegistry) LoadState() error {
 			for _, ch := range r.channels[provider] {
 				if ch.Name == name {
 					ch.Active = cfg.Active
+					ch.ManuallyDisabled = cfg.ManuallyDisabled
 					ch.MinInterval = cfg.MinInterval
 					ch.MaxWait = cfg.MaxWait
 					if !ch.Active {
@@ -291,23 +316,16 @@ func (r *ChannelRegistry) saveStateLocked() error {
 	if r.statePath == "" {
 		return nil
 	}
-	state := persistedState{Providers: make(map[string]map[string]struct {
-		Active      bool `json:"active"`
-		MinInterval int  `json:"min_interval_ms,omitempty"`
-		MaxWait     int  `json:"max_wait_ms,omitempty"`
-	})}
+	state := persistedState{Providers: make(map[string]map[string]persistedChannel)}
 	for provider, list := range r.channels {
-		m := make(map[string]struct {
-			Active      bool `json:"active"`
-			MinInterval int  `json:"min_interval_ms,omitempty"`
-			MaxWait     int  `json:"max_wait_ms,omitempty"`
-		})
+		m := make(map[string]persistedChannel)
 		for _, ch := range list {
-			m[ch.Name] = struct {
-				Active      bool `json:"active"`
-				MinInterval int  `json:"min_interval_ms,omitempty"`
-				MaxWait     int  `json:"max_wait_ms,omitempty"`
-			}{Active: ch.Active, MinInterval: ch.MinInterval, MaxWait: ch.MaxWait}
+			m[ch.Name] = persistedChannel{
+				Active:           ch.Active,
+				ManuallyDisabled: ch.ManuallyDisabled,
+				MinInterval:      ch.MinInterval,
+				MaxWait:          ch.MaxWait,
+			}
 		}
 		state.Providers[provider] = m
 	}

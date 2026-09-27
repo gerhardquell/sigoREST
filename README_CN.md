@@ -471,6 +471,10 @@ curl -s http://localhost:9080/api/channels/mammouth/0
 curl -s -X POST http://localhost:9080/api/channels/mammouth/0/enable
 curl -s -X POST http://localhost:9080/api/channels/mammouth/0/disable
 ```
+通过 API 停用的渠道视为**手动停用**（在 `/api/channels` 和 `channels.json`
+中为 `manually_disabled: true`）。它优先于自动机制：健康监控永远不会重新启用它，
+重启后也不会。同一 Provider 的备用渠道仍可顶上。只有手动 `/enable` 才能解除。
+自动停用（例如认证错误）不会设置该标志。
 
 ### GET/PUT /api/channels/:provider/:name/memory
 ```bash

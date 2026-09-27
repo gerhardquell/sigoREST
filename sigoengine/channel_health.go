@@ -21,6 +21,8 @@ import (
 // oder gar kein aktiver Kanal existiert. Vor der Aktivierung wird die Reserve
 // per kostenlosem /models-GET (ProbeProviderModelList) geprüft — das verursacht
 // keine Token-Kosten. Auth-fehlgeschlagene Reserven werden deaktiviert.
+// Manuell per API deaktivierte Kanäle (ManuallyDisabled) werden nie
+// automatisch reaktiviert.
 func StartHealthMonitor(ctx context.Context, manager *ChannelManager, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -48,7 +50,9 @@ func runHealthChecks(manager *ChannelManager) {
 
 		for _, ch := range registry.Channels(provider) {
 			if !ch.Active {
-				if firstInactive == nil {
+				// Manuell (per API) deaktivierte Kanäle sind nie
+				// Reserve-Kandidaten — manuelles disable hat Vorrang.
+				if firstInactive == nil && !ch.ManuallyDisabled {
 					firstInactive = ch
 				}
 				continue
