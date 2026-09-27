@@ -54,8 +54,7 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
 
 ## Offen
 
-- [ ] **Deployment:** `sudo cp build/sigoREST /usr/local/sbin/sigoREST && sudo systemctl restart sigoREST`.
-  Alle Punkte oben wirken im Live-Dienst erst danach.
+- [x] **Deployment** am 27.09. um 13:27 (`sigoREST` und `sigoE`), live geprüft.
 - [ ] **`-comm-log` live einschalten** (optional, nur zur Fehlersuche):
   `LogsDirectory=sigoREST` in die Unit, dazu das Flag an `ExecStart` anhängen.
 - [ ] **Shortcode-Kuriosum** `che-cl-f025` für `claude-fable-5`:
