@@ -519,6 +519,7 @@ type ChatRequest struct {
 	Timeout      int           `json:"timeout"`       // sigoREST-Erweiterung
 	Retries      int           `json:"retries"`       // sigoREST-Erweiterung
 	SystemPrompt string        `json:"system_prompt"` // per-Request Override
+	Bare         bool          `json:"bare"`          // sigoREST-Erweiterung: kein Memory, kein Server-System-Prompt
 	Channel      string        `json:"channel"`       // optionaler Kanal, z.B. "mammouth-0"
 	Stream       bool          `json:"stream"`        // OpenAI streaming flag (new)
 }
@@ -868,35 +869,40 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Messages aufbauen: Memory zuerst, dann user-Messages
 	messages := []map[string]interface{}{}
 
-	// Globaler Memory-Block als System-Message (immer zuerst)
-	if mem.Content != "" {
-		memMsg := map[string]interface{}{
-			"role":    "system",
-			"content": mem.Content,
-		}
-		messages = append(messages, memMsg)
-	}
-
-	// Kanal-spezifischer Memory-Block
-	channelMemPath := sigoengine.ChannelMemoryPath(s.baseDir, ch.Provider, ch.Name)
-	if data, err := os.ReadFile(channelMemPath); err == nil {
-		var channelMem sigoengine.MemoryBlock
-		if err := json.Unmarshal(data, &channelMem); err == nil && channelMem.Content != "" {
+	// Memory und Server-System-Prompt nur ohne bare. Mit bare bestimmt allein
+	// der Client den Kontext: einzig ein nicht-leeres req.SystemPrompt.
+	effectiveSystemPrompt := ""
+	if !req.Bare {
+		// Globaler Memory-Block als System-Message (immer zuerst)
+		if mem.Content != "" {
 			messages = append(messages, map[string]interface{}{
 				"role":    "system",
-				"content": channelMem.Content,
+				"content": mem.Content,
 			})
 		}
-	}
 
-	// System-Prompt: Request-Wert hat Vorrang vor Kanal-System-Prompt, Kanal vor globalem Default
-	effectiveSystemPrompt := globalSystemPrompt
-	channelPromptPath := sigoengine.ChannelSystemPromptPath(s.baseDir, ch.Provider, ch.Name)
-	if data, err := os.ReadFile(channelPromptPath); err == nil {
-		if prompt := strings.TrimSpace(string(data)); prompt != "" {
-			effectiveSystemPrompt = prompt
+		// Kanal-spezifischer Memory-Block
+		channelMemPath := sigoengine.ChannelMemoryPath(s.baseDir, ch.Provider, ch.Name)
+		if data, err := os.ReadFile(channelMemPath); err == nil {
+			var channelMem sigoengine.MemoryBlock
+			if err := json.Unmarshal(data, &channelMem); err == nil && channelMem.Content != "" {
+				messages = append(messages, map[string]interface{}{
+					"role":    "system",
+					"content": channelMem.Content,
+				})
+			}
+		}
+
+		// System-Prompt: Kanal vor globalem Default
+		effectiveSystemPrompt = globalSystemPrompt
+		channelPromptPath := sigoengine.ChannelSystemPromptPath(s.baseDir, ch.Provider, ch.Name)
+		if data, err := os.ReadFile(channelPromptPath); err == nil {
+			if prompt := strings.TrimSpace(string(data)); prompt != "" {
+				effectiveSystemPrompt = prompt
+			}
 		}
 	}
+	// Request-Wert hat immer Vorrang
 	if req.SystemPrompt != "" {
 		effectiveSystemPrompt = req.SystemPrompt
 	}

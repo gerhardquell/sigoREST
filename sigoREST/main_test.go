@@ -839,3 +839,90 @@ func TestHandleChannelDisable_IsManual(t *testing.T) {
 		t.Fatalf("nach /enable: active=%v manual=%v", ch.Active, ch.ManuallyDisabled)
 	}
 }
+
+// contextTestResponse: feste OpenAI-kompatible Upstream-Antwort inkl.
+// Cache-/Reasoning-Details.
+const contextTestResponse = `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+	`"usage":{"prompt_tokens":5210,"completion_tokens":115,"total_tokens":5325,` +
+	`"prompt_tokens_details":{"cached_tokens":5120},"completion_tokens_details":{"reasoning_tokens":98}}}`
+
+// newContextTestUpstream legt die beim Provider ankommenden messages in *got ab.
+func newContextTestUpstream(t *testing.T, got *[]map[string]interface{}) *httptest.Server {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		var body struct {
+			Messages []map[string]interface{} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("upstream decode: %v", err)
+		}
+		*got = body.Messages
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, contextTestResponse)
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// newContextTestServer: Server mit globalem Memory und System-Prompt, damit
+// sichtbar wird, ob bare sie unterdrückt.
+func newContextTestServer(t *testing.T, upstreamURL string) *Server {
+	t.Helper()
+	srv, _ := newTestServer(t)
+	srv.memory = sigoengine.MemoryBlock{Content: "MEMORY"}
+	srv.systemPrompt = "GLOBAL"
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstreamURL, MaxOutputTokens: 100,
+			MaxTemperature: 1, MinTemperature: 0, InputCost: 1.0, OutputCost: 2.0},
+	}
+	return srv
+}
+
+func postChat(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	return rr
+}
+
+// assertMessages prüft Rolle und Inhalt jeder Upstream-Message in Reihenfolge.
+func assertMessages(t *testing.T, got []map[string]interface{}, want [][2]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d messages, got %d: %+v", len(want), len(got), got)
+	}
+	for i, w := range want {
+		if got[i]["role"] != w[0] || got[i]["content"] != w[1] {
+			t.Fatalf("message %d: expected %s/%q, got %+v", i, w[0], w[1], got[i])
+		}
+	}
+}
+
+func TestChatCompletions_BareWithSystemPrompt(t *testing.T) {
+	var got []map[string]interface{}
+	srv := newContextTestServer(t, newContextTestUpstream(t, &got).URL)
+	postChat(t, srv, `{"model":"claude-h","bare":true,"system_prompt":"VORSPANN","messages":[{"role":"user","content":"hi"}]}`)
+	assertMessages(t, got, [][2]string{{"system", "VORSPANN"}, {"user", "hi"}})
+}
+
+func TestChatCompletions_BareWithoutSystemPrompt(t *testing.T) {
+	var got []map[string]interface{}
+	srv := newContextTestServer(t, newContextTestUpstream(t, &got).URL)
+	postChat(t, srv, `{"model":"claude-h","bare":true,"messages":[{"role":"user","content":"hi"}]}`)
+	assertMessages(t, got, [][2]string{{"user", "hi"}})
+}
+
+func TestChatCompletions_NotBareKeepsServerContext(t *testing.T) {
+	var got []map[string]interface{}
+	srv := newContextTestServer(t, newContextTestUpstream(t, &got).URL)
+	postChat(t, srv, `{"model":"claude-h","messages":[{"role":"user","content":"hi"}]}`)
+	assertMessages(t, got, [][2]string{{"system", "MEMORY"}, {"system", "GLOBAL"}, {"user", "hi"}})
+}
