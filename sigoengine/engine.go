@@ -554,9 +554,11 @@ func LoadConfig(model string) (*ProviderConfig, error) {
 // **********************************************************************
 // UsageData - Token-Verbrauch aus Provider-Response
 type UsageData struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	TotalTokens     int `json:"total_tokens"`
+	CachedTokens    int `json:"cached_tokens,omitempty"`    // aus Provider-Cache gelesene Input-Tokens
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"` // Thinking-Anteil der Output-Tokens
 }
 
 // **********************************************************************
@@ -1413,6 +1415,18 @@ func extractUsage(result map[string]interface{}, providerType string) *UsageData
 	}
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = toInt(u["candidatesTokenCount"])
+	}
+
+	// Cache-/Reasoning-Details: OpenAI-kompatibel (prompt_tokens_details /
+	// completion_tokens_details), Anthropic liefert cache_read_input_tokens.
+	if d, ok := u["prompt_tokens_details"].(map[string]interface{}); ok {
+		usage.CachedTokens = toInt(d["cached_tokens"])
+	}
+	if usage.CachedTokens == 0 {
+		usage.CachedTokens = toInt(u["cache_read_input_tokens"])
+	}
+	if d, ok := u["completion_tokens_details"].(map[string]interface{}); ok {
+		usage.ReasoningTokens = toInt(d["reasoning_tokens"])
 	}
 
 	// Wenn Input/Output immer noch 0, versuche total_tokens direkt
