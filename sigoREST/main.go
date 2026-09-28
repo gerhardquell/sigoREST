@@ -536,7 +536,7 @@ type ChatUsage struct {
 	TotalTokens             int                      `json:"total_tokens"`
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
-	CostUSD                 float64                  `json:"cost_usd,omitempty"` // sigoREST-Erweiterung, ohne Cache-Rabatt (obere Schranke)
+	CostUSD                 float64                  `json:"cost_usd,omitempty"` // sigoREST-Erweiterung, ohne Cache-Rabatt (obere Schranke bei OpenAI-kompatiblen Providern)
 }
 
 type PromptTokensDetails struct {
@@ -1950,15 +1950,17 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 				"method":      "POST",
 				"description": "OpenAI-kompatible Chat-Completion API",
 				"parameters": map[string]string{
-					"model":       "Modell-ID oder Shortcode (z.B. 'claude-h', 'gpt41')",
-					"messages":    "Array von {role, content} Objekten",
-					"temperature": "Optional: 0.0-2.0 (default: Modell-Mittelwert)",
-					"max_tokens":  "Optional: Max. Ausgabe-Tokens",
-					"session_id":  "Optional: Session-ID für Gesprächsverlauf",
-					"timeout":     "Optional: Timeout in Sekunden (default: 180)",
-					"retries":     "Optional: Anzahl Retries (default: 3)",
-					"channel":     "Optional: Kanal-FullName z.B. 'mammouth-0'",
-					"stream":      "Optional: true für Server-Sent Events Streaming (OpenAI-kompatibel)",
+					"model":         "Modell-ID oder Shortcode (z.B. 'claude-h', 'gpt41')",
+					"messages":      "Array von {role, content} Objekten",
+					"temperature":   "Optional: 0.0-2.0 (default: Modell-Mittelwert)",
+					"max_tokens":    "Optional: Max. Ausgabe-Tokens",
+					"session_id":    "Optional: Session-ID für Gesprächsverlauf",
+					"timeout":       "Optional: Timeout in Sekunden (default: 180)",
+					"retries":       "Optional: Anzahl Retries (default: 3)",
+					"channel":       "Optional: Kanal-FullName z.B. 'mammouth-0'",
+					"stream":        "Optional: true für Server-Sent Events Streaming (OpenAI-kompatibel)",
+					"bare":          "Optional: true → kein globaler/Kanal-Memory, kein Server-System-Prompt; nur ein nicht-leerer system_prompt zählt noch",
+					"system_prompt": "Optional: per-Request System-Prompt-Override (bei bare:true der einzige Kontext)",
 				},
 				"example": `curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -2101,6 +2103,8 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 			"system_prompt":          "Globaler + kanal-spezifischer + per-Request System-Prompt",
 			"multi_channel":          "Mehrere API-Key-Kanäle pro Provider mit Failover",
 			"channel_health_monitor": "Automatische Health-Checks und Reserve-Zuschaltung",
+			"bare_mode":              "bare:true in /v1/chat/completions unterdrückt Memory + Server-System-Prompt komplett",
+			"usage_details":          "usage.prompt_tokens_details.cached_tokens, usage.completion_tokens_details.reasoning_tokens, usage.cost_usd (obere Schranke ohne Cache-Rabatt bei OpenAI-kompatiblen Providern)",
 		},
 		"error_types": map[string]string{
 			"rate_limit":   "HTTP 429 - Zu viele Anfragen, Retry-After Header gesetzt",

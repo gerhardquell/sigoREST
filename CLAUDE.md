@@ -218,9 +218,27 @@ sie nicht.
   "messages": [...],
   "session_id": "mein-projekt",   // Optional
   "timeout": 120,                  // Optional (default 180)
-  "retries": 3                     // Optional (default 3)
+  "retries": 3,                    // Optional (default 3)
+  "bare": true,                    // Optional: kein Memory, kein Server-System-Prompt
+  "system_prompt": "…"             // Optional: per-Request Override; bei bare der einzige Kontext
 }
 ```
+Mit `bare:true` legt der Server weder globalen/Kanal-Memory noch den
+Server-System-Prompt vor die Anfrage — nur ein nicht-leerer `system_prompt`
+zählt dann noch. Ein älteres sigoREST ohne `bare`-Unterstützung ignoriert
+das Feld (Memory/Server-Prompt kommen dann wieder dazu).
+
+**sigoREST-Erweiterungen in der Response (`usage`):**
+```json
+{
+  "prompt_tokens_details": { "cached_tokens": 0 },
+  "completion_tokens_details": { "reasoning_tokens": 0 },
+  "cost_usd": 0.0
+}
+```
+`cost_usd` = `CalcCostUSD(input_cost, output_cost)`, ohne Cache-Rabatt —
+für OpenAI-kompatible Provider eine obere Schranke (`prompt_tokens` enthält
+dort die gecachten Tokens mit).
 
 ### Dynamisches Modell-Laden (Server)
 

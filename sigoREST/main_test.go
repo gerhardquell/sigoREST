@@ -82,6 +82,46 @@ func TestHandleHelp_ListsMessagesEndpoint(t *testing.T) {
 	}
 }
 
+func TestHandleHelp_MentionsBareFlag(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/help", nil)
+	rr := httptest.NewRecorder()
+	srv.handleHelp(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var help map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &help); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	endpoints, ok := help["endpoints"].([]interface{})
+	if !ok {
+		t.Fatalf("expected endpoints array, got %+v", help["endpoints"])
+	}
+	found := false
+	for _, e := range endpoints {
+		entry, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if entry["path"] != "/v1/chat/completions" {
+			continue
+		}
+		params, ok := entry["parameters"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, ok := params["bare"]; ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected /api/help to mention 'bare' parameter on /v1/chat/completions, got: %s", rr.Body.String())
+	}
+}
+
 func TestHandleChatCompletions_MidStreamFailureDoesNotDoubleWriteOrGlueJSON(t *testing.T) {
 	// Regression for Finding #3 (handleChatCompletions/streamProviderResponse
 	// side): once headers are written and at least one SSE chunk flushed,
