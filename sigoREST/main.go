@@ -531,9 +531,20 @@ type ChatChoice struct {
 }
 
 type ChatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	CostUSD                 float64                  `json:"cost_usd,omitempty"` // sigoREST-Erweiterung, ohne Cache-Rabatt (obere Schranke)
+}
+
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type ChatResponse struct {
@@ -1211,6 +1222,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		CompletionTokens: responseUsage.OutputTokens,
 		TotalTokens:      responseUsage.TotalTokens,
 	}
+	if responseUsage.CachedTokens > 0 {
+		chatUsage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: responseUsage.CachedTokens}
+	}
+	if responseUsage.ReasoningTokens > 0 {
+		chatUsage.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: responseUsage.ReasoningTokens}
+	}
+	_, _, chatUsage.CostUSD = sigoengine.CalcCostUSD(
+		int64(responseUsage.InputTokens), int64(responseUsage.OutputTokens),
+		modelInfo.InputCost, modelInfo.OutputCost,
+	)
 	s.recordUsageWithSession(modelID, successfulCh, responseUsage, req.SessionID)
 
 	// Bei echtem Streaming wurde die Antwort bereits geschrieben.

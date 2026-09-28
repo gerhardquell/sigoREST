@@ -926,3 +926,56 @@ func TestChatCompletions_NotBareKeepsServerContext(t *testing.T) {
 	postChat(t, srv, `{"model":"claude-h","messages":[{"role":"user","content":"hi"}]}`)
 	assertMessages(t, got, [][2]string{{"system", "MEMORY"}, {"system", "GLOBAL"}, {"user", "hi"}})
 }
+
+func TestChatCompletions_UsageDetailsPassedThrough(t *testing.T) {
+	var got []map[string]interface{}
+	srv := newContextTestServer(t, newContextTestUpstream(t, &got).URL)
+	rr := postChat(t, srv, `{"model":"claude-h","bare":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	var resp struct {
+		Usage struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+			CostUSD float64 `json:"cost_usd"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Usage.PromptTokens != 5210 {
+		t.Fatalf("prompt_tokens: expected 5210, got %d", resp.Usage.PromptTokens)
+	}
+	if resp.Usage.PromptTokensDetails.CachedTokens != 5120 {
+		t.Fatalf("cached_tokens: expected 5120, got %d", resp.Usage.PromptTokensDetails.CachedTokens)
+	}
+	if resp.Usage.CompletionTokensDetails.ReasoningTokens != 98 {
+		t.Fatalf("reasoning_tokens: expected 98, got %d", resp.Usage.CompletionTokensDetails.ReasoningTokens)
+	}
+	// 5210/1e6*1.0 + 115/1e6*2.0 = 0.00544 (ohne Cache-Rabatt)
+	if d := resp.Usage.CostUSD - 0.00544; d > 1e-9 || d < -1e-9 {
+		t.Fatalf("cost_usd: expected 0.00544, got %v", resp.Usage.CostUSD)
+	}
+}
+
+func TestChatCompletions_UsageDetailsOmittedWhenZero(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}))
+	defer upstream.Close()
+	srv := newContextTestServer(t, upstream.URL)
+	rr := postChat(t, srv, `{"model":"claude-h","messages":[{"role":"user","content":"hi"}]}`)
+	body := rr.Body.String()
+	if strings.Contains(body, "prompt_tokens_details") || strings.Contains(body, "completion_tokens_details") {
+		t.Fatalf("expected no detail objects for zero values, got %s", body)
+	}
+}
