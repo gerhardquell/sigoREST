@@ -395,7 +395,7 @@ export ANTHROPIC_MODEL="cl46-s"
 claude "Hallo"
 ```
 
-Unterstützt Tool-Calling und SSE-Streaming. Modellwahl ist 1:1 wie bei
+Unterstützt Tool-Calling, SSE-Streaming und Extended Thinking. Modellwahl ist 1:1 wie bei
 `/v1/chat/completions` (ID/Shortcode, kein Alias). Kein separater
 Auth-Mechanismus (gleiche IP-Zugriffskontrolle wie alle anderen Endpunkte),
 keine Memory-/System-Prompt-/Session-Injektion — der Client verwaltet
@@ -404,6 +404,17 @@ seinen eigenen Kontext. Fehler-Antworten folgen dem Anthropic-Format
 OpenAI-Format von `/v1/chat/completions`. `usage` (Input-/Output-Tokens)
 wird auch bei Streaming aus den echten Provider-Daten befüllt, nicht
 geschätzt.
+
+**Thinking**: Der Anthropic-`thinking`-Parameter (`{"type":"enabled",
+"budget_tokens":N}`) wird pro Kanaltyp übersetzt — nativer
+`budget_tokens`-Weiterleitung für Anthropic-Kanäle, `thinking`-Objekt für
+ZAI (GLM-4.5+) und `reasoning_effort` (low/medium/high, aus dem Budget
+gemappt) für alle anderen OpenAI-kompatiblen Provider. Umgekehrt wird
+Upstream-`reasoning_content` im Streaming in Anthropic-`thinking`-Blöcke
+übersetzt (vor dem text-Block, wie Anthropic-Clients es erwarten);
+`thinking`-Blöcke im Request werden ignoriert. Nicht-gestreamte Antworten
+liefern kein Thinking zurück (`CallAPI` extrahiert keinen
+`reasoning_content`).
 
 ### GET /v1/models
 ```bash

@@ -517,3 +517,145 @@ func TestStreamAnthropicResponse_ToolCall(t *testing.T) {
 		}
 	}
 }
+
+func TestAnthropicRequest_ThinkingParsed(t *testing.T) {
+	// Regression: thinking-Parameter muss geparst werden, damit er nicht
+	// still verworfen wird und Thinking-fähige Clients (pi) wirksam sind.
+	body := `{"model":"mam-cl46-s","max_tokens":100,
+		"thinking":{"type":"enabled","budget_tokens":10240},
+		"messages":[{"role":"user","content":"hi"}]}`
+	var req AnthropicRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+	if req.Thinking == nil || req.Thinking.Type != "enabled" || req.Thinking.BudgetTokens != 10240 {
+		t.Fatalf("unexpected thinking: %+v", req.Thinking)
+	}
+
+	// Ohne thinking-Feld muss das Feld nil bleiben (kein Zero-Struct).
+	var reqNoThinking AnthropicRequest
+	if err := json.Unmarshal([]byte(`{"model":"m","max_tokens":1,"messages":[]}`), &reqNoThinking); err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+	if reqNoThinking.Thinking != nil {
+		t.Fatalf("expected nil thinking, got %+v", reqNoThinking.Thinking)
+	}
+}
+
+func TestBudgetToEffort(t *testing.T) {
+	cases := []struct {
+		budget int
+		want   string
+	}{
+		{0, "low"},     // Client ohne Budget
+		{1024, "low"},  // pi minimal
+		{4096, "low"},  // pi low
+		{8191, "low"},
+		{10240, "medium"}, // pi medium
+		{16383, "medium"},
+		{20480, "high"}, // pi high
+		{65536, "high"}, // pi xhigh/max
+	}
+	for _, c := range cases {
+		if got := budgetToEffort(c.budget); got != c.want {
+			t.Errorf("budgetToEffort(%d) = %q, want %q", c.budget, got, c.want)
+		}
+	}
+}
+
+func TestStreamAnthropicResponse_Thinking(t *testing.T) {
+	// delta.reasoning_content muss als thinking-Block vor dem text-Block
+	// ausgeliefert werden (Anthropic erwartet thinking zuerst).
+	srv, _ := newTestServer(t)
+
+	chunk := func(delta map[string]interface{}, finishReason string) string {
+		choice := map[string]interface{}{"delta": delta}
+		if finishReason != "" {
+			choice["finish_reason"] = finishReason
+		}
+		payload := map[string]interface{}{"choices": []interface{}{choice}}
+		b, _ := json.Marshal(payload)
+		return "data: " + string(b) + "\n\n"
+	}
+
+	sse := chunk(map[string]interface{}{"reasoning_content": "Ich denke "}, "")
+	sse += chunk(map[string]interface{}{"reasoning_content": "nach."}, "")
+	sse += chunk(map[string]interface{}{"content": "Hallo!"}, "")
+	sse += chunk(map[string]interface{}{}, "stop")
+	sse += "data: [DONE]\n\n"
+
+	stream := io.NopCloser(strings.NewReader(sse))
+	rr := httptest.NewRecorder()
+
+	_, _, err := srv.streamAnthropicResponse(rr, stream, "mam-cl46-s")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`"type":"thinking"`,
+		`"type":"thinking_delta"`,
+		`"thinking":"Ich denke "`,
+		`"thinking":"nach."`,
+		`"type":"text_delta"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
+		}
+	}
+	// thinking-Block (index 0) muss vor dem text-Block (index 1) geöffnet werden.
+	// (json.Marshal sortiert Map-Keys alphabetisch — deshalb Position der
+	// Block-Start-Merkmale statt fester Key-Reihenfolge prüfen.)
+	thinkingPos := strings.Index(body, `"thinking":""`)
+	textPos := strings.Index(body, `"text":""`)
+	if thinkingPos < 0 || textPos < 0 || thinkingPos > textPos {
+		t.Fatalf("expected thinking block before text block, got:\n%s", body)
+	}
+	// Beide Blöcke müssen geschlossen werden.
+	if n := strings.Count(body, "event: content_block_stop"); n != 2 {
+		t.Fatalf("expected 2 content_block_stop events, got %d in:\n%s", n, body)
+	}
+}
+
+func TestHandleMessages_ThinkingForwardedAsReasoningEffort(t *testing.T) {
+	// Integration: thinking im /v1/messages-Request muss als
+	// reasoning_effort beim OpenAI-kompatiblen Upstream ankommen.
+	var gotBody map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Errorf("invalid upstream request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`)
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestServer(t)
+	srv.models["claude-h"] = ModelInfo{ID: "claude-h", Endpoint: upstream.URL}
+
+	body := `{"model":"claude-h","max_tokens":100,"stream":true,
+		"thinking":{"type":"enabled","budget_tokens":20480},
+		"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	srv.handleMessages(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if gotBody == nil {
+		t.Fatal("upstream received no request")
+	}
+	if gotBody["reasoning_effort"] != "high" {
+		t.Fatalf("expected reasoning_effort=high at upstream, got %v (body: %v)", gotBody["reasoning_effort"], gotBody)
+	}
+	if _, ok := gotBody["thinking"]; ok {
+		t.Fatalf("did not expect thinking object at OpenAI-compatible upstream, got: %v", gotBody)
+	}
+}

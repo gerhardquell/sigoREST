@@ -49,18 +49,27 @@ type AnthropicMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
+// AnthropicThinking ist der thinking-Parameter des Requests
+// ({"type":"enabled","budget_tokens":N}). type=="enabled" aktiviert
+// Extended Thinking; budget_tokens ist Anthropics Budget in Tokens.
+type AnthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
 // AnthropicRequest ist der Body von POST /v1/messages.
 type AnthropicRequest struct {
-	Model         string             `json:"model"`
-	MaxTokens     int                `json:"max_tokens"`
-	Messages      []AnthropicMessage `json:"messages"`
-	System        json.RawMessage    `json:"system,omitempty"`
-	Tools         []AnthropicTool    `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage    `json:"tool_choice,omitempty"`
-	Temperature   *float64           `json:"temperature,omitempty"`
-	TopP          *float64           `json:"top_p,omitempty"`
-	StopSequences []string           `json:"stop_sequences,omitempty"`
-	Stream        bool               `json:"stream,omitempty"`
+	Model         string              `json:"model"`
+	MaxTokens     int                 `json:"max_tokens"`
+	Messages      []AnthropicMessage  `json:"messages"`
+	System        json.RawMessage     `json:"system,omitempty"`
+	Tools         []AnthropicTool     `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage     `json:"tool_choice,omitempty"`
+	Temperature   *float64            `json:"temperature,omitempty"`
+	TopP          *float64            `json:"top_p,omitempty"`
+	StopSequences []string            `json:"stop_sequences,omitempty"`
+	Stream        bool                `json:"stream,omitempty"`
+	Thinking      *AnthropicThinking  `json:"thinking,omitempty"`
 }
 
 // anthropicRequestToInternal übersetzt einen Anthropic-Messages-Request in
@@ -220,6 +229,21 @@ func anthropicToolChoiceToInternal(raw json.RawMessage) (interface{}, error) {
 		}, nil
 	default:
 		return "auto", nil
+	}
+}
+
+// ########################################
+// budgetToEffort mappt Anthropics budget_tokens auf OpenAI-Reasoning-Efforts.
+// pi-Defaults: minimal=1024, low=4096 (-> "low"), medium=10240 (-> "medium"),
+// high=20480 und höher (-> "high").
+func budgetToEffort(budgetTokens int) string {
+	switch {
+	case budgetTokens < 8192:
+		return "low"
+	case budgetTokens < 16384:
+		return "medium"
+	default:
+		return "high"
 	}
 }
 
@@ -496,6 +520,30 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Thinking weiterreichen (pi & andere Anthropic-Clients senden
+	// {"type":"enabled","budget_tokens":N}):
+	//   - Anthropic-typisierter Kanal: thinking-Objekt 1:1 (budget_tokens nur
+	//     wenn > 0, sonst Provider-Default).
+	//   - ZAI (GLM-4.5+): thinking-Objekt ohne budget_tokens (ZAI kennt kein Budget).
+	//   - Alle anderen OpenAI-kompatiblen Provider: budget_tokens → reasoning_effort.
+	// Hinweis: Die Thinking-Anzeige zurück an den Client funktioniert nur im
+	// Streaming-Pfad (streamAnthropicResponse übersetzt delta.reasoning_content
+	// in thinking-Blöcke); CallAPI liefert reasoning_content nicht zurück.
+	if req.Thinking != nil && req.Thinking.Type == "enabled" {
+		switch {
+		case firstCfg.Type == "anthropic":
+			thinking := map[string]interface{}{"type": "enabled"}
+			if req.Thinking.BudgetTokens > 0 {
+				thinking["budget_tokens"] = req.Thinking.BudgetTokens
+			}
+			apiRequest["thinking"] = thinking
+		case strings.EqualFold(provider, "zai"):
+			apiRequest["thinking"] = map[string]interface{}{"type": "enabled"}
+		default:
+			apiRequest["reasoning_effort"] = budgetToEffort(req.Thinking.BudgetTokens)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
 
@@ -698,6 +746,7 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 
 	var responseText strings.Builder
 	nextBlockIndex := 0
+	thinkingBlockIndex := -1
 	textBlockIndex := -1
 	toolBlockIndexByOpenAIIndex := map[int]int{}
 	var openBlockIndices []int
@@ -746,6 +795,33 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 		delta, ok := choice["delta"].(map[string]interface{})
 		if !ok {
 			continue
+		}
+
+		// Reasoning-Content (OpenAI-Stil, delta.reasoning_content; manche
+		// Provider nutzen delta.reasoning) in einen thinking-Block übersetzen.
+		// Der Block wird lazy beim ersten Fragment geöffnet und landet dank
+		// nextBlockIndex vor dem nachfolgenden text-Block (Anthropic erwartet
+		// thinking zuerst).
+		reasoning := ""
+		if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
+			reasoning = rc
+		} else if r, ok := delta["reasoning"].(string); ok && r != "" {
+			reasoning = r
+		}
+		if reasoning != "" {
+			if thinkingBlockIndex == -1 {
+				thinkingBlockIndex = nextBlockIndex
+				nextBlockIndex++
+				openBlockIndices = append(openBlockIndices, thinkingBlockIndex)
+				writeAnthropicSSEEvent(w, flusher, "content_block_start", map[string]interface{}{
+					"type": "content_block_start", "index": thinkingBlockIndex,
+					"content_block": map[string]interface{}{"type": "thinking", "thinking": "", "signature": ""},
+				})
+			}
+			writeAnthropicSSEEvent(w, flusher, "content_block_delta", map[string]interface{}{
+					"type": "content_block_delta", "index": thinkingBlockIndex,
+					"delta": map[string]interface{}{"type": "thinking_delta", "thinking": reasoning},
+			})
 		}
 
 		if text, ok := delta["content"].(string); ok && text != "" {
