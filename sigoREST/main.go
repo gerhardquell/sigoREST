@@ -1587,6 +1587,7 @@ func (s *Server) handleAPIModels(w http.ResponseWriter, r *http.Request) {
 			MaxOutputTokens:          info.MaxOutputTokens,
 			InputCost:                info.InputCost,
 			OutputCost:               info.OutputCost,
+			CachedInputCost:          info.CachedInputCost,
 			MinTemperature:           info.MinTemperature,
 			MaxTemperature:           info.MaxTemperature,
 			RequiresCompletionTokens: info.RequiresCompletionTokens,

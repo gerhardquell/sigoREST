@@ -593,6 +593,40 @@ func TestHandleUsage(t *testing.T) {
 	}
 }
 
+// TestHandleAPIModels_IncludesCachedInputCost: Regression — handleAPIModels
+// baut ModelInfo per Hand aus dem internen s.models-Eintrag zusammen statt
+// die Werte komplett zu übernehmen und vergaß dabei CachedInputCost (beim
+// Live-Check nach einem Server-Neustart am 04.10. aufgefallen: /api/models
+// zeigte für cheaperinference-Modelle mit bekanntem Cache-Rabatt keinen
+// cached_input_cost, obwohl der Fetcher ihn korrekt gesetzt hatte).
+func TestHandleAPIModels_IncludesCachedInputCost(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.models = map[string]ModelInfo{
+		"ci-claude-fable-5.1": {
+			ID: "ci-claude-fable-5.1", Endpoint: "https://api.cheaperinference.com/v1/chat/completions",
+			InputCost: 6.546437, OutputCost: 32.732185, CachedInputCost: 0.163660927500000000,
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	rr := httptest.NewRecorder()
+	srv.handleAPIModels(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var models []ModelInfo
+	if err := json.Unmarshal(rr.Body.Bytes(), &models); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	if models[0].CachedInputCost != 0.163660927500000000 {
+		t.Fatalf("erwartet cached_input_cost=0.1636..., bekommen %v (Feld fehlt beim manuellen ModelInfo-Aufbau in handleAPIModels)", models[0].CachedInputCost)
+	}
+}
+
 func TestRecordUsage(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ch := &sigoengine.Channel{Provider: "mammouth", Name: "default"}
