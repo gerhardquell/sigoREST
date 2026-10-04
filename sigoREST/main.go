@@ -43,10 +43,27 @@ import (
 	"sigorest/sigoengine"
 )
 
+// streamWriteDeadlineExtension ist das Zeitfenster, um das ein offener SSE-
+// Stream sein Write-Deadline nach jedem Flush verlängert (streamProviderResponse,
+// streamAnthropicResponse in anthropic.go). Gleicher Wert wie das WriteTimeout
+// der http(s).Server-Konfiguration weiter unten — WriteTimeout bleibt die
+// Grenze für normale (nicht-streamende) Antworten; ein Stream erneuert sein
+// eigenes Deadline pro Chunk und ist damit nur noch durch echte Stille
+// (kein Chunk innerhalb dieses Fensters) limitiert, nicht durch die
+// Gesamtlaufzeit (TODO-20261003-kosten.md Punkt 3: brach bisher nach exakt
+// 300s mit "unexpected EOF" ab, obwohl der Provider weiter lieferte).
+const streamWriteDeadlineExtension = 5 * time.Minute
+
 // streamProviderResponse leitet einen OpenAI-kompatiblen SSE-Stream vom Provider
-// an den Client durch und sammelt den Assistant-Text für Sessions.
-// Gibt den akkumulierten Text oder einen Fehler zurück.
-func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string) (string, error) {
+// an den Client durch und sammelt den Assistant-Text für Sessions. Schiebt,
+// wenn der Provider eine usage lieferte, vor dem [DONE]-Terminator einen
+// zusätzlichen Chunk mit vollem chatUsage (inkl. cost_usd aus
+// inputCostPerM/outputCostPerM) ein — der Provider selbst kennt die
+// sigoREST-Preisliste nicht und kann cost_usd nie liefern.
+// Gibt den akkumulierten Text, die Provider-usage aus dem letzten Chunk vor
+// [DONE] (nil, wenn keine Provider-usage im Stream auftauchte) und einen
+// Fehler zurück.
+func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string, inputCostPerM, outputCostPerM float64) (string, *sigoengine.UsageData, error) {
 	defer stream.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -57,14 +74,18 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return "", fmt.Errorf("response writer does not support flushing")
+		return "", nil, fmt.Errorf("response writer does not support flushing")
+	}
+	rc := http.NewResponseController(w)
+	extendWriteDeadline := func() {
+		// Nicht jeder ResponseWriter (z.B. httptest.ResponseRecorder ohne
+		// eigene SetWriteDeadline-Methode) unterstützt das — Fehler bewusst
+		// ignorieren, kein Grund den Stream abzubrechen.
+		_ = rc.SetWriteDeadline(time.Now().Add(streamWriteDeadlineExtension))
 	}
 
 	var responseText strings.Builder
-	// sawDone: Upstream hat seinen eigenen [DONE]-Terminator geschickt (wird
-	// wie jede Zeile durchgereicht). Dann keinen zweiten anhängen — Clients
-	// sahen sonst "data: [DONE]" doppelt.
-	sawDone := false
+	var usage *sigoengine.UsageData
 	scanner := bufio.NewScanner(stream)
 	// Große Chunks unterstützen (z.B. lange JSON-Zeilen)
 	const maxScanTokenSize = 1024 * 1024
@@ -73,18 +94,25 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// "data: [DONE]" nie live durchreichen, sondern nur vermerken: der
+		// Terminator wird unten IMMER selbst geschrieben (genau einmal),
+		// damit der cost_usd-Chunk (siehe unten) noch davor passt — ein
+		// roh durchgereichtes Upstream-[DONE] wäre sonst schon beim Client,
+		// bevor wir ueberhaupt wissen, ob es eine usage zum Bepreisen gibt.
+		if line == "data: [DONE]" {
+			continue
+		}
+
 		if _, err := fmt.Fprintln(w, line); err != nil {
-			return responseText.String(), err
+			return responseText.String(), usage, err
 		}
 		flusher.Flush()
+		extendWriteDeadline()
 
 		// Text aus data:-Zeilen akkumulieren
 		if strings.HasPrefix(line, "data: ") {
 			dataStr := strings.TrimPrefix(line, "data: ")
-			if dataStr == "[DONE]" {
-				sawDone = true
-				continue
-			}
 			if dataStr == "" {
 				continue
 			}
@@ -101,6 +129,12 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 					}
 				}
 			}
+			// Provider schickt die vollstandige usage typischerweise erst im
+			// letzten Chunk vor [DONE] (choices meist leer) - spaeter
+			// gesehene usage ueberschreibt eine fruehere bewusst.
+			if u := sigoengine.ExtractUsage(chunk, "openai"); u != nil {
+				usage = u
+			}
 		}
 	}
 
@@ -109,22 +143,37 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 		// mindestens einen Chunk erhalten. Bestmöglich sauber schließen
 		// (dasselbe "data: [DONE]"-Terminator-Pattern wie im Erfolgsfall),
 		// statt die Verbindung ohne Abschluss-Marker offen hängen zu lassen.
-		if !sawDone {
-			fmt.Fprintln(w, "data: [DONE]")
-			fmt.Fprintln(w)
-			flusher.Flush()
-		}
-		return responseText.String(), err
-	}
-
-	// Sicherstellen, dass [DONE] genau einmal gesendet wird
-	if !sawDone {
+		// Kein cost_usd-Chunk hier — der Stream endete nicht regulär, die
+		// bis dahin gesehene usage ist nicht verlässlich vollständig.
 		fmt.Fprintln(w, "data: [DONE]")
 		fmt.Fprintln(w)
 		flusher.Flush()
+		return responseText.String(), usage, err
 	}
 
-	return responseText.String(), nil
+	// Eigener Chunk mit cost_usd vor [DONE] (TODO-20261003-kosten.md Punkt 2):
+	// nur bei sauber beendetem Stream und nur wenn der Provider ueberhaupt
+	// usage lieferte - ohne Tokenzahlen gibt es nichts zu bepreisen. Der
+	// Provider selbst kennt die sigoREST-Preisliste nicht und kann cost_usd
+	// nie liefern.
+	if usage != nil {
+		if data, err := json.Marshal(map[string]interface{}{
+			"choices": []interface{}{},
+			"usage":   buildChatUsage(usage, inputCostPerM, outputCostPerM),
+		}); err == nil {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			extendWriteDeadline()
+		}
+	}
+
+	// [DONE]-Terminator: wird jetzt immer genau hier geschrieben (Upstream-
+	// [DONE] wurde oben nie durchgereicht) — damit genau einmal, nie doppelt.
+	fmt.Fprintln(w, "data: [DONE]")
+	fmt.Fprintln(w)
+	flusher.Flush()
+
+	return responseText.String(), usage, nil
 }
 
 // **********************************************************************
@@ -545,6 +594,28 @@ type PromptTokensDetails struct {
 
 type CompletionTokensDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+// buildChatUsage übersetzt sigoengine.UsageData in die Response-Form
+// (inkl. cost_usd aus den Modell-Preisen). Gemeinsam genutzt von der
+// Non-Streaming-Antwort (handleChatCompletions) und dem synthetischen
+// Usage-Chunk, den streamProviderResponse vor [DONE] einschiebt.
+func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM float64) *ChatUsage {
+	cu := &ChatUsage{
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.CachedTokens > 0 {
+		cu.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CachedTokens}
+	}
+	if u.ReasoningTokens > 0 {
+		cu.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: u.ReasoningTokens}
+	}
+	_, _, cu.CostUSD = sigoengine.CalcCostUSD(
+		int64(u.InputTokens), int64(u.OutputTokens), inputCostPerM, outputCostPerM,
+	)
+	return cu
 }
 
 type ChatResponse struct {
@@ -1076,11 +1147,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// WriteHeader(200) aufgerufen (erste Anweisung der Funktion) —
 				// egal ob sie am Ende erfolgreich zurückkehrt oder nicht.
 				streamStarted = true
-				text, e := s.streamProviderResponse(w, stream, req.Model)
+				text, u, e := s.streamProviderResponse(w, stream, req.Model, modelInfo.InputCost, modelInfo.OutputCost)
 				if e != nil {
 					return e
 				}
 				responseText = text
+				responseUsage = u
 				streamed = true
 				return nil
 			})
@@ -1217,21 +1289,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Usage akkumulieren
-	chatUsage := &ChatUsage{
-		PromptTokens:     responseUsage.InputTokens,
-		CompletionTokens: responseUsage.OutputTokens,
-		TotalTokens:      responseUsage.TotalTokens,
-	}
-	if responseUsage.CachedTokens > 0 {
-		chatUsage.PromptTokensDetails = &PromptTokensDetails{CachedTokens: responseUsage.CachedTokens}
-	}
-	if responseUsage.ReasoningTokens > 0 {
-		chatUsage.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: responseUsage.ReasoningTokens}
-	}
-	_, _, chatUsage.CostUSD = sigoengine.CalcCostUSD(
-		int64(responseUsage.InputTokens), int64(responseUsage.OutputTokens),
-		modelInfo.InputCost, modelInfo.OutputCost,
-	)
+	chatUsage := buildChatUsage(responseUsage, modelInfo.InputCost, modelInfo.OutputCost)
 	s.recordUsageWithSession(modelID, successfulCh, responseUsage, req.SessionID)
 
 	// Bei echtem Streaming wurde die Antwort bereits geschrieben.
@@ -2363,7 +2421,7 @@ func main() {
 		Addr:         fmt.Sprintf(":%d", *httpPort),
 		Handler:      httpHandler,
 		ReadTimeout:  120 * time.Second,
-		WriteTimeout: 5 * time.Minute, // AI-Calls können lang dauern
+		WriteTimeout: streamWriteDeadlineExtension, // AI-Calls können lang dauern; Streams erneuern das pro Chunk
 		IdleTimeout:  300 * time.Second,
 	}
 
@@ -2384,7 +2442,7 @@ func main() {
 			MinVersion:   tls.VersionTLS12,
 		},
 		ReadTimeout:  90 * time.Second,
-		WriteTimeout: 5 * time.Minute,
+		WriteTimeout: streamWriteDeadlineExtension,
 		IdleTimeout:  300 * time.Second,
 	}
 

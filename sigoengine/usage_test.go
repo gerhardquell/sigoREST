@@ -10,7 +10,7 @@ func TestExtractUsageOpenAI(t *testing.T) {
 			"total_tokens":      float64(15),
 		},
 	}
-	u := extractUsage(result, "openai")
+	u := ExtractUsage(result, "openai")
 	if u == nil {
 		t.Fatal("expected usage, got nil")
 	}
@@ -21,7 +21,7 @@ func TestExtractUsageOpenAI(t *testing.T) {
 
 func TestExtractUsageMissing(t *testing.T) {
 	result := map[string]interface{}{}
-	u := extractUsage(result, "openai")
+	u := ExtractUsage(result, "openai")
 	if u != nil {
 		t.Fatal("expected nil, got usage")
 	}
@@ -51,7 +51,7 @@ func TestExtractUsageOpenAIDetails(t *testing.T) {
 			},
 		},
 	}
-	u := extractUsage(result, "openai")
+	u := ExtractUsage(result, "openai")
 	if u == nil {
 		t.Fatal("expected usage, got nil")
 	}
@@ -71,7 +71,7 @@ func TestExtractUsageAnthropicCacheRead(t *testing.T) {
 			"cache_read_input_tokens": float64(4000),
 		},
 	}
-	u := extractUsage(result, "anthropic")
+	u := ExtractUsage(result, "anthropic")
 	if u == nil {
 		t.Fatal("expected usage, got nil")
 	}
@@ -86,7 +86,7 @@ func TestExtractUsageNoDetails(t *testing.T) {
 			"prompt_tokens": float64(10), "completion_tokens": float64(5),
 		},
 	}
-	u := extractUsage(result, "openai")
+	u := ExtractUsage(result, "openai")
 	if u.CachedTokens != 0 || u.ReasoningTokens != 0 {
 		t.Fatalf("expected zero details, got %+v", u)
 	}

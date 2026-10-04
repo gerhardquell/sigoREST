@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"sigorest/sigoengine"
 )
@@ -185,6 +186,192 @@ func TestHandleChatCompletions_MidStreamFailureDoesNotDoubleWriteOrGlueJSON(t *t
 	}
 	if strings.Contains(respBody, `"error"`) {
 		t.Fatalf("expected no JSON error glued onto the open SSE stream, got body:\n%s", respBody)
+	}
+}
+
+// TestHandleChatCompletions_MidStreamFailureRecordsNoCost: TODO-20261003-kosten.md
+// Punkt 4 — dokumentiert ein bisher nirgends festgehaltenes Verhalten: bricht
+// die Verbindung zum Provider mitten im Stream ab (hier: NACH dem Chunk mit
+// der vollen usage), bucht sigoREST GAR NICHTS. Der Fehlerpfad in
+// handleChatCompletions ("if lastErr != nil && streamStarted") kehrt zurück,
+// bevor recordUsageWithSession je erreicht wird — jede im Stream bereits
+// gesehene usage wird verworfen. Konservativ (Client bekommt für eine
+// kaputte Antwort sicher keine Rechnung gestellt), aber eben: der Provider
+// hat die bis dahin generierten Tokens unter Umständen trotzdem schon
+// abgerechnet — sigoREST unterzählt in diesem Fall, zählt nie zu viel.
+func TestHandleChatCompletions_MidStreamFailureRecordsNoCost(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter unterstützt kein Flush")
+		}
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"Hallo"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		flusher.Flush()
+
+		// Verbindung abrupt kappen, NACHDEM der Client die usage schon
+		// gesehen hat — genau das Szenario, das der TODO offen ließ.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("upstream ResponseWriter unterstützt kein Hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		conn.Close()
+	}))
+	defer upstream.Close()
+
+	srv, dir := newTestServer(t)
+	costDB, err := sigoengine.OpenCostDB(dir)
+	if err != nil {
+		t.Fatalf("OpenCostDB: %v", err)
+	}
+	defer costDB.Close()
+	srv.costDB = costDB
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0, InputCost: 1_000_000, OutputCost: 1_000_000},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	summary, err := costDB.Summary(time.Time{}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if summary.Requests != 0 {
+		t.Fatalf("erwartet 0 gebuchte Requests nach Mid-Stream-Abbruch (usage wird verworfen, nicht gebucht), bekommen %d: %+v", summary.Requests, summary)
+	}
+}
+
+// TestHandleChatCompletions_FailedRetryDoesNotRecordCost: TODO-20261003-kosten.md
+// Punkt 4 — dokumentiert die zweite offene Frage: vervielfacht req.Retries
+// die gebuchten Kosten? Nein. RetryWithBackoff ruft bei einem retrybaren
+// Fehler (hier: HTTP 500) erneut CallAPI auf; responseText/responseUsage
+// werden aber nur im ERFOLGREICHEN Versuch gesetzt (main.go, der fehlgeschlagene
+// Versuch gibt vorher zurück), und recordUsageWithSession läuft genau einmal
+// nach dem gesamten Kanal-/Retry-Loop. Zwei Upstream-POSTs (1 Fehlschlag +
+// 1 Erfolg) → genau ein gebuchtes Kosten-Event mit der usage des Erfolgs.
+func TestHandleChatCompletions_FailedRetryDoesNotRecordCost(t *testing.T) {
+	postCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		postCalls++
+		if postCalls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":{"message":"boom"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Hallo"},"finish_reason":"stop"}],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}))
+	defer upstream.Close()
+
+	srv, dir := newTestServer(t)
+	costDB, err := sigoengine.OpenCostDB(dir)
+	if err != nil {
+		t.Fatalf("OpenCostDB: %v", err)
+	}
+	defer costDB.Close()
+	srv.costDB = costDB
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0, InputCost: 1_000_000, OutputCost: 1_000_000},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"retries":1,"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("erwartet 200 nach Retry, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+	if postCalls != 2 {
+		t.Fatalf("erwartet genau 2 Upstream-POSTs (1 Fehlschlag + 1 Retry-Erfolg), bekommen %d", postCalls)
+	}
+
+	summary, err := costDB.Summary(time.Time{}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if summary.Requests != 1 {
+		t.Fatalf("erwartet genau 1 gebuchtes Request-Event trotz 2 Upstream-Calls (Retry darf Kosten nicht vervielfachen), bekommen %d", summary.Requests)
+	}
+	if summary.TotalCostUSD != 15 {
+		t.Fatalf("erwartet cost_usd=15 (10+5 Tokens @ $1M), bekommen %v", summary.TotalCostUSD)
+	}
+}
+
+// TestHandleChatCompletions_StreamingRespectsHardStopBudget: TODO-20261003-kosten.md
+// Punkt 5 — der Hard Stop prüft Budget gegen costs.db. Vor Punkt 1/2 buchten
+// Streaming-Aufrufe dort fast nichts (EstimateUsage statt echter usage aus
+// dem Stream-Chunk), der Hard Stop griff deshalb bei Streaming-Last
+// effektiv nicht. Mit echter usage (Punkt 1) muss ein Streaming-Call, der
+// das Tageslimit überschreitet, den nächsten Call mit HTTP 402 blocken.
+func TestHandleChatCompletions_StreamingRespectsHardStopBudget(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"content":"Hallo"}}]}`)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	srv, dir := newTestServer(t)
+	costDB, err := sigoengine.OpenCostDB(dir)
+	if err != nil {
+		t.Fatalf("OpenCostDB: %v", err)
+	}
+	defer costDB.Close()
+	srv.costDB = costDB
+	// Limit bewusst zwischen der (falschen) Text-Längen-Schätzung und der
+	// echten Provider-usage platziert: EstimateUsage("hi", "Hallo") kommt
+	// auf 1+1=2 Tokens (≈2 USD bei $1M/Token), die echte usage im letzten
+	// Stream-Chunk auf 10+5=15 Tokens (≈15 USD). Ein Limit von 5 USD trennt
+	// beide Fälle scharf: blockiert der zweite Call, bucht sigoREST die
+	// echte usage; bliebe er bei 200, wäre still wieder die Schätzung aktiv.
+	if err := costDB.SetBudgetConfig(sigoengine.BudgetConfig{DailyLimitUSD: 5, MonthlyLimitUSD: 1000, HardStopEnabled: true}); err != nil {
+		t.Fatalf("SetBudgetConfig: %v", err)
+	}
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0, InputCost: 1_000_000, OutputCost: 1_000_000},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+
+	rr1 := httptest.NewRecorder()
+	srv.handleChatCompletions(rr1, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("erster Call: erwartet 200, bekommen %d: %s", rr1.Code, rr1.Body.String())
+	}
+
+	rr2 := httptest.NewRecorder()
+	srv.handleChatCompletions(rr2, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rr2.Code != http.StatusPaymentRequired {
+		t.Fatalf("zweiter Call: erwartet 402 (Budget überschritten), bekommen %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if !strings.Contains(rr2.Body.String(), "budget_exceeded") {
+		t.Fatalf("erwartet budget_exceeded im Fehler, bekommen: %s", rr2.Body.String())
 	}
 }
 
@@ -818,7 +1005,7 @@ func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := newTestServer(t)
 			rr := httptest.NewRecorder()
-			text, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m")
+			text, _, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -829,6 +1016,142 @@ func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
 				t.Fatalf("erwartet genau 1x [DONE], bekommen %d:\n%s", n, rr.Body.String())
 			}
 		})
+	}
+}
+
+// TestStreamProviderResponse_ReadsUsageFromFinalChunk: TODO-20261003-kosten.md
+// Punkt 1 — der letzte Chunk vor [DONE] trägt beim echten Provider die
+// vollständige "usage" (inkl. reasoning_tokens/cached_tokens). Bisher wurde
+// nur delta.content gesammelt, usage ignoriert; main.go schätzte danach per
+// EstimateUsage aus dem sichtbaren Text, was Denk-Tokens komplett verfehlt.
+func TestStreamProviderResponse_ReadsUsageFromFinalChunk(t *testing.T) {
+	upstream := "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15," +
+		"\"completion_tokens_details\":{\"reasoning_tokens\":3},\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n" +
+		"data: [DONE]\n\n"
+
+	srv, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	text, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "Hi" {
+		t.Errorf("Text = %q", text)
+	}
+	if usage == nil {
+		t.Fatal("erwartet usage aus dem letzten Chunk, bekommen nil")
+	}
+	if usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.TotalTokens != 15 {
+		t.Fatalf("unerwartete Basis-Tokens: %+v", usage)
+	}
+	if usage.ReasoningTokens != 3 || usage.CachedTokens != 2 {
+		t.Fatalf("unerwartete Details: %+v", usage)
+	}
+}
+
+// TestStreamProviderResponse_InjectsCostUSDChunkBeforeDone: TODO-20261003-kosten.md
+// Punkt 2 — Nicht-Streaming-Antworten tragen usage.cost_usd, Stream-Chunks
+// bisher nicht (der Upstream-Provider kennt die sigoREST-Preisliste nicht
+// und kann cost_usd deshalb selbst nie liefern). Gerhards Entscheidung:
+// sigoREST schiebt einen eigenen, zusätzlichen Chunk mit vollem chatUsage
+// (inkl. cost_usd) ein, bevor [DONE] gesendet wird.
+func TestStreamProviderResponse_InjectsCostUSDChunkBeforeDone(t *testing.T) {
+	upstream := "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n" +
+		"data: [DONE]\n\n"
+
+	srv, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	// Preise bewusst glatt gewählt (1$/1M, 2$/1M statt realistischer
+	// Centbeträge), damit der erwartete cost_usd exakt 10*1 + 5*2 = 20 ist
+	// und der Test nicht an Float-Rundung hängt.
+	_, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 1_000_000, 2_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage == nil {
+		t.Fatal("erwartet usage, bekommen nil")
+	}
+
+	body := rr.Body.String()
+	doneIdx := strings.LastIndex(body, "data: [DONE]")
+	if doneIdx < 0 {
+		t.Fatalf("erwartet [DONE]-Terminator, bekommen:\n%s", body)
+	}
+	costIdx := strings.Index(body, `"cost_usd"`)
+	if costIdx < 0 {
+		t.Fatalf("erwartet einen SSE-Chunk mit cost_usd vor [DONE], bekommen:\n%s", body)
+	}
+	if costIdx > doneIdx {
+		t.Fatalf("cost_usd-Chunk muss vor [DONE] stehen, body:\n%s", body)
+	}
+
+	var found bool
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") || !strings.Contains(line, "cost_usd") {
+			continue
+		}
+		var payload struct {
+			Usage struct {
+				CostUSD float64 `json:"cost_usd"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &payload); err != nil {
+			t.Fatalf("ungültiges JSON im cost_usd-Chunk: %v\nZeile: %s", err, line)
+		}
+		if payload.Usage.CostUSD != 20 {
+			t.Fatalf("erwartet cost_usd=20, bekommen %v", payload.Usage.CostUSD)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("keinen cost_usd-Chunk gefunden")
+	}
+}
+
+// deadlineRecorder zeichnet SetWriteDeadline-Aufrufe auf. httptest.ResponseRecorder
+// kennt kein Deadline-Konzept; dieser Fake implementiert die von
+// http.ResponseController geforderte Methode direkt, damit sich beobachten
+// lässt, ob und wie oft eine Stream-Funktion das Write-Deadline erneuert.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	d.deadlines = append(d.deadlines, deadline)
+	return nil
+}
+
+// TestStreamProviderResponse_ExtendsWriteDeadlinePerChunk: TODO-20261003-kosten.md
+// Punkt 3 — der Server setzt ein festes WriteTimeout von 5 Minuten
+// (main.go), das ab Header-Write für die GESAMTE Antwort gilt, nicht pro
+// Chunk. Ein legitimer Stream, der länger als 5 Minuten regelmäßig Daten
+// liefert, bricht dadurch mit "unexpected EOF" ab. streamProviderResponse
+// muss das Write-Deadline nach jedem Flush erneuern (http.ResponseController),
+// damit nur echte Stille den Stream killt, nicht die reine Gesamtlaufzeit.
+func TestStreamProviderResponse_ExtendsWriteDeadlinePerChunk(t *testing.T) {
+	upstream := "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"C\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	srv, _ := newTestServer(t)
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	_, _, err := srv.streamProviderResponse(rec, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.deadlines) < 4 {
+		t.Fatalf("erwartet mind. 4 SetWriteDeadline-Aufrufe (initial + 3 Chunks), bekommen %d", len(rec.deadlines))
+	}
+	for i := 1; i < len(rec.deadlines); i++ {
+		if rec.deadlines[i].Before(rec.deadlines[i-1]) {
+			t.Fatalf("Deadline #%d (%v) liegt vor Deadline #%d (%v) — Deadline muss monoton erneuert werden",
+				i, rec.deadlines[i], i-1, rec.deadlines[i-1])
+		}
 	}
 }
 

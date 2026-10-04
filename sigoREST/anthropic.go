@@ -712,6 +712,12 @@ func writeAnthropicSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventTy
 		return err
 	}
 	flusher.Flush()
+	// Write-Deadline pro Event erneuern (TODO-20261003-kosten.md Punkt 3):
+	// ohne das deckt das globale WriteTimeout die GESAMTE Stream-Antwort ab
+	// einem festen Startpunkt, nicht pro Chunk, und ein langer aber
+	// regelmäßig liefernder Stream bricht nach exakt 300s ab. Fehler
+	// bewusst ignoriert — nicht jeder ResponseWriter (Tests) unterstützt es.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(streamWriteDeadlineExtension))
 	return nil
 }
 

@@ -464,6 +464,39 @@ func TestStreamAnthropicResponse_UsageCapturedAndIncludesInputTokens(t *testing.
 	}
 }
 
+// TestStreamAnthropicResponse_ExtendsWriteDeadlinePerChunk: TODO-20261003-kosten.md
+// Punkt 3 — derselbe 5-Minuten-WriteTimeout-Bug wie bei streamProviderResponse
+// (main.go) betrifft auch die Anthropic-Bridge: jedes writeAnthropicSSEEvent
+// muss das Write-Deadline erneuern, sonst bricht ein langer Claude-Code-Stream
+// nach exakt 300s ab, egal wie regelmäßig Chunks kommen.
+func TestStreamAnthropicResponse_ExtendsWriteDeadlinePerChunk(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	chunk := func(content string) string {
+		payload := map[string]interface{}{"choices": []interface{}{
+			map[string]interface{}{"delta": map[string]interface{}{"content": content}},
+		}}
+		b, _ := json.Marshal(payload)
+		return "data: " + string(b) + "\n\n"
+	}
+	sse := chunk("A") + chunk("B") + chunk("C") + "data: [DONE]\n\n"
+
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	_, _, err := srv.streamAnthropicResponse(rec, io.NopCloser(strings.NewReader(sse)), "ci-claude-opus-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// message_start + 3x content_block_* (start einmalig + delta pro Chunk) + content_block_stop + message_delta + message_stop
+	if len(rec.deadlines) < 4 {
+		t.Fatalf("erwartet mind. 4 SetWriteDeadline-Aufrufe (ein SSE-Event pro Flush), bekommen %d", len(rec.deadlines))
+	}
+	for i := 1; i < len(rec.deadlines); i++ {
+		if rec.deadlines[i].Before(rec.deadlines[i-1]) {
+			t.Fatalf("Deadline #%d liegt vor Deadline #%d — muss monoton erneuert werden", i, i-1)
+		}
+	}
+}
+
 func TestStreamAnthropicResponse_ToolCall(t *testing.T) {
 	srv, _ := newTestServer(t)
 

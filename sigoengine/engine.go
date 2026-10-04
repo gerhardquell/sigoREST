@@ -1273,7 +1273,7 @@ func CallAPI(ctx context.Context, cfg *ProviderConfig, request map[string]interf
 		return "", nil, "", nil, NewError(ErrAPIFailed, errText, nil, logF)
 	}
 
-	usage := extractUsage(result, cfg.Type)
+	usage := ExtractUsage(result, cfg.Type)
 	toolCalls := extractToolCalls(result, cfg.Type)
 
 	finishReason := ""
@@ -1383,8 +1383,8 @@ func CallAPIStream(ctx context.Context, cfg *ProviderConfig, request map[string]
 	return resp.Body, nil
 }
 
-// extractUsage liest Token-Verbrauch aus Provider-Response
-func extractUsage(result map[string]interface{}, providerType string) *UsageData {
+// ExtractUsage liest Token-Verbrauch aus Provider-Response
+func ExtractUsage(result map[string]interface{}, providerType string) *UsageData {
 	u, ok := result["usage"].(map[string]interface{})
 	if !ok {
 		return nil
