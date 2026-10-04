@@ -63,7 +63,7 @@ const streamWriteDeadlineExtension = 5 * time.Minute
 // Gibt den akkumulierten Text, die Provider-usage aus dem letzten Chunk vor
 // [DONE] (nil, wenn keine Provider-usage im Stream auftauchte) und einen
 // Fehler zurück.
-func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string, inputCostPerM, outputCostPerM, cachedInputCostPerM float64) (string, *sigoengine.UsageData, error) {
+func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string, inputCostPerM, outputCostPerM, cachedInputCostPerM float64, priceKnown bool) (string, *sigoengine.UsageData, error) {
 	defer stream.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -159,7 +159,7 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 	if usage != nil {
 		if data, err := json.Marshal(map[string]interface{}{
 			"choices": []interface{}{},
-			"usage":   buildChatUsage(usage, inputCostPerM, outputCostPerM, cachedInputCostPerM),
+			"usage":   buildChatUsage(usage, inputCostPerM, outputCostPerM, cachedInputCostPerM, priceKnown),
 		}); err == nil {
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
@@ -563,17 +563,18 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model        string        `json:"model"`
-	Messages     []ChatMessage `json:"messages"`
-	Temp         float64       `json:"temperature"`
-	MaxTokens    int           `json:"max_tokens"`
-	SessionID    string        `json:"session_id"`    // sigoREST-Erweiterung
-	Timeout      int           `json:"timeout"`       // sigoREST-Erweiterung
-	Retries      int           `json:"retries"`       // sigoREST-Erweiterung
-	SystemPrompt string        `json:"system_prompt"` // per-Request Override
-	Bare         bool          `json:"bare"`          // sigoREST-Erweiterung: kein Memory, kein Server-System-Prompt
-	Channel      string        `json:"channel"`       // optionaler Kanal, z.B. "mammouth-0"
-	Stream       bool          `json:"stream"`        // OpenAI streaming flag (new)
+	Model          string          `json:"model"`
+	Messages       []ChatMessage   `json:"messages"`
+	Temp           float64         `json:"temperature"`
+	MaxTokens      int             `json:"max_tokens"`
+	SessionID      string          `json:"session_id"`                // sigoREST-Erweiterung
+	Timeout        int             `json:"timeout"`                   // sigoREST-Erweiterung
+	Retries        int             `json:"retries"`                   // sigoREST-Erweiterung
+	SystemPrompt   string          `json:"system_prompt"`             // per-Request Override
+	Bare           bool            `json:"bare"`                      // sigoREST-Erweiterung: kein Memory, kein Server-System-Prompt
+	Channel        string          `json:"channel"`                   // optionaler Kanal, z.B. "mammouth-0"
+	Stream         bool            `json:"stream"`                    // OpenAI streaming flag (new)
+	ResponseFormat json.RawMessage `json:"response_format,omitempty"` // OpenAI-Feld ({"type":"text"|"json_object"|"json_schema",...}); 1:1 an den Provider durchgereicht
 }
 
 type ChatChoice struct {
@@ -588,7 +589,12 @@ type ChatUsage struct {
 	TotalTokens             int                      `json:"total_tokens"`
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
-	CostUSD                 float64                  `json:"cost_usd,omitempty"` // sigoREST-Erweiterung, ohne Cache-Rabatt (obere Schranke bei OpenAI-kompatiblen Providern)
+	// CostUSD ist nil (→ JSON null), wenn für das Modell kein Preis bekannt
+	// ist (Fetcher hat keine Preisdaten geliefert) — nicht 0, das würde wie
+	// "gratis" statt "unbekannt" aussehen (golisp2-Anlass, TODO.md 20261003).
+	// Bei bekanntem Preis: ohne Cache-Rabatt obere Schranke bei OpenAI-
+	// kompatiblen Providern ohne cheaperinference-Preisliste.
+	CostUSD *float64 `json:"cost_usd"`
 }
 
 type PromptTokensDetails struct {
@@ -603,7 +609,7 @@ type CompletionTokensDetails struct {
 // (inkl. cost_usd aus den Modell-Preisen). Gemeinsam genutzt von der
 // Non-Streaming-Antwort (handleChatCompletions) und dem synthetischen
 // Usage-Chunk, den streamProviderResponse vor [DONE] einschiebt.
-func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM, cachedInputCostPerM float64) *ChatUsage {
+func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM, cachedInputCostPerM float64, priceKnown bool) *ChatUsage {
 	cu := &ChatUsage{
 		PromptTokens:     u.InputTokens,
 		CompletionTokens: u.OutputTokens,
@@ -615,10 +621,13 @@ func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM, cach
 	if u.ReasoningTokens > 0 {
 		cu.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: u.ReasoningTokens}
 	}
-	_, _, cu.CostUSD = sigoengine.CalcCostUSD(
-		int64(u.InputTokens), int64(u.OutputTokens), int64(u.CachedTokens),
-		inputCostPerM, outputCostPerM, cachedInputCostPerM,
-	)
+	if priceKnown {
+		_, _, total := sigoengine.CalcCostUSD(
+			int64(u.InputTokens), int64(u.OutputTokens), int64(u.CachedTokens),
+			inputCostPerM, outputCostPerM, cachedInputCostPerM,
+		)
+		cu.CostUSD = &total
+	}
 	return cu
 }
 
@@ -1038,6 +1047,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// priceKnown: true nur wenn ein Preis tatsächlich bekannt ist (>0) oder
+	// das Modell bekannt kostenlos ist (Ollama, lokale Inferenz). Alle
+	// anderen 0/0-Modelle sind "Preis unbekannt" (Fetcher hat keine Preisdaten
+	// geliefert), nicht "gratis" — cost_usd wird dafür null statt 0 (TODO.md
+	// 20261003, golisp2-Anlass).
+	priceKnown := modelInfo.InputCost > 0 || modelInfo.OutputCost > 0 || provider == "ollama"
+
 	// API-Request aufbauen
 	apiRequest := map[string]interface{}{
 		"model":       cfg.Model,
@@ -1052,6 +1068,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if modelInfo.RequiresCompletionTokens {
 		delete(apiRequest, "max_tokens")
 		apiRequest["max_completion_tokens"] = req.MaxTokens
+	}
+	// response_format 1:1 durchreichen (golisp2 braucht JSON-Modus zuverlässig,
+	// sonst verpacken Modelle JSON gern in einen Markdown-Codeblock). Alle
+	// über diesen Endpoint erreichbaren Provider sind OpenAI-kompatibel
+	// (cfg.Type ist hier immer "mammoth"/"ollama", nie "anthropic" —
+	// LoadConfigWithChannel kennt kein natives Anthropic-Channel-Type) — eine
+	// Sonderbehandlung für einen Anthropic-Pfad entfällt deshalb.
+	if len(req.ResponseFormat) > 0 {
+		apiRequest["response_format"] = req.ResponseFormat
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(req.Timeout)*time.Second)
@@ -1151,7 +1176,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// WriteHeader(200) aufgerufen (erste Anweisung der Funktion) —
 				// egal ob sie am Ende erfolgreich zurückkehrt oder nicht.
 				streamStarted = true
-				text, u, e := s.streamProviderResponse(w, stream, req.Model, modelInfo.InputCost, modelInfo.OutputCost, modelInfo.CachedInputCost)
+				text, u, e := s.streamProviderResponse(w, stream, req.Model, modelInfo.InputCost, modelInfo.OutputCost, modelInfo.CachedInputCost, priceKnown)
 				if e != nil {
 					return e
 				}
@@ -1293,7 +1318,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Usage akkumulieren
-	chatUsage := buildChatUsage(responseUsage, modelInfo.InputCost, modelInfo.OutputCost, modelInfo.CachedInputCost)
+	chatUsage := buildChatUsage(responseUsage, modelInfo.InputCost, modelInfo.OutputCost, modelInfo.CachedInputCost, priceKnown)
 	s.recordUsageWithSession(modelID, successfulCh, responseUsage, req.SessionID)
 
 	// Bei echtem Streaming wurde die Antwort bereits geschrieben.
@@ -1457,8 +1482,8 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			sigoengine.LogWarn("Antwort von Ollama nicht lesbar", map[string]interface{}{
-				"model":  ollamaInfo.OllamaName,
-				"error":  err.Error(),
+				"model": ollamaInfo.OllamaName,
+				"error": err.Error(),
 			})
 			writeError(w, "Antwort des Providers nicht lesbar: "+err.Error(), "provider_error", http.StatusBadGateway)
 			return

@@ -72,8 +72,26 @@ func (s *Server) handleCosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// price_known pro Modell in summary.ByModel: true nur bei bekanntem Preis
+	// (>0) oder bekannt kostenlos (Ollama) — sonst ist der 0-Kostenwert im
+	// Summary nur "unbekannt", nicht "gratis" (TODO.md 20261003, golisp2-
+	// Anlass). Live aus s.models nachgeschlagen, nicht aus costs.db — Preise
+	// können sich seit dem historischen Event geändert haben, das ist hier
+	// bewusst in Kauf genommen (dieselbe Unschärfe wie bei usage.cost_usd im
+	// laufenden Chat-Call, der auch den aktuellen Preis nimmt).
+	priceKnown := make(map[string]bool, len(summary.ByModel))
+	s.mu.RLock()
+	for id := range summary.ByModel {
+		info, ok := s.models[id]
+		priceKnown[id] = ok && (info.InputCost > 0 || info.OutputCost > 0 || s.providerForModelLocked(id) == "ollama")
+	}
+	s.mu.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(summary)
+	json.NewEncoder(w).Encode(struct {
+		*sigoengine.CostSummary
+		PriceKnown map[string]bool `json:"price_known"`
+	}{summary, priceKnown})
 }
 
 // parseFlexibleTime akzeptiert RFC3339 oder "YYYY-MM-DD" (dann 00:00 lokal).

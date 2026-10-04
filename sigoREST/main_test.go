@@ -313,6 +313,38 @@ func TestHandleChatCompletions_FailedRetryDoesNotRecordCost(t *testing.T) {
 	}
 }
 
+// TestHandleChatCompletions_CostUSDNullWhenModelHasNoPrice: TODO.md (golisp2,
+// 20261003) — End-to-End-Gegenstück zu TestBuildChatUsage_CostUSDNullWhenPriceUnknown.
+// Ein Modell ohne Preisdaten (InputCost/OutputCost beide 0, nicht Ollama) muss
+// im echten Response-JSON "cost_usd":null liefern, nicht 0.
+func TestHandleChatCompletions_CostUSDNullWhenModelHasNoPrice(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Hallo"},"finish_reason":"stop"}],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestServer(t)
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("erwartet 200, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"cost_usd":null`) {
+		t.Fatalf("erwartet literales cost_usd:null bei fehlendem Preis, bekommen: %s", rr.Body.String())
+	}
+}
+
 // TestHandleChatCompletions_AppliesCachedTokenDiscount: TODO-20261003-kosten.md
 // Punkt 6 — cheaperinference liefert einen eigenen, deutlich günstigeren
 // Cache-Read-Preis (CachedInputCost). Input: 1.000.000 Tokens, davon 900.000
@@ -371,6 +403,49 @@ func TestHandleChatCompletions_AppliesCachedTokenDiscount(t *testing.T) {
 	}
 	if summary.TotalCostUSD != 1.725 {
 		t.Fatalf("erwartet cost_usd=1.725 auch in costs.db, bekommen %v", summary.TotalCostUSD)
+	}
+}
+
+// TestHandleChatCompletions_ForwardsResponseFormat: TODO.md (golisp2, 20261003)
+// — ChatRequest kannte kein response_format, Go verwarf das Feld beim
+// Dekodieren still. golisp2 braucht JSON-Modus zuverlässig, sonst verpacken
+// Modelle JSON gern in einen Markdown-Codeblock. Muss 1:1 im Body an den
+// OpenAI-kompatiblen Provider weitergehen.
+func TestHandleChatCompletions_ForwardsResponseFormat(t *testing.T) {
+	var gotBody map[string]interface{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("upstream: invalid JSON body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],`+
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestServer(t)
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"response_format":{"type":"json_object"},` +
+		`"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("erwartet 200, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+	rf, ok := gotBody["response_format"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("erwartet response_format im Upstream-Body, bekommen: %+v", gotBody)
+	}
+	if rf["type"] != "json_object" {
+		t.Fatalf("erwartet response_format.type=json_object, bekommen %v", rf["type"])
 	}
 }
 
@@ -627,6 +702,50 @@ func TestHandleAPIModels_IncludesCachedInputCost(t *testing.T) {
 	}
 }
 
+// TestBuildChatUsage_CostUSDNullWhenPriceUnknown: TODO.md (golisp2, 20261003)
+// — bei fehlendem Preis (Fetcher hat keine Preisdaten für dieses Modell,
+// z.B. 103 von 217 Live-Modellen) lieferte usage.cost_usd bisher 0, das
+// liest sich wie "gratis", heißt aber "unbekannt". Mit priceKnown=false muss
+// cost_usd als literales JSON null ankommen, nicht als 0 und nicht als
+// fehlendes Feld (golisp2 bekommt dann automatisch :null).
+func TestBuildChatUsage_CostUSDNullWhenPriceUnknown(t *testing.T) {
+	u := &sigoengine.UsageData{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+	cu := buildChatUsage(u, 0, 0, 0, false)
+	if cu.CostUSD != nil {
+		t.Fatalf("erwartet cost_usd=nil bei unbekanntem Preis, bekommen %v", *cu.CostUSD)
+	}
+	data, err := json.Marshal(cu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"cost_usd":null`) {
+		t.Fatalf("erwartet literales JSON null, bekommen: %s", data)
+	}
+}
+
+// TestBuildChatUsage_CostUSDZeroWhenKnownFree: Ollama (oder ein anderes
+// Modell mit tatsächlich $0-Preis, nicht nur fehlenden Preisdaten) muss
+// weiterhin 0 liefern, nicht null — der Unterschied ist "bekannt kostenlos"
+// vs. "Preis unbekannt".
+func TestBuildChatUsage_CostUSDZeroWhenKnownFree(t *testing.T) {
+	u := &sigoengine.UsageData{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+	cu := buildChatUsage(u, 0, 0, 0, true)
+	if cu.CostUSD == nil || *cu.CostUSD != 0 {
+		t.Fatalf("erwartet cost_usd=0 (bekannt kostenlos), bekommen %v", cu.CostUSD)
+	}
+}
+
+// TestBuildChatUsage_CostUSDComputedWhenPriceKnown: Regressionsschutz — ein
+// bekannter Preis muss weiterhin korrekt berechnet werden, priceKnown darf
+// die bisherige Rechnung nicht verändern.
+func TestBuildChatUsage_CostUSDComputedWhenPriceKnown(t *testing.T) {
+	u := &sigoengine.UsageData{InputTokens: 1_000_000, OutputTokens: 500_000, TotalTokens: 1_500_000}
+	cu := buildChatUsage(u, 2.0, 8.0, 0, true)
+	if cu.CostUSD == nil || *cu.CostUSD != 6.0 {
+		t.Fatalf("erwartet cost_usd=6.0, bekommen %v", cu.CostUSD)
+	}
+}
+
 func TestRecordUsage(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ch := &sigoengine.Channel{Provider: "mammouth", Name: "default"}
@@ -642,6 +761,49 @@ func TestRecordUsage(t *testing.T) {
 	chStats := srv.usageByChannel["claude-h#mammouth-default"]
 	if chStats == nil || chStats.Requests != 2 || chStats.TotalTokens != 20 {
 		t.Fatalf("unexpected channel stats: %+v", chStats)
+	}
+}
+
+// TestHandleCosts_PriceKnownPerModel: TODO.md (golisp2, 20261003) —
+// Zusatz-Kennzeichen pro Modell in /api/costs, ob der Preis bekannt ist
+// (oder 0, weil tatsächlich kostenlos) oder unbekannt (Fetcher hatte keine
+// Preisdaten für dieses Modell). Ergänzt die Lösung für usage.cost_usd
+// (TestBuildChatUsage_CostUSDNullWhenPriceUnknown) auf der /api/costs-Seite.
+func TestHandleCosts_PriceKnownPerModel(t *testing.T) {
+	srv, dir := newTestServer(t)
+	costDB, err := sigoengine.OpenCostDB(dir)
+	if err != nil {
+		t.Fatalf("OpenCostDB: %v", err)
+	}
+	defer costDB.Close()
+	srv.costDB = costDB
+	srv.models = map[string]ModelInfo{
+		"priced-model":   {ID: "priced-model", Endpoint: "https://api.mammouth.ai/v1/chat/completions", InputCost: 2, OutputCost: 8},
+		"unpriced-model": {ID: "unpriced-model", Endpoint: "https://api.mammouth.ai/v1/chat/completions"},
+	}
+
+	ch := &sigoengine.Channel{Provider: "mammouth", Name: "default"}
+	srv.recordUsage("priced-model", ch, &sigoengine.UsageData{InputTokens: 10, OutputTokens: 5, TotalTokens: 15})
+	srv.recordUsage("unpriced-model", ch, &sigoengine.UsageData{InputTokens: 10, OutputTokens: 5, TotalTokens: 15})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/costs", nil)
+	rr := httptest.NewRecorder()
+	srv.handleCosts(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("erwartet 200, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		PriceKnown map[string]bool `json:"price_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, rr.Body.String())
+	}
+	if !resp.PriceKnown["priced-model"] {
+		t.Fatalf("erwartet price_known[priced-model]=true, bekommen %+v", resp.PriceKnown)
+	}
+	if resp.PriceKnown["unpriced-model"] {
+		t.Fatalf("erwartet price_known[unpriced-model]=false, bekommen %+v", resp.PriceKnown)
 	}
 }
 
@@ -1100,7 +1262,7 @@ func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := newTestServer(t)
 			rr := httptest.NewRecorder()
-			text, _, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0)
+			text, _, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1127,7 +1289,7 @@ func TestStreamProviderResponse_ReadsUsageFromFinalChunk(t *testing.T) {
 
 	srv, _ := newTestServer(t)
 	rr := httptest.NewRecorder()
-	text, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0)
+	text, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,7 +1323,7 @@ func TestStreamProviderResponse_InjectsCostUSDChunkBeforeDone(t *testing.T) {
 	// Preise bewusst glatt gewählt (1$/1M, 2$/1M statt realistischer
 	// Centbeträge), damit der erwartete cost_usd exakt 10*1 + 5*2 = 20 ist
 	// und der Test nicht an Float-Rundung hängt.
-	_, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 1_000_000, 2_000_000, 0)
+	_, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 1_000_000, 2_000_000, 0, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1235,7 +1397,7 @@ func TestStreamProviderResponse_ExtendsWriteDeadlinePerChunk(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 
-	_, _, err := srv.streamProviderResponse(rec, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0)
+	_, _, err := srv.streamProviderResponse(rec, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0, true)
 	if err != nil {
 		t.Fatal(err)
 	}

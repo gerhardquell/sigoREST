@@ -62,18 +62,26 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   Assign-Once ist das Kürzel eingefroren und betrifft nur künftige Modelle.
 - [ ] **Fallback-Provider** (aus TODO 20260920, noch nicht umgesetzt): Für
   jeden Zugang soll es einen Fallback-Provider geben können.
-- [ ] **`response_format` durchreichen** (aus golisp2, 20261003): `ChatRequest`
-  (`sigoREST/main.go:513`) kennt kein `response_format`; Go verwirft das Feld
-  beim Dekodieren still. Für JSON-Antworten (`{"type":"json_object"}` bzw.
-  `json_schema`) soll es an OpenAI-kompatible Provider weitergehen, beim
-  Anthropic-Pfad entweder übersetzt oder mit klarer Fehlermeldung abgelehnt
-  werden. Anlass: golisp2 will `(json-parse (sigo …))` zuverlässig nutzen;
-  ohne JSON-Modus verpacken Modelle JSON gern in einen Markdown-Codeblock.
-  Allgemeiner prüfen: Sollen unbekannte Request-Felder einen Fehler liefern
-  statt still zu verschwinden?
-- [ ] **`cost_usd: null` bei fehlendem Preis** (aus golisp2, 20261003): Nur
-  89 von 192 Modellen in `/api/models` haben `input_cost`/`output_cost`; bei
-  den übrigen liefern `usage.cost_usd` und `/api/costs` den Wert 0. Das liest
-  sich wie „gratis“, heißt aber „unbekannt“. Vorschlag: `cost_usd: null`
-  (bzw. ein Kennzeichen pro Modell in `/api/costs`), wenn kein Preis
-  hinterlegt ist. golisp2 bekäme dann automatisch `:null`.
+- [x] **`response_format` durchreichen** (aus golisp2, 20261003) — ✅ erledigt.
+  `ChatRequest` hat jetzt `ResponseFormat json.RawMessage`, 1:1 in den
+  Request-Body an den Provider durchgereicht (`sigoREST/main.go`). Anthropic-
+  Pfad geprüft: `LoadConfigWithChannel` setzt `cfg.Type` für `/v1/chat/completions`
+  nur auf `"mammoth"`/`"ollama"`, nie `"anthropic"` — alle über diesen Endpoint
+  erreichbaren Provider sind OpenAI-kompatibel, eine Übersetzung/Ablehnung für
+  einen Anthropic-Pfad entfällt also, bis es einen echten nativen
+  Anthropic-Kanal gibt. Test: `TestHandleChatCompletions_ForwardsResponseFormat`.
+  **Weiterhin offen (nicht entschieden):** Sollen unbekannte Request-Felder
+  generell einen Fehler liefern statt still zu verschwinden? Nur für
+  `response_format` gelöst, keine allgemeine Policy-Entscheidung getroffen —
+  wäre ein Breaking Change für Clients, die heute unbekannte Felder mitschicken.
+- [x] **`cost_usd: null` bei fehlendem Preis** (aus golisp2, 20261003) — ✅ erledigt.
+  `ChatUsage.CostUSD` ist jetzt `*float64`: `null` wenn `InputCost`/`OutputCost`
+  beide 0 UND das Modell nicht Ollama ist (= Preis unbekannt), sonst der
+  berechnete Wert (Ollama bleibt `0.0`, bekannt kostenlos). Gilt für Streaming
+  und Non-Streaming (`buildChatUsage`, `sigoREST/main.go`). `/api/costs`
+  bekam zusätzlich `price_known: {"<model-id>": bool}` pro Modell (additiv,
+  `sigoengine.CostSummary` selbst unverändert). Tests:
+  `TestBuildChatUsage_CostUSDNullWhenPriceUnknown`,
+  `TestBuildChatUsage_CostUSDZeroWhenKnownFree`,
+  `TestHandleChatCompletions_CostUSDNullWhenModelHasNoPrice`,
+  `TestHandleCosts_PriceKnownPerModel`.

@@ -220,13 +220,20 @@ sie nicht.
   "timeout": 120,                  // Optional (default 180)
   "retries": 3,                    // Optional (default 3)
   "bare": true,                    // Optional: kein Memory, kein Server-System-Prompt
-  "system_prompt": "…"             // Optional: per-Request Override; bei bare der einzige Kontext
+  "system_prompt": "…",            // Optional: per-Request Override; bei bare der einzige Kontext
+  "response_format": {"type": "json_object"}  // Optional: 1:1 an OpenAI-kompatible Provider durchgereicht
 }
 ```
 Mit `bare:true` legt der Server weder globalen/Kanal-Memory noch den
 Server-System-Prompt vor die Anfrage — nur ein nicht-leerer `system_prompt`
 zählt dann noch. Ein älteres sigoREST ohne `bare`-Unterstützung ignoriert
 das Feld (Memory/Server-Prompt kommen dann wieder dazu).
+`response_format` ist kein sigoREST-Feld, sondern Standard-OpenAI — wurde
+bis TODO 20261003 beim Dekodieren still verworfen (`ChatRequest` kannte das
+Feld nicht). Jetzt 1:1 im Request-Body an den Provider durchgereicht (nicht
+validiert — ein ungültiger Wert wird vom Provider selbst abgelehnt). Betrifft
+nur `/v1/chat/completions`; `/v1/messages` (Anthropic-Bridge) hat kein
+äquivalentes Feld im Anthropic-Wire-Format.
 
 **sigoREST-Erweiterungen in der Response (`usage`):**
 ```json
@@ -241,6 +248,15 @@ Cache-Rabatt nur, wenn der Provider einen Cache-Read-Preis liefert (aktuell
 nur cheaperinference, `ModelInfo.CachedInputCost`) — sonst (0) zählen
 Cache-Reads weiterhin voll zum `input_cost`, eine obere Schranke
 (`prompt_tokens` enthält dort die gecachten Tokens mit).
+
+`cost_usd` ist `null` statt `0.0`, wenn für das Modell kein Preis bekannt ist
+(`InputCost`/`OutputCost` beide 0 UND nicht Ollama) — ein Fetcher ohne
+Preisdaten für dieses Modell heißt "unbekannt", nicht "gratis" (TODO.md
+20261003, golisp2-Anlass: `(json-parse (sigo …))` bekam sonst `0` statt
+`:null`). Ollama bleibt `0.0` (bekannt kostenlos, lokale Inferenz). Gilt für
+Streaming (eigener Chunk vor `[DONE]`) und Non-Streaming gleich
+(`buildChatUsage`). `/api/costs` ergänzt dieselbe Unterscheidung pro Modell
+als `price_known: {"<model-id>": bool}` neben der gewohnten Zusammenfassung.
 
 ### Dynamisches Modell-Laden (Server)
 
