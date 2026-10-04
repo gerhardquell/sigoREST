@@ -35,6 +35,9 @@ todos/
 *.test
 *.out
 coverage.txt
+/tmp/
+/docs/logs/
+zeitstempel.txt
 
 # C++ build artifacts
 clients/cpp/build/
