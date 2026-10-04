@@ -4,7 +4,29 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
-## Session 2026-10-04: Streaming-Kosten-Tracking korrigiert + Cache-Rabatt (TODO-20261003-kosten.md)
+## Session 2026-10-04 (Teil 2): `response_format` durchreichen + `cost_usd: null` bei fehlendem Preis (TODO.md)
+
+**Zielsetzung:**
+Direkt im Anschluss an Teil 1 (unten) zwei liegengebliebene Punkte aus `TODO.md`, beide aus golisp2-Nutzung (20261003): `response_format` wurde beim Dekodieren still verworfen, und `usage.cost_usd`/`/api/costs` lieferten `0` statt `null` bei Modellen ohne Preisdaten. Gerhard stufte beide als "relativ unwichtig" ein, wollte aber `response_format` (externer Druck durch golisp2) vor `cost_usd` (kleinster Hebel) angehen.
+
+**Was erreicht wurde:**
+
+### 1. `response_format` durchreichen (`f749954`)
+`ChatRequest` bekam `ResponseFormat json.RawMessage` (`json:"response_format,omitempty"`) und reicht den Wert 1:1 im Request-Body an den Provider weiter — keine eigene Typisierung/Validierung, ein ungültiger Wert wird vom Provider selbst abgelehnt. Die im TODO aufgeworfene Frage „Anthropic-Pfad übersetzen oder ablehnen" hat sich beim Nachschauen erübrigt: `LoadConfigWithChannel` setzt `cfg.Type` für `/v1/chat/completions` ausschließlich auf `"mammoth"` oder `"ollama"` (grep über alle `Type:`-Zuweisungen bestätigt das) — ein echter nativer Anthropic-Kanal existiert in diesem Endpoint schlicht nicht, die `cfg.Type == "anthropic"`-Zweige in `engine.go` sind dort toter Code. Eine Sonderbehandlung einzubauen hätte nur Komplexität ohne Wirkung addiert.
+
+### 2. `cost_usd: null` bei fehlendem Preis (`f749954`)
+`ChatUsage.CostUSD` wurde von `float64` auf `*float64` umgestellt (kein `omitempty`, damit `null` literal im JSON steht statt das Feld wegzulassen). Ein neues `priceKnown bool` — berechnet aus `InputCost>0 || OutputCost>0 || provider=="ollama"` — entscheidet, ob `buildChatUsage` tatsächlich rechnet oder `nil` lässt. Die Ollama-Ausnahme war nötig, weil `$0` dort kein Zeichen für „unbekannt" ist, sondern für „tatsächlich kostenlos" (lokale Inferenz) — ein Live-Check zeigte 103 von 217 Modellen mit `input_cost=output_cost=0`, davon nur 11 Ollama, der Rest (Mammouth/ZAI/Moonshot/Longcat) echte Preislücken der jeweiligen Fetcher. `/api/costs` bekam zusätzlich `price_known` pro Modell, aber **additiv** als eigenes Feld neben der unveränderten `sigoengine.CostSummary` — keine Änderung an einem Typ, der an mehreren Stellen im Code verwendet wird (siehe Learning 1 in Teil 1 zu genau diesem Risiko).
+
+**Learnings:**
+
+1. **Priorisierung einholen, bevor man einen von mehreren offenen TODO-Punkten einfach anfängt.** Gerhard wurde gefragt, welcher der fünf `TODO.md`-Punkte zuerst dran ist, statt den naheliegendsten (oder den zuletzt besprochenen) zu wählen — seine Antwort ("response_format, dann cost_usd") spiegelte externen Druck (golisp2), den eine reine Code-Perspektive nicht gesehen hätte.
+2. **Eine angenommene Komplikation erst verifizieren, bevor man dagegen baut.** Das TODO verlangte explizit eine Entscheidung „Anthropic-Pfad übersetzen oder ablehnen" — ein `grep` über alle `ProviderConfig.Type`-Zuweisungen hat in einer Minute gezeigt, dass dieser Pfad für `/v1/chat/completions` nicht erreichbar ist. Ohne den Check wäre vermutlich eine nie greifende Fehlerbehandlung entstanden.
+3. **Bei einem Feldtyp-Wechsel (`float64` → `*float64`) sofort `omitempty` gegenprüfen.** Das Ziel war literales `null`, nicht ein fehlendes Feld — `omitempty` auf einem Pointer-Feld hätte genau das Gegenteil bewirkt (Feld komplett weggelassen statt `null`). Per Test (`strings.Contains(body, `"cost_usd":null`)`) explizit gegen den JSON-Text geprüft, nicht nur gegen den Go-Wert.
+4. **Eine neue abgeleitete Eigenschaft (`priceKnown`) additiv anhängen, nicht in eine geteilte Struct eingreifen.** Für `/api/costs` hätte `price_known` auch als Feld in `sigoengine.CostStat` Sinn ergeben — stattdessen ein separates `PriceKnown map[string]bool` neben `*sigoengine.CostSummary` (Go flacht anonyme eingebettete Pointer-Structs beim JSON-Encoding automatisch), um das in Teil 1 gefundene Rollout-Risiko (ein Feld, mehrere Kopierstellen, eine vergessen) hier erst gar nicht einzugehen.
+
+---
+
+## Session 2026-10-04 (Teil 1): Streaming-Kosten-Tracking korrigiert + Cache-Rabatt (TODO-20261003-kosten.md)
 
 **Zielsetzung:**
 Anlass war ein Modellvergleich (`/u/ki-projekte/ai-vergleiche`), bei dem `/api/costs`/`/api/budget` nicht mehr mit den tatsächlichen Kosten übereinstimmten, seit der Runner auf Streaming umgestellt hatte. Sechs Punkte aus `TODO-20261003-kosten.md` (lokale Arbeitsdatei, `TODO-*.md` ist gitignored) der Reihe nach abarbeiten: echte Provider-usage im Stream lesen, cost_usd im Stream nachliefern, WriteTimeout für lange Streams entschärfen, Fehlerpfade dokumentieren, Hard Stop für Streaming verifizieren, Cache-Rabatt prüfen.
