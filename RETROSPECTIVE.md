@@ -4,6 +4,45 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-10-04: Streaming-Kosten-Tracking korrigiert + Cache-Rabatt (TODO-20261003-kosten.md)
+
+**Zielsetzung:**
+Anlass war ein Modellvergleich (`/u/ki-projekte/ai-vergleiche`), bei dem `/api/costs`/`/api/budget` nicht mehr mit den tatsächlichen Kosten übereinstimmten, seit der Runner auf Streaming umgestellt hatte. Sechs Punkte aus `TODO-20261003-kosten.md` (lokale Arbeitsdatei, `TODO-*.md` ist gitignored) der Reihe nach abarbeiten: echte Provider-usage im Stream lesen, cost_usd im Stream nachliefern, WriteTimeout für lange Streams entschärfen, Fehlerpfade dokumentieren, Hard Stop für Streaming verifizieren, Cache-Rabatt prüfen.
+
+**Was erreicht wurde:**
+
+### 1. Echte usage statt Schätzung im Stream (`53e8ebb`)
+`streamProviderResponse` (`sigoREST/main.go`) sammelte bisher nur `delta.content` und ignorierte eine `usage`, die der Provider im letzten Chunk vor `[DONE]` mitschickt. Bei Reasoning-Modellen (gemessen: Kimi, 89 % Denk-Tokens) führte das dazu, dass `EstimateUsage` — eine Zeichen-basierte Schätzung aus dem sichtbaren Text — fast nichts erfasste, weil Denk-Tokens nie im sichtbaren Text stehen. Fix: `sigoengine.extractUsage` zu `ExtractUsage` exportiert (einmal parsen, von `CallAPI` und jetzt auch vom Stream-Pfad genutzt), letzter gesehener Chunk mit `usage` gewinnt. `EstimateUsage` bleibt Fallback für Provider, die wirklich keine usage schicken.
+
+### 2. `cost_usd` fehlte im Stream (`53e8ebb`)
+Non-Streaming-Antworten trugen `usage.cost_usd`, Stream-Antworten nicht — der Upstream-Provider kennt die sigoREST-Preisliste schließlich nicht. Gerhards Entscheidung (gefragt, nicht angenommen): ein eigener, zusätzlicher Chunk mit vollem `chatUsage` (inkl. `cost_usd`) vor `[DONE]`, keine reine Doku-Lösung „Client rechnet selbst". Dafür musste `data: [DONE]` vom Upstream nie mehr live durchgereicht werden — es wird jetzt immer am Ende von `streamProviderResponse` selbst geschrieben, nachdem der Cost-Chunk raus ist. Ein gemeinsamer Helper `buildChatUsage` übernimmt die Umrechnung für Streaming und Non-Streaming gleich.
+
+### 3. WriteTimeout killte lange Streams nach exakt 300s (`53e8ebb`)
+Belegt: Streaming-Vergleiche brachen bei verschiedenen Modellen immer nach genau 300s mit `unexpected EOF` ab, obwohl HTTP 200 schon gesendet war und der Stream weiter lieferte. Ursache: Gos `http.Server.WriteTimeout` deckt die *gesamte* Antwort ab einem festen Startpunkt ab, nicht pro Chunk. Fix: `http.NewResponseController(w).SetWriteDeadline(...)` nach jedem Flush, sowohl in `streamProviderResponse` (main.go) als auch in `writeAnthropicSSEEvent` (anthropic.go, ein einziger Choke-Point für die ganze Anthropic-Bridge). Nicht-Streaming-Antworten behalten das feste Limit unverändert — das war Gerhards Vorgabe, nicht automatisch angenommen.
+
+### 4. Fehlerpfade dokumentiert, nicht verändert (`53e8ebb`)
+Zwei offene Fragen aus dem TODO geklärt, ohne Verhalten zu ändern: sigoREST bucht bei **jedem** Fehler (erschöpfte Retries, Mid-Stream-Abbruch nach Header-Write) gar keine Kosten — beide Fehlerpfade in `handleChatCompletions` kehren zurück, bevor `recordUsageWithSession` erreicht wird, auch wenn im Stream schon eine `usage` gesehen wurde. Konsequenz: Unterzählung bei Fehlern, nie Überzählung. `req.Retries` vervielfacht die Kosten ebenfalls nicht, weil nur der erfolgreiche Versuch `responseUsage` setzt und die Buchung genau einmal nach dem ganzen Kanal-/Retry-Loop läuft. Beide Behauptungen mit Regressionstests gepinnt (Mock-Upstream mit Hijack-Abbruch bzw. 500-dann-200), nicht nur behauptet.
+
+### 5. Hard Stop bei Streaming griff nicht wirklich (`53e8ebb`)
+War kein eigener Bug im Budget-Check selbst — der prüfte immer korrekt gegen `costs.db`. Das Problem war schlicht Punkt 1: `costs.db` enthielt bei Streams praktisch nichts. Mit echter usage greift der Hard Stop automatisch. Test bewusst mit einem Limit *zwischen* dem, was die alte Schätzung ergeben hätte, und der echten usage platziert (nicht 0,01 USD wie im TODO vorgeschlagen), damit der Test wirklich Punkt 1 beweist und nicht nur „irgendein Limit greift" — per Sanity-Check verifiziert (Fix deaktiviert → Test wird rot).
+
+### 6. Cache-Rabatt für cheaperinference (`85c8b97`)
+Das TODO verlangte nur, zu klären, ob ein Provider überhaupt einen Cache-Rabatt weitergibt, bevor sich der Aufwand lohnt. Live-Check per echtem API-Call (`OMNIROUTE_API_KEY` war gesetzt) bestätigte: cheaperinference liefert `pricing.cache_read_input_per_million`, deutlich unter dem normalen Preis (claude-fable-5.1: Faktor ~40). Mammouth (`/public/models`, ebenfalls live geprüft) hat dagegen gar keinen Cache-Preis. Daraufhin das Feld bis durch die ganze Kette gezogen: `Model.CachedInputCost` → Fetcher → CSV-Format (neue Spalte, längenbasiert rückwärtskompatibel) → `CalcCostUSD` (neuer Parameter, bei 0 unverändertes Altverhalten) → `ModelInfo`/`buildChatUsage`/`recordUsageWithSession`.
+
+### 7. Live-Bugfix nach dem Deploy: `cached_input_cost` fehlte in `/api/models` (`81a68b2`)
+Nach dem Server-Neustart per Live-Check aufgefallen (nicht durch einen Test): `/api/models` zeigte für cheaperinference-Modelle keinen `cached_input_cost`, obwohl `input_cost`/`output_cost` korrekt aus derselben Fetch-Runde kamen. Ursache: `handleAPIModels` baut pro Modell eine neue `ModelInfo` händisch aus den Feldern des internen `s.models`-Eintrags zusammen, statt den Eintrag zu kopieren — ein dritter, unabhängiger Copy-Punkt neben `modelInfoFromEngine`/`modelInfoToEngine`, den das neue Feld beim Durchziehen übersehen hatte. Mit Regressionstest (`TestHandleAPIModels_IncludesCachedInputCost`) nachgezogen.
+
+**Learnings:**
+
+1. **Ein neues Struct-Feld braucht eine Grep-Runde über alle Konstruktionsstellen, nicht nur die naheliegenden.** `ModelInfo{...}`-Literale gab es dreimal in `main.go` — zwei beim Hinzufügen des Felds sofort erfasst (Provider-Laden, CSV-Export), der dritte (`handleAPIModels`, API-Response) erst beim Live-Check nach dem Deploy aufgefallen. `grep -n "ModelInfo{"` hätte das vorher gefunden; lieber einmal mehr grep als auf den nächsten Live-Check hoffen.
+2. **Live-Checks nach dem Deploy sind kein Ersatz für Tests, aber sie finden andere Dinge.** Alle sechs TODO-Punkte hatten Tests und waren grün — der Copy-Bug lag in einem Pfad (`/api/models`), für den es noch keinen Test gab. Der Reflex „Server neu gestartet, schau nochmal rein" hat ihn in unter einer Minute gefunden.
+3. **Design-Entscheidungen mit Trade-offs fragen, nicht annehmen.** Sowohl bei „cost_usd im Stream: eigener Chunk vs. Client rechnet selbst" als auch beim WriteTimeout-Verhalten gab es einen expliziten Zwischenschritt, bei dem Gerhard entschieden hat, statt dass die Session die naheliegendste Option einfach umgesetzt hätte.
+4. **Einen Test, der sofort grün ist, per Sanity-Check gegenprüfen.** Der Hard-Stop-Test (Punkt 5) und der Retry-Test (Punkt 4) bestanden ohne zusätzlichen Code, weil das Verhalten schon durch Punkt 1 korrekt war. Den jeweiligen Fix kurz deaktiviert und beobachtet, dass der Test dann mit dem erwarteten Fehlertext rot wird — sonst hätte ein Test, der aus Zufall grün ist, nichts bewiesen.
+5. **Uncommitted Fremd-Änderungen im selben File nicht mitreißen.** `sigoengine/provider_fetchers.go` hatte schon vor der Session unversionierte Änderungen (statische Mammouth/ZAI-Preistabellen, nicht von dieser Session). `git add -p` mit gezielten y/n pro Hunk hat nur die eigenen drei Hunks gestaged, die fremden Zeilen blieben unberührt liegen (und wurden in einem eigenen, separaten Commit nachgezogen, nachdem Gerhard das ausdrücklich wollte).
+6. **Live-API-Calls vor einer Implementierung sind billiger als eine Annahme.** Punkt 6 hätte auch ohne den echten Check implementiert werden können („Cache-Rabatt wird schon relevant sein") — der tatsächliche API-Call hat stattdessen in einer Minute bestätigt, dass Mammouth keinen Rabatt kennt und damit den Scope auf genau einen Provider begrenzt, keine Spekulation nötig.
+
+---
+
 ## Session 2026-09-27: TODO-Nacharbeiten (.env, CSV-Export, Kommunikationsprotokoll) + zwei Altbugs
 
 **Zielsetzung:**
