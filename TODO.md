@@ -62,3 +62,18 @@ in eine Datei gespeichert werden. Meine Idee wäre /var/log/sigoREST/communicati
   Assign-Once ist das Kürzel eingefroren und betrifft nur künftige Modelle.
 - [ ] **Fallback-Provider** (aus TODO 20260920, noch nicht umgesetzt): Für
   jeden Zugang soll es einen Fallback-Provider geben können.
+- [ ] **`response_format` durchreichen** (aus golisp2, 20261003): `ChatRequest`
+  (`sigoREST/main.go:513`) kennt kein `response_format`; Go verwirft das Feld
+  beim Dekodieren still. Für JSON-Antworten (`{"type":"json_object"}` bzw.
+  `json_schema`) soll es an OpenAI-kompatible Provider weitergehen, beim
+  Anthropic-Pfad entweder übersetzt oder mit klarer Fehlermeldung abgelehnt
+  werden. Anlass: golisp2 will `(json-parse (sigo …))` zuverlässig nutzen;
+  ohne JSON-Modus verpacken Modelle JSON gern in einen Markdown-Codeblock.
+  Allgemeiner prüfen: Sollen unbekannte Request-Felder einen Fehler liefern
+  statt still zu verschwinden?
+- [ ] **`cost_usd: null` bei fehlendem Preis** (aus golisp2, 20261003): Nur
+  89 von 192 Modellen in `/api/models` haben `input_cost`/`output_cost`; bei
+  den übrigen liefern `usage.cost_usd` und `/api/costs` den Wert 0. Das liest
+  sich wie „gratis“, heißt aber „unbekannt“. Vorschlag: `cost_usd: null`
+  (bzw. ein Kennzeichen pro Modell in `/api/costs`), wenn kein Preis
+  hinterlegt ist. golisp2 bekäme dann automatisch `:null`.

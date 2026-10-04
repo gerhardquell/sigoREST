@@ -94,6 +94,82 @@ var zaiStaticModels = []Model{
 	{ID: "glm-5-turbo", Shortcode: "glm5t", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
 	{ID: "glm-5.1", Shortcode: "glm51", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
 	{ID: "glm-5v-turbo", Shortcode: "glm5vt", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.3", Shortcode: "glm53", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.3-flash", Shortcode: "glm53-f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.07, OutputCost: 0.40, MinTemperature: 0.0, MaxTemperature: 2.0},
+}
+
+// **********************************************************************
+// Mammouth — statische Preis-Fallback-Tabelle
+// Die Mammouth /public/models API liefert keine Preise. Bekannte Modelle
+// werden angereichert; unbekannte bleiben bei 0 (→ $0 in der Kostenrechnung).
+// Preise in USD/1M tokens.
+var mammouthKnownModels = map[string]Model{
+	"gpt-4.1": {
+		ID: "gpt-4.1", Shortcode: "gpt41",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 128000, MaxOutputTokens: 8192,
+		InputCost: 2.0, OutputCost: 8.0,
+	},
+	"gpt-4o": {
+		ID: "gpt-4o", Shortcode: "gpt4o",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 128000, MaxOutputTokens: 16384,
+		InputCost: 2.5, OutputCost: 10.0,
+	},
+	"claude-haiku-4-5": {
+		ID: "claude-haiku-4-5", Shortcode: "cl45-h",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 200000, MaxOutputTokens: 8192,
+		InputCost: 0.8, OutputCost: 4.0,
+	},
+	"claude-sonnet-4-6": {
+		ID: "claude-sonnet-4-6", Shortcode: "cl46-s",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 200000, MaxOutputTokens: 8192,
+		InputCost: 3.0, OutputCost: 15.0,
+	},
+	"claude-opus-4-6": {
+		ID: "claude-opus-4-6", Shortcode: "cl46-o",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 200000, MaxOutputTokens: 8192,
+		InputCost: 15.0, OutputCost: 75.0,
+	},
+	"claude-sonnet-5": {
+		ID: "claude-sonnet-5", Shortcode: "cl5-s",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 200000, MaxOutputTokens: 8192,
+		InputCost: 3.0, OutputCost: 15.0,
+	},
+	"claude-opus-5": {
+		ID: "claude-opus-5", Shortcode: "cl5-o",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 200000, MaxOutputTokens: 8192,
+		InputCost: 15.0, OutputCost: 75.0,
+	},
+	"grok-4.5": {
+		ID: "grok-4.5", Shortcode: "grok45",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 131072, MaxOutputTokens: 32768,
+		InputCost: 3.0, OutputCost: 15.0,
+	},
+	"grok-4.6": {
+		ID: "grok-4.6", Shortcode: "grok46",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 131072, MaxOutputTokens: 32768,
+		InputCost: 3.0, OutputCost: 15.0,
+	},
+	"grok-4.7": {
+		ID: "grok-4.7", Shortcode: "grok47",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 131072, MaxOutputTokens: 32768,
+		InputCost: 3.0, OutputCost: 15.0,
+	},
+	"kimi-k2.5": {
+		ID: "kimi-k2.5", Shortcode: "kimi",
+		Endpoint: mammouthChatEndpoint, APIKeyEnv: "MAMMOUTH_API_KEY",
+		MaxInputTokens: 256000, MaxOutputTokens: 4096,
+		InputCost: 0.6, OutputCost: 3.0,
+	},
 }
 
 // **********************************************************************
@@ -177,6 +253,23 @@ func convertMammouthModels(items []mammouthModel) []Model {
 		maxOut := firstNonZero(m.MaxOutputTokens, m.MaxOutput)
 		inCost := firstNonZeroFloat(m.InputPricePerMillion, m.InputCost)
 		outCost := firstNonZeroFloat(m.OutputPricePerMillion, m.OutputCost)
+
+		// Statische Preis-Fallback-Tabelle: Mammouth liefert keine Preise.
+		// Bekannte Modelle werden angereichert (nur Preise/Limits, Shortcode bleibt dynamisch).
+		if known, ok := mammouthKnownModels[m.ID]; ok {
+			if maxIn == 0 {
+				maxIn = known.MaxInputTokens
+			}
+			if maxOut == 0 {
+				maxOut = known.MaxOutputTokens
+			}
+			if inCost == 0 {
+				inCost = known.InputCost
+			}
+			if outCost == 0 {
+				outCost = known.OutputCost
+			}
+		}
 
 		sc := generateProviderShortcode(m.ID, used)
 		used[sc] = true
