@@ -508,8 +508,9 @@ func FetchCheaperinferenceModels() ([]Model, error) {
 			ContextLength   int    `json:"context_length"`
 			MaxOutputTokens int    `json:"max_output_tokens"`
 			Pricing         struct {
-				InputPerMillion  string `json:"input_per_million"`
-				OutputPerMillion string `json:"output_per_million"`
+				InputPerMillion          string `json:"input_per_million"`
+				OutputPerMillion         string `json:"output_per_million"`
+				CacheReadInputPerMillion string `json:"cache_read_input_per_million"` // deutlich günstiger als InputPerMillion, siehe TODO-20261003-kosten.md Punkt 6
 			} `json:"pricing"`
 		} `json:"data"`
 	}
@@ -527,6 +528,7 @@ func FetchCheaperinferenceModels() ([]Model, error) {
 
 		inputCost, _ := strconv.ParseFloat(item.Pricing.InputPerMillion, 64)
 		outputCost, _ := strconv.ParseFloat(item.Pricing.OutputPerMillion, 64)
+		cachedInputCost, _ := strconv.ParseFloat(item.Pricing.CacheReadInputPerMillion, 64)
 		sc := "ci-" + generateProviderShortcode(item.ID, used)
 		used[sc] = true
 
@@ -539,6 +541,7 @@ func FetchCheaperinferenceModels() ([]Model, error) {
 			MaxOutputTokens: item.MaxOutputTokens,
 			InputCost:       inputCost,
 			OutputCost:      outputCost,
+			CachedInputCost: cachedInputCost,
 			MinTemperature:  0.0,
 			MaxTemperature:  2.0,
 			UpstreamID:      item.ID,

@@ -313,6 +313,67 @@ func TestHandleChatCompletions_FailedRetryDoesNotRecordCost(t *testing.T) {
 	}
 }
 
+// TestHandleChatCompletions_AppliesCachedTokenDiscount: TODO-20261003-kosten.md
+// Punkt 6 — cheaperinference liefert einen eigenen, deutlich günstigeren
+// Cache-Read-Preis (CachedInputCost). Input: 1.000.000 Tokens, davon 900.000
+// Cache-Reads @ $0,25/1M + 100.000 normale @ $5/1M = 0,225+0,5 = 0,725 USD.
+// Output: 100.000 Tokens @ $10/1M = 1,0 USD. Gesamt (cost_usd) = 1,725 USD —
+// ohne Rabatt wären es 5,0+1,0 = 6,0 USD gewesen. End-to-End bis costs.db,
+// nicht nur CalcCostUSD isoliert (siehe
+// sigoengine.TestCalcCostUSD_CachedTokensAtDiscountRate).
+func TestHandleChatCompletions_AppliesCachedTokenDiscount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"Hallo"},"finish_reason":"stop"}],`+
+			`"usage":{"prompt_tokens":1000000,"completion_tokens":100000,"total_tokens":1100000,`+
+			`"prompt_tokens_details":{"cached_tokens":900000}}}`)
+	}))
+	defer upstream.Close()
+
+	srv, dir := newTestServer(t)
+	costDB, err := sigoengine.OpenCostDB(dir)
+	if err != nil {
+		t.Fatalf("OpenCostDB: %v", err)
+	}
+	defer costDB.Close()
+	srv.costDB = costDB
+	srv.models = map[string]ModelInfo{
+		"claude-h": {ID: "claude-h", Endpoint: upstream.URL, MaxOutputTokens: 100, MaxTemperature: 1, MinTemperature: 0,
+			InputCost: 5, OutputCost: 10, CachedInputCost: 0.25},
+	}
+
+	body := `{"model":"claude-h","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleChatCompletions(rr, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("erwartet 200, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Usage struct {
+			CostUSD float64 `json:"cost_usd"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Response nicht parsebar: %v\n%s", err, rr.Body.String())
+	}
+	if resp.Usage.CostUSD != 1.725 {
+		t.Fatalf("erwartet cost_usd=1.725 im Response (Cache-Rabatt angewendet), bekommen %v", resp.Usage.CostUSD)
+	}
+
+	summary, err := costDB.Summary(time.Time{}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if summary.TotalCostUSD != 1.725 {
+		t.Fatalf("erwartet cost_usd=1.725 auch in costs.db, bekommen %v", summary.TotalCostUSD)
+	}
+}
+
 // TestHandleChatCompletions_StreamingRespectsHardStopBudget: TODO-20261003-kosten.md
 // Punkt 5 — der Hard Stop prüft Budget gegen costs.db. Vor Punkt 1/2 buchten
 // Streaming-Aufrufe dort fast nichts (EstimateUsage statt echter usage aus
@@ -1005,7 +1066,7 @@ func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := newTestServer(t)
 			rr := httptest.NewRecorder()
-			text, _, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0)
+			text, _, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1032,7 +1093,7 @@ func TestStreamProviderResponse_ReadsUsageFromFinalChunk(t *testing.T) {
 
 	srv, _ := newTestServer(t)
 	rr := httptest.NewRecorder()
-	text, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0)
+	text, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1066,7 +1127,7 @@ func TestStreamProviderResponse_InjectsCostUSDChunkBeforeDone(t *testing.T) {
 	// Preise bewusst glatt gewählt (1$/1M, 2$/1M statt realistischer
 	// Centbeträge), damit der erwartete cost_usd exakt 10*1 + 5*2 = 20 ist
 	// und der Test nicht an Float-Rundung hängt.
-	_, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 1_000_000, 2_000_000)
+	_, usage, err := srv.streamProviderResponse(rr, io.NopCloser(strings.NewReader(upstream)), "m", 1_000_000, 2_000_000, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1140,7 +1201,7 @@ func TestStreamProviderResponse_ExtendsWriteDeadlinePerChunk(t *testing.T) {
 	srv, _ := newTestServer(t)
 	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 
-	_, _, err := srv.streamProviderResponse(rec, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0)
+	_, _, err := srv.streamProviderResponse(rec, io.NopCloser(strings.NewReader(upstream)), "m", 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

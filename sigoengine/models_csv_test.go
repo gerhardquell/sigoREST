@@ -14,7 +14,7 @@ var csvTestModels = []Model{
 		InputCost: 0.6, OutputCost: 2.2, MinTemperature: 0, MaxTemperature: 1},
 	{ID: "ci-claude-opus-5", Shortcode: "che-clo5", Endpoint: "https://api.cheaperinference.com/v1/chat/completions",
 		APIKeyEnv: "OMNIROUTE_API_KEY", MaxInputTokens: 200000, MaxOutputTokens: 32000,
-		InputCost: 5, OutputCost: 25, MinTemperature: 0, MaxTemperature: 1,
+		InputCost: 5, OutputCost: 25, CachedInputCost: 1.25, MinTemperature: 0, MaxTemperature: 1,
 		RequiresCompletionTokens: true, UpstreamID: "claude-opus-5"},
 	{ID: "ollama-llama3", Shortcode: "ollama-llama3", Endpoint: "http://localhost:11434/v1/chat/completions"},
 }
@@ -49,8 +49,8 @@ func TestWriteModelsCSV_SortedAndProvider(t *testing.T) {
 			t.Errorf("Zeile %d = %q, erwartet Präfix %q", i, lines[i], p)
 		}
 	}
-	if !strings.HasSuffix(lines[0], ";cheaperinference;cheap;claude-opus-5") {
-		t.Errorf("Provider/UpstreamID fehlen: %q", lines[0])
+	if !strings.HasSuffix(lines[0], ";cheaperinference;cheap;claude-opus-5;1.25") {
+		t.Errorf("Provider/UpstreamID/CachedInputCost fehlen: %q", lines[0])
 	}
 }
 

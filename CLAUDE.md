@@ -140,7 +140,7 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 | `StartHealthMonitor(...)` | Lazy Hintergrund-Health-Check (GET `/models`, kein Chat-Ping) |
 | `OpenCostDB(dataDir)` | Öffnet/erstellt `costs.db` (SQLite, WAL), Schema-Migration |
 | `CostDB.RecordUsage/Summary/CheckBudget` | Kosten-Event schreiben, Zeitraum aggregieren, Budget prüfen |
-| `CalcCostUSD(inTok, outTok, inPrice, outPrice)` | Token→USD anhand Modell-Preisen ($/1M Tokens) |
+| `CalcCostUSD(inTok, outTok, cachedTok, inPrice, outPrice, cachedPrice)` | Token→USD anhand Modell-Preisen ($/1M Tokens); cachedTok zum günstigeren cachedPrice, wenn >0 bekannt (sonst wie bisher voll zu inPrice) |
 | `OpenIDRegistry(dataDir)` | Öffnet/erstellt `id_registry.db` (SQLite, WAL), Schema-Migration |
 | `IDRegistry.AssignModel(provider, upstreamID, hint)` | Einmalig vergebener Shortcode für ein Modell (assign-once, Hint = semantischer Code des Fetchers) |
 | `IDRegistry.SyncProvider(provider, seeds)` | Live-Liste abgleichen: Shortcodes vergeben, fehlende Modelle zählen/retiren |
@@ -236,9 +236,11 @@ das Feld (Memory/Server-Prompt kommen dann wieder dazu).
   "cost_usd": 0.0
 }
 ```
-`cost_usd` = `CalcCostUSD(input_cost, output_cost)`, ohne Cache-Rabatt —
-für OpenAI-kompatible Provider eine obere Schranke (`prompt_tokens` enthält
-dort die gecachten Tokens mit).
+`cost_usd` = `CalcCostUSD(input_cost, output_cost, cached_input_cost)`.
+Cache-Rabatt nur, wenn der Provider einen Cache-Read-Preis liefert (aktuell
+nur cheaperinference, `ModelInfo.CachedInputCost`) — sonst (0) zählen
+Cache-Reads weiterhin voll zum `input_cost`, eine obere Schranke
+(`prompt_tokens` enthält dort die gecachten Tokens mit).
 
 ### Dynamisches Modell-Laden (Server)
 
@@ -289,12 +291,18 @@ Lade-Reihenfolge der Registry: JSON → CSV → `CoreModels`. Semikolon-getrennt
 ```
 id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
 ```
-Optional danach `;provider;provider_code;upstream_id` — so exportiert
-`GET /api/models?format=csv` (`sigoengine.WriteModelsCSV`, Kopfzeile mit
-`#` = Parser-Kommentar). Beim Laden wird nur `upstream_id` übernommen
-(nötig für `ci-*`), Provider wird neu berechnet.
+Optional danach `;provider;provider_code;upstream_id;cached_input_cost` — so
+exportiert `GET /api/models?format=csv` (`sigoengine.WriteModelsCSV`,
+Kopfzeile mit `#` = Parser-Kommentar). Beim Laden werden `upstream_id`
+(nötig für `ci-*`) und `cached_input_cost` übernommen, Provider wird neu
+berechnet.
 `requires_completion_tokens=true` → Modell nutzt `max_completion_tokens` statt
 `max_tokens` (z.B. GPT-5). `apikey` ist der ENV-Var-Name (leer bei Ollama).
+`cached_input_cost` ($/1M Cache-Read-Tokens, 0 = kein bekannter Rabatt) —
+aktuell nur von cheaperinference befüllt (`pricing.cache_read_input_per_million`);
+Mammouth/Moonshot/ZAI/Longcat liefern keinen solchen Preis, Cache-Reads
+zählen dort weiterhin voll zum `input_cost` (obere Schranke, siehe
+`CalcCostUSD` in `sigoengine/costdb.go`).
 
 ### Ollama Auto-Discovery
 

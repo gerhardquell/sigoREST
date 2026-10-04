@@ -20,7 +20,7 @@ import (
 var modelsCSVHeader = []string{
 	"# id", "shortcode", "endpoint", "apikey", "max_input", "max_output",
 	"input_cost", "output_cost", "min_temp", "max_temp", "requires_completion_tokens",
-	"provider", "provider_code", "upstream_id",
+	"provider", "provider_code", "upstream_id", "cached_input_cost",
 }
 
 // WriteModelsCSV schreibt die Modelle semikolon-getrennt nach w, sortiert nach
@@ -55,7 +55,7 @@ func WriteModelsCSV(w io.Writer, models []Model) error {
 			strconv.Itoa(m.MaxInputTokens), strconv.Itoa(m.MaxOutputTokens),
 			ff(m.InputCost), ff(m.OutputCost), ff(m.MinTemperature), ff(m.MaxTemperature),
 			strconv.FormatBool(m.RequiresCompletionTokens),
-			r.provider, ProviderCode(r.provider), m.UpstreamID,
+			r.provider, ProviderCode(r.provider), m.UpstreamID, ff(m.CachedInputCost),
 		}); err != nil {
 			return err
 		}

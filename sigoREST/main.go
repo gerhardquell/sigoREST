@@ -63,7 +63,7 @@ const streamWriteDeadlineExtension = 5 * time.Minute
 // Gibt den akkumulierten Text, die Provider-usage aus dem letzten Chunk vor
 // [DONE] (nil, wenn keine Provider-usage im Stream auftauchte) und einen
 // Fehler zurück.
-func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string, inputCostPerM, outputCostPerM float64) (string, *sigoengine.UsageData, error) {
+func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadCloser, model string, inputCostPerM, outputCostPerM, cachedInputCostPerM float64) (string, *sigoengine.UsageData, error) {
 	defer stream.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -159,7 +159,7 @@ func (s *Server) streamProviderResponse(w http.ResponseWriter, stream io.ReadClo
 	if usage != nil {
 		if data, err := json.Marshal(map[string]interface{}{
 			"choices": []interface{}{},
-			"usage":   buildChatUsage(usage, inputCostPerM, outputCostPerM),
+			"usage":   buildChatUsage(usage, inputCostPerM, outputCostPerM, cachedInputCostPerM),
 		}); err == nil {
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
@@ -191,8 +191,9 @@ type ModelInfo struct {
 	APIKey                   string  `json:"apikey"`
 	MaxInputTokens           int     `json:"max_input_tokens"`
 	MaxOutputTokens          int     `json:"max_output_tokens"`
-	InputCost                float64 `json:"input_cost"`  // $/1M tokens
-	OutputCost               float64 `json:"output_cost"` // $/1M tokens
+	InputCost                float64 `json:"input_cost"`                  // $/1M tokens
+	OutputCost               float64 `json:"output_cost"`                 // $/1M tokens
+	CachedInputCost          float64 `json:"cached_input_cost,omitempty"` // $/1M Cache-Read-Tokens, 0 = kein bekannter Rabatt
 	MinTemperature           float64 `json:"min_temperature"`
 	MaxTemperature           float64 `json:"max_temperature"`
 	RequiresCompletionTokens bool    `json:"requires_completion_tokens"`
@@ -413,6 +414,7 @@ func modelInfoFromEngine(m sigoengine.Model) ModelInfo {
 		MaxOutputTokens:          m.MaxOutputTokens,
 		InputCost:                m.InputCost,
 		OutputCost:               m.OutputCost,
+		CachedInputCost:          m.CachedInputCost,
 		MinTemperature:           m.MinTemperature,
 		MaxTemperature:           m.MaxTemperature,
 		RequiresCompletionTokens: m.RequiresCompletionTokens,
@@ -434,6 +436,7 @@ func modelInfoToEngine(id string, info ModelInfo) sigoengine.Model {
 		MaxOutputTokens:          info.MaxOutputTokens,
 		InputCost:                info.InputCost,
 		OutputCost:               info.OutputCost,
+		CachedInputCost:          info.CachedInputCost,
 		MinTemperature:           info.MinTemperature,
 		MaxTemperature:           info.MaxTemperature,
 		RequiresCompletionTokens: info.RequiresCompletionTokens,
@@ -600,7 +603,7 @@ type CompletionTokensDetails struct {
 // (inkl. cost_usd aus den Modell-Preisen). Gemeinsam genutzt von der
 // Non-Streaming-Antwort (handleChatCompletions) und dem synthetischen
 // Usage-Chunk, den streamProviderResponse vor [DONE] einschiebt.
-func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM float64) *ChatUsage {
+func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM, cachedInputCostPerM float64) *ChatUsage {
 	cu := &ChatUsage{
 		PromptTokens:     u.InputTokens,
 		CompletionTokens: u.OutputTokens,
@@ -613,7 +616,8 @@ func buildChatUsage(u *sigoengine.UsageData, inputCostPerM, outputCostPerM float
 		cu.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: u.ReasoningTokens}
 	}
 	_, _, cu.CostUSD = sigoengine.CalcCostUSD(
-		int64(u.InputTokens), int64(u.OutputTokens), inputCostPerM, outputCostPerM,
+		int64(u.InputTokens), int64(u.OutputTokens), int64(u.CachedTokens),
+		inputCostPerM, outputCostPerM, cachedInputCostPerM,
 	)
 	return cu
 }
@@ -798,8 +802,8 @@ func (s *Server) recordUsageWithSession(modelID string, ch *sigoengine.Channel, 
 	var inCost, outCost, total float64
 	if exists {
 		inCost, outCost, total = sigoengine.CalcCostUSD(
-			int64(usage.InputTokens), int64(usage.OutputTokens),
-			info.InputCost, info.OutputCost,
+			int64(usage.InputTokens), int64(usage.OutputTokens), int64(usage.CachedTokens),
+			info.InputCost, info.OutputCost, info.CachedInputCost,
 		)
 	}
 	provider := s.providerForModel(modelID)
@@ -1147,7 +1151,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// WriteHeader(200) aufgerufen (erste Anweisung der Funktion) —
 				// egal ob sie am Ende erfolgreich zurückkehrt oder nicht.
 				streamStarted = true
-				text, u, e := s.streamProviderResponse(w, stream, req.Model, modelInfo.InputCost, modelInfo.OutputCost)
+				text, u, e := s.streamProviderResponse(w, stream, req.Model, modelInfo.InputCost, modelInfo.OutputCost, modelInfo.CachedInputCost)
 				if e != nil {
 					return e
 				}
@@ -1289,7 +1293,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Usage akkumulieren
-	chatUsage := buildChatUsage(responseUsage, modelInfo.InputCost, modelInfo.OutputCost)
+	chatUsage := buildChatUsage(responseUsage, modelInfo.InputCost, modelInfo.OutputCost, modelInfo.CachedInputCost)
 	s.recordUsageWithSession(modelID, successfulCh, responseUsage, req.SessionID)
 
 	// Bei echtem Streaming wurde die Antwort bereits geschrieben.

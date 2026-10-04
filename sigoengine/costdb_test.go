@@ -33,7 +33,7 @@ func TestOpenCostDB_CreatesSchemaAndDefaultBudget(t *testing.T) {
 }
 
 func TestCalcCostUSD(t *testing.T) {
-	in, out, total := CalcCostUSD(1_000_000, 500_000, 2.0, 8.0)
+	in, out, total := CalcCostUSD(1_000_000, 500_000, 0, 2.0, 8.0, 0)
 	if in != 2.0 {
 		t.Errorf("input cost = %.4f, erwartet 2.0", in)
 	}
@@ -46,9 +46,44 @@ func TestCalcCostUSD(t *testing.T) {
 }
 
 func TestCalcCostUSD_ZeroPriceForFreeModels(t *testing.T) {
-	in, out, total := CalcCostUSD(100_000, 50_000, 0, 0)
+	in, out, total := CalcCostUSD(100_000, 50_000, 0, 0, 0, 0)
 	if in != 0 || out != 0 || total != 0 {
 		t.Errorf("erwarte 0-Kosten für Ollama-artige Modelle, bekam in=%.4f out=%.4f total=%.4f", in, out, total)
+	}
+}
+
+// TestCalcCostUSD_CachedTokensAtDiscountRate: TODO-20261003-kosten.md Punkt 6
+// — cheaperinference liefert einen eigenen (deutlich günstigeren)
+// Cache-Read-Preis (cache_read_input_per_million). Von 1M Input-Tokens
+// seien 900k Cache-Reads (@ 0,25 $/1M) und 100k normale Input-Tokens
+// (@ 5 $/1M): 0,9*0,25 + 0,1*5 = 0,225 + 0,5 = 0,725 statt 5,0 bei voller
+// Bepreisung aller Input-Tokens.
+func TestCalcCostUSD_CachedTokensAtDiscountRate(t *testing.T) {
+	in, out, total := CalcCostUSD(1_000_000, 100_000, 900_000, 5.0, 10.0, 0.25)
+	if in != 0.725 {
+		t.Errorf("input cost = %.4f, erwartet 0.725", in)
+	}
+	if out != 1.0 {
+		t.Errorf("output cost = %.4f, erwartet 1.0", out)
+	}
+	if total != 1.725 {
+		t.Errorf("total cost = %.4f, erwartet 1.725", total)
+	}
+}
+
+// TestCalcCostUSD_NoCachedPriceMeansFullInputPriceForCachedTokens: ohne
+// bekannten Cache-Preis (cachedInputCostPerM == 0, z.B. Mammouth/Moonshot/
+// ZAI/Longcat — keiner davon liefert einen Rabatt-Preis) bleibt das
+// bisherige Verhalten: cachedTokens fließen NICHT gesondert ein, alle
+// Input-Tokens zum vollen InputCost — weiterhin eine obere Schranke.
+func TestCalcCostUSD_NoCachedPriceMeansFullInputPriceForCachedTokens(t *testing.T) {
+	withCached, _, _ := CalcCostUSD(1_000_000, 0, 900_000, 5.0, 0, 0)
+	withoutCached, _, _ := CalcCostUSD(1_000_000, 0, 0, 5.0, 0, 0)
+	if withCached != withoutCached {
+		t.Fatalf("cachedTokens ohne cachedInputCostPerM dürfen die Kosten nicht ändern: mit=%.4f ohne=%.4f", withCached, withoutCached)
+	}
+	if withCached != 5.0 {
+		t.Fatalf("erwartet weiterhin volle Bepreisung (5.0), bekommen %.4f", withCached)
 	}
 }
 

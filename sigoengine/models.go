@@ -22,6 +22,7 @@ type Model struct {
 	MaxTemperature           float64 // Maximale Temperatur
 	RequiresCompletionTokens bool    // Nutzt max_completion_tokens statt max_tokens (GPT-5)
 	UpstreamID               string  // Realer Modellname beim Provider, falls ≠ ID (z.B. Aggregator-Präfix "ci-"); leer = ID wird 1:1 gesendet
+	CachedInputCost          float64 // Kosten pro 1M Cache-Read-Input-Tokens ($), 0 = kein bekannter Rabatt (voller InputCost gilt dann auch für Cache-Reads)
 }
 
 // CoreModels enthält das Minimal-Set eingebetteter Modelle (Fallback)

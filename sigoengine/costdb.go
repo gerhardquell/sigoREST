@@ -187,8 +187,22 @@ func (c *CostDB) migrate() error {
 
 // CalcCostUSD rechnet Token-Zahlen anhand der Modell-Preise ($/1M Tokens)
 // in USD um. Negative/fehlende Preise (0) ergeben 0 Kosten (z.B. Ollama).
-func CalcCostUSD(inputTokens, outputTokens int64, inputCostPerM, outputCostPerM float64) (inCost, outCost, total float64) {
-	inCost = float64(inputTokens) / 1_000_000.0 * inputCostPerM
+// cachedTokens werden, wenn cachedInputCostPerM > 0 bekannt ist (aktuell nur
+// cheaperinference liefert einen solchen Cache-Read-Preis), zum günstigeren
+// Cache-Satz statt zum normalen InputCost abgerechnet. Ist cachedInputCostPerM
+// 0 (kein bekannter Rabatt — Mammouth/Moonshot/ZAI/Longcat), bleibt das
+// bisherige Verhalten: alle Input-Tokens voll zum InputCost, weiterhin eine
+// obere Schranke.
+func CalcCostUSD(inputTokens, outputTokens, cachedTokens int64, inputCostPerM, outputCostPerM, cachedInputCostPerM float64) (inCost, outCost, total float64) {
+	if cachedInputCostPerM > 0 && cachedTokens > 0 {
+		if cachedTokens > inputTokens {
+			cachedTokens = inputTokens
+		}
+		uncachedTokens := inputTokens - cachedTokens
+		inCost = float64(uncachedTokens)/1_000_000.0*inputCostPerM + float64(cachedTokens)/1_000_000.0*cachedInputCostPerM
+	} else {
+		inCost = float64(inputTokens) / 1_000_000.0 * inputCostPerM
+	}
 	outCost = float64(outputTokens) / 1_000_000.0 * outputCostPerM
 	total = inCost + outCost
 	return
