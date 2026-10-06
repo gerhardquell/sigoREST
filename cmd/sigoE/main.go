@@ -24,19 +24,20 @@ import (
 	"sigorest/sigoengine"
 )
 
+// providerForModelCLI nutzt die kanonische Provider-Erkennung
+// (sigoengine.ResolveProvider), geteilt mit Server und Kosten-Tracking.
+// Ersetzt eine veraltete Kopie, die nur Mammouth/Moonshot/ZAI kannte und
+// jedes andere Modell (Longcat, cheaperinference, Ollama, künftig
+// OpenRouter) fälschlich auf "mammouth" zurückfallen ließ — Kanal-
+// Resolution lief dann mit falschem Provider (ChannelManager.Resolve
+// scheitert oder nutzt den falschen API-Key).
 func providerForModelCLI(model string) string {
 	id := sigoengine.ResolveModelName(model)
+	endpoint := ""
 	if m, ok := sigoengine.GetModelByID(id); ok {
-		switch {
-		case strings.HasPrefix(m.APIKeyEnv, "MAMMOUTH"):
-			return "mammouth"
-		case strings.HasPrefix(m.APIKeyEnv, "MOONSHOT"):
-			return "moonshot"
-		case strings.HasPrefix(m.APIKeyEnv, "ZAI"):
-			return "zai"
-		}
+		endpoint = m.Endpoint
 	}
-	return "mammouth"
+	return sigoengine.ResolveProvider(endpoint, id)
 }
 
 func main() {

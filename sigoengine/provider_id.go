@@ -33,6 +33,7 @@ var providerCodes = map[string]string{
 	"longcat":          "longc",
 	"cheaperinference": "cheap",
 	"ollama":           "ollam",
+	"openrouter":       "openr",
 }
 
 // ProviderCode normiert einen Provider-Namen auf genau 5 Zeichen:
@@ -67,6 +68,8 @@ func ProviderFromEndpoint(endpoint string) string {
 		return "longcat"
 	case strings.Contains(endpoint, "cheaperinference"):
 		return "cheaperinference"
+	case strings.Contains(endpoint, "openrouter"):
+		return "openrouter"
 	case strings.Contains(endpoint, "localhost:11434"), strings.Contains(endpoint, "127.0.0.1:11434"):
 		return "ollama"
 	default:
@@ -91,6 +94,10 @@ func ProviderFromModelID(modelID string) string {
 		return "longcat"
 	case strings.HasPrefix(lower, "ci-"):
 		return "cheaperinference"
+	case strings.Contains(lower, "/"):
+		// OpenRouter-IDs sind "<provider>/<modell>" (z.B. "anthropic/claude-opus-5") —
+		// kein anderer Provider nutzt "/" in seinen IDs, eindeutiges Signal.
+		return "openrouter"
 	default:
 		return "mammouth"
 	}

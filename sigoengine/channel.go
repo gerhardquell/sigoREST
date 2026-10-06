@@ -195,6 +195,7 @@ var knownProviders = []struct {
 	{"ZAI_API_KEY", "zai"},
 	{"LONGCAT_API_KEY", "longcat"},
 	{"OMNIROUTE_API_KEY", "cheaperinference"},
+	{"OPENROUTER_API_KEY", "openrouter"},
 }
 
 // DiscoverFromEnv scans environment variables for provider API keys.

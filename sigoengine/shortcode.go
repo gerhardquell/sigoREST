@@ -163,6 +163,13 @@ var variantMap = map[string]string{
 	"opus":       "o",
 	"haiku":      "h",
 	"auto":       "auto",
+	// OpenRouter-Suffixe (":batch", ":free", ...) — selbe Kategorie wie
+	// "beta"/"thinking" oben, nur mit ":" statt "-" an die ID angehängt.
+	"batch":    "bat",
+	"free":     "free",
+	"nitro":    "ni",
+	"floor":    "flr",
+	"extended": "ext",
 	// Ignorierte Varianten (leerer String)
 	"base":   "",
 	"latest": "",
@@ -280,9 +287,15 @@ func GenerateShortcode(modelID string, used map[string]bool) string {
 	}
 
 	// 2. Parts splitten
+	// Sowohl "-" (z.B. "claude-opus-4.5") als auch ":" (OpenRouter-Suffixe
+	// wie "claude-opus-4.5:batch") trennen Varianten ab — ":" sonst würde
+	// als Teil des letzten Zahlen-/Wort-Parts landen und nie gegen
+	// variantMap matchen.
 	parts := []string{}
 	if rest != "" {
-		parts = strings.Split(rest, "-")
+		parts = strings.FieldsFunc(rest, func(r rune) bool {
+			return r == '-' || r == ':'
+		})
 	}
 
 	// 3. Struktur erkennen: [subfamily] [version] [variant...]

@@ -131,7 +131,7 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 | `Log*()` | Thread-safes Logging (DEBUG/INFO/WARN/ERROR/FATAL) |
 | `DiscoverOllamaModels(endpoint)` | Auto-Discovery lokaler LLMs |
 | `ResolveModelName(shortcode)` | Shortcode → vollständiger Name |
-| `Fetch{Mammouth,Moonshot,ZAI,Longcat,Cheaperinference}Models()` | Dynamischer Modell-Abruf pro Provider |
+| `Fetch{Mammouth,Moonshot,ZAI,Longcat,Cheaperinference,OpenRouter}Models()` | Dynamischer Modell-Abruf pro Provider |
 | `FetchWithRetry(name, attempts, backoff, fn)` | Retry-Wrapper mit Backoff um einen Fetcher |
 | `GenerateShortcode(id, used)` | Sprechender Shortcode aus Modellname |
 | `ChannelRegistry` / `ChannelManager` | Multi-Channel-Verwaltung + Failover-Auflösung |
@@ -260,7 +260,7 @@ als `price_known: {"<model-id>": bool}` neben der gewohnten Zusammenfassung.
 
 ### Dynamisches Modell-Laden (Server)
 
-`loadModelsFromProviders()` ruft beim Start sequenziell fünf Provider-APIs ab.
+`loadModelsFromProviders()` ruft beim Start sequenziell sechs Provider-APIs ab.
 Jeder Fetcher ist in `FetchWithRetry` gewickelt (4 Versuche, 2s/4s/8s Backoff).
 Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
 
@@ -272,6 +272,7 @@ Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
 | ZAI (`ZAI_API_KEY`) | `return zaiStaticModels, nil` | statische Modelle |
 | Longcat (`LONGCAT_API_KEY`) | `return longcatKnownModels, nil` | statische Modelle |
 | cheaperinference (`OMNIROUTE_API_KEY`) | `return nil, err` | 0 Modelle (kein Static-Fallback — Preise sind der Zweck) |
+| OpenRouter (`OPENROUTER_API_KEY`) | `return nil, err` | 0 Modelle (kein Static-Fallback — Preise sind der Zweck, wie cheaperinference) |
 
 → Wenn beim Boot nur die statischen ZAI/Longcat-Modelle erscheinen ("no such
 host" im Log): DNS war beim Start noch nicht oben. Schutz: systemd-Unit mit
@@ -291,6 +292,54 @@ Mammouth/Moonshot/ZAI laufen und sonst die ID-Map kollidieren würde.
 `handleChatCompletions` wird `cfg.Model` (nicht nur `cfg.Endpoint`) damit
 überschrieben, sonst schickt der Server `"ci-claude-opus-5"` als `model`-Feld
 raus, das die API nicht kennt.
+
+**OpenRouter — Aggregator mit Vendor-Präfix in der ID:** `GET /v1/models`
+ist öffentlich (kein Key nötig laut OpenRouter-Doku, Fetcher schickt ihn
+trotzdem mit — konsistent zu den anderen Bearer-Fetchern) und liefert live
+Preise (`pricing.prompt`/`completion`/`input_cache_read`, **USD pro Token**,
+nicht USD/1M wie der Rest der Registry — Fetcher multipliziert ×1e6),
+Kontextfenster (`context_length`) und `top_provider.max_completion_tokens`.
+Gefiltert auf `architecture.modality` mit Text-Output (Suffix `->text`),
+sonst landen auch reine Bild-/Audio-Ausgabe-Modelle in der Chat-Liste.
+IDs sind bereits `<vendor>/<modell>` (z.B. `anthropic/claude-opus-5`) und
+werden unverändert als `model`-Feld an die API geschickt — kein
+`UpstreamID`-Mapping wie bei cheaperinference nötig, keine ID-Kollision mit
+anderen Fetchern (deren IDs kein `/` enthalten).
+**Shortcode-Falle dabei gefunden:** `GenerateShortcode` erkennt Familien nur
+am Anfang des Strings (`"claude-..."`, `"gpt-..."`). Ungekürzt auf die volle
+OpenRouter-ID angewandt, matcht das nie — alle Modelle eines Vendors landen
+über den Cutter-Fallback auf praktisch demselben Code (`anthropic/...` →
+immer der Cutter-Code von `"anthropic"`, nicht vom eigentlichen Modellnamen).
+Fix in `FetchOpenRouterModels`: Vendor-Teil vor dem `/` abschneiden, erst der
+Rest geht in `generateProviderShortcode` — `anthropic/claude-opus-5` erkennt
+dann korrekt die Familie `claude`.
+
+**`:batch`-Varianten werden komplett gefiltert, nicht nur umbenannt.**
+Erst beim echten Chat-Call aufgefallen: OpenRouter lehnt `:batch`-IDs über
+`/chat/completions` mit HTTP 404 ab ("cannot be used with the
+chat/completions endpoint") — sie laufen über eine separate Async-Batch-API
+mit eigenem Adapter, die sigoREST nicht anbietet. Jeder `:batch`-Shortcode
+wäre also ein toter Eintrag, der bei jedem Call scheitert. Fix in
+`FetchOpenRouterModels`: IDs mit `strings.HasSuffix(item.ID, ":batch")`
+werden schon beim Fetch verworfen (73 von 449 betroffen, Stand 2026-10-06).
+Andere `:`-Suffixe (`:free`, `:beta`, `:nitro`, `:floor`, `:extended`) sind
+normale Chat-Completion-Routing-Modifier und bleiben drin.
+
+**Shortcode-Falle `:`-Suffixe allgemein (nicht nur `:batch`).**
+`GenerateShortcode` splittete Parts bisher nur auf `-` — ein ganzer
+`:free`/`:beta`/...-Teil landete als ein Stück im Cutter-Fallback statt in
+`variantMap` erkannt zu werden (`cl45:free-o` statt etwas Sprechendem).
+Fix in `shortcode.go`: Split jetzt über `strings.FieldsFunc` auf `-` UND
+`:`, `variantMap` um `batch`/`free`/`nitro`/`floor`/`extended` ergänzt
+(dieselbe Kategorie wie `beta`/`thinking`, nur anders delimitiert) →
+`claude-opus-4.5:free` → `cl45-ofree`. Der `batch`-Eintrag in `variantMap`
+bleibt trotz des Filters harmlos drin (greift nur, falls doch mal ein
+Modellname das Wort "batch" hyphen-getrennt enthält).
+Eine vorbestehende Marotte bleibt unverändert: Modelle ohne Ziffern-Version
+vor dem ersten erkannten Varianten-Wort (z.B. `claude-fable-5.1:free`,
+`gpt-oss-120b:free`) lassen das erste Treffer-Wort als "Subfamily" vorn
+landen (`cl-freef025.1` statt `cl-f025.1free`) — dieselbe Ursache wie das
+dokumentierte `fable`-Kuriosum, kein neuer Bug.
 
 **Shortcode-Generierung:** `GenerateShortcode` (in `shortcode.go`) baut sprechende
 Kürzel: Familie (longest-prefix, z.B. `gpt`/`claude→cl`/`gemini→gem`) + Subfamily
@@ -511,15 +560,15 @@ Anzeige-Zwecke). Jetzt eine kanonische Quelle:
   (`mammouth`, `moonshot`, `z.ai`, `longcat`, `cheaperinference`,
   `localhost:11434`/`127.0.0.1:11434` → `ollama`); `""` bei keinem Match
 - `ProviderFromModelID(modelID)` — Namens-Heuristik als Fallback
-  (`ollama-`-Präfix, `kimi`, `glm`, `longcat`, `ci-`-Präfix), Default
-  `"mammouth"`
+  (`ollama-`-Präfix, `kimi`, `glm`, `longcat`, `ci-`-Präfix, `/` →
+  `openrouter` — einzige IDs mit Slash), Default `"mammouth"`
 - `ResolveProvider(endpoint, modelID)` — kombiniert beide: Endpoint
   zuerst (zuverlässiger, vom Server selbst gesetzt), Namens-Heuristik
   nur als Fallback
 - `ProviderCode(provider)` — normiert auf festen 5-Zeichen-Code
   (`providerCodes`-Map: `mammo`, `moons`, `zai__`, `longc`, `cheap`,
-  `ollam`; unbekannte Provider werden mit `_` aufgefüllt bzw. hart auf 5
-  Zeichen gekappt)
+  `ollam`, `openr`; unbekannte Provider werden mit `_` aufgefüllt bzw.
+  hart auf 5 Zeichen gekappt)
 
 Genutzt von `sigoREST/main.go` (`providerForModel`/
 `providerForModelLocked` sind dünne Wrapper, die die alte Logik
@@ -537,6 +586,14 @@ ersetzen), `/api/shortlist`, `/api/models` (`provider`/`provider_code`),
 2. **Ollama fiel auf `mammouth` zurück**: die alte Heuristik kannte
    weder `localhost:11434` noch das `ollama-`-Präfix — jetzt in
    `ProviderFromEndpoint`/`ProviderFromModelID` explizit behandelt.
+3. **CLI hatte eine zweite, unvollständige Kopie dieser Logik**
+   (`cmd/sigoE/main.go:providerForModelCLI`, eigener Switch nur für
+   Mammouth/Moonshot/ZAI): beim OpenRouter-Rollout aufgefallen, weil
+   `-m <openrouter-shortcode>` sonst auf den `mammouth`-Kanal mit
+   `MAMMOUTH_API_KEY` statt `OPENROUTER_API_KEY` gelaufen wäre — betraf
+   schon vorher jedes Longcat-/cheaperinference-Modell in der CLI,
+   nur unbemerkt. Fix: `providerForModelCLI` delegiert jetzt an
+   `ResolveProvider` statt eine eigene Heuristik zu pflegen.
 
 ### Anthropic-Messages-Bridge (`/v1/messages`)
 
@@ -593,7 +650,7 @@ sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
 - **Go-Modul**: `sigorest` mit Go 1.26
 - **Embedded Files**: nur `memory.json` eingebettet (Disk hat Vorrang); Server-Modelle kommen dynamisch von den Providern, nicht aus einer embedded CSV
 - **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-/Longcat-Fallback-Liste (DNS-Race)
-- **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference)
+- **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference), `OPENROUTER_API_KEY`
 - **Kosten-DB**: `costs.db` (SQLite/WAL) im `-data-dir`; `modernc.org/sqlite` (pure Go) — kein CGO-Zwang im Build, bewusst analog zur Hermes-`state.db`-Entscheidung (lokaler Single-Process-Store, kein Netzwerk-Overhead)
 - **Shortcode-DB**: `id_registry.db` (SQLite/WAL) im `-data-dir`, gleicher Treiber wie `costs.db`; hält Provider-Kürzel und Modell-Shortcodes assign-once fest (nie wiederverwendet) — Details unter "ID-/Shortcode-Registry"
 - **Scope-Grenze**: sigoREST bleibt schlanker Proxy, kein Agent-Harness — bewusst kein Tool-Call-Repair o.ä.

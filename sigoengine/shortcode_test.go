@@ -74,6 +74,16 @@ func TestGenerateShortcode(t *testing.T) {
 		{"sonar-pro", "son-p"},
 		{"codestral-2508", "cstr2508"},
 		{"devstral-2512", "dvstr2512"},
+		// OpenRouter ":"-Suffixe — eigene Shortcode-Tests statt nur manuell
+		// geprüft, siehe CLAUDE.md "OpenRouter — Aggregator mit
+		// Vendor-Präfix in der ID". ":batch" wird inzwischen schon beim
+		// Fetch gefiltert (404 über /chat/completions), der generische
+		// Split-Mechanismus in GenerateShortcode muss trotzdem für jeden
+		// ":"-Suffix funktionieren — ":free" ist der tatsächlich noch
+		// genutzte Fall.
+		{"claude-opus-4.5:batch", "cl45-obat"},
+		{"gpt-5:batch", "gpt5-bat"},
+		{"gemini-3.6-flash:free", "gem36-ffree"},
 	}
 
 	used := make(map[string]bool)

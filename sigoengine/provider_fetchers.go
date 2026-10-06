@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,6 +25,7 @@ const (
 	// (TODO 20260830 nannte fälschlich .ai — per Doku-Recherche korrigiert).
 	longcatChatEndpoint          = "https://api.longcat.chat/openai/v1/chat/completions"
 	cheaperinferenceChatEndpoint = "https://api.cheaperinference.com/v1/chat/completions"
+	openrouterChatEndpoint       = "https://openrouter.ai/api/v1/chat/completions"
 )
 
 // Provider-Model-Listen-Endpoints (GET, kostenlos — keine Token-Billing).
@@ -36,6 +38,7 @@ const (
 	longcatModelsEndpoint  = "https://api.longcat.chat/openai/v1/models" // Bearer
 
 	cheaperinferenceModelsEndpoint = "https://api.cheaperinference.com/v1/models" // Bearer
+	openrouterModelsEndpoint       = "https://openrouter.ai/api/v1/models"        // öffentlich, Bearer optional
 )
 
 // **********************************************************************
@@ -642,5 +645,119 @@ func FetchCheaperinferenceModels() ([]Model, error) {
 	}
 
 	LogInfo("Cheaperinference-Modelle geladen", map[string]interface{}{"count": len(result)})
+	return result, nil
+}
+
+// **********************************************************************
+// FetchOpenRouterModels ruft https://openrouter.ai/api/v1/models ab
+// (OPENROUTER_API_KEY, Bearer Token). Wie cheaperinference ein Aggregator
+// mit Preisen + Kontextfenster direkt in der Liste — kein statisches
+// Known-Model-Mapping nötig. Preise kommen als USD/Token (String), nicht
+// USD/1M wie der Rest der Registry — *1e6 zur Umrechnung.
+//
+// Kein ID-Präfix nötig: OpenRouter-IDs sind bereits "<provider>/<modell>"
+// (z.B. "anthropic/claude-opus-5"), kollidieren also nicht mit den
+// unpräfixten IDs der anderen Fetcher, und die API erwartet exakt diese
+// ID im "model"-Feld — kein UpstreamID-Mapping wie bei cheaperinference.
+// Filter auf architecture.modality mit Text-Output ("->text"), sonst
+// landen auch reine Bild-/Audio-Ausgabe-Modelle in der Chat-Liste.
+func FetchOpenRouterModels() ([]Model, error) {
+	apiKey := GetEnvWithFile("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("openrouter: OPENROUTER_API_KEY nicht gesetzt")
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, openrouterModelsEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: Request-Erstellung fehlgeschlagen: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: GET /v1/models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openrouter: /v1/models returned HTTP %d", resp.StatusCode)
+	}
+
+	var listResp struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ContextLength int    `json:"context_length"`
+			Architecture  struct {
+				Modality string `json:"modality"`
+			} `json:"architecture"`
+			TopProvider struct {
+				MaxCompletionTokens int `json:"max_completion_tokens"`
+			} `json:"top_provider"`
+			Pricing struct {
+				Prompt         string `json:"prompt"`
+				Completion     string `json:"completion"`
+				InputCacheRead string `json:"input_cache_read"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, fmt.Errorf("openrouter: invalid JSON: %w", err)
+	}
+
+	used := make(map[string]bool)
+	var result []Model
+
+	for _, item := range listResp.Data {
+		if item.ID == "" || !strings.HasSuffix(item.Architecture.Modality, "->text") {
+			continue
+		}
+		// ":batch"-Varianten laufen über OpenRouters separate Async-Batch-API
+		// (anderer Adapter), nicht über /chat/completions — jeder Call würde
+		// hier mit HTTP 404 scheitern ("cannot be used with the
+		// chat/completions endpoint"). Andere ":"-Suffixe (":free", ":beta",
+		// ":nitro", ":floor", ":extended") sind normale Chat-Completion-
+		// Routing-Modifier und bleiben drin.
+		if strings.HasSuffix(item.ID, ":batch") {
+			continue
+		}
+
+		inputCost, _ := strconv.ParseFloat(item.Pricing.Prompt, 64)
+		outputCost, _ := strconv.ParseFloat(item.Pricing.Completion, 64)
+		cachedInputCost, _ := strconv.ParseFloat(item.Pricing.InputCacheRead, 64)
+
+		maxOutput := item.TopProvider.MaxCompletionTokens
+		if maxOutput <= 0 {
+			maxOutput = 4096
+		}
+
+		// GenerateShortcode erkennt Familien nur am Anfang der ID
+		// ("claude-...", "gpt-..."). OpenRouter-IDs sind "<vendor>/<modell>"
+		// (z.B. "anthropic/claude-opus-5") — ohne den Vendor-Teil abzuschneiden,
+		// matcht nie eine Familie, und alle Modelle eines Vendors kollabieren
+		// auf denselben Cutter-Code des Vendor-Namens statt des Modellnamens.
+		semanticName := item.ID
+		if idx := strings.LastIndex(semanticName, "/"); idx >= 0 {
+			semanticName = semanticName[idx+1:]
+		}
+		sc := generateProviderShortcode(semanticName, used)
+		used[sc] = true
+
+		result = append(result, Model{
+			ID:              item.ID,
+			Shortcode:       sc,
+			Endpoint:        openrouterChatEndpoint,
+			APIKeyEnv:       "OPENROUTER_API_KEY",
+			MaxInputTokens:  item.ContextLength,
+			MaxOutputTokens: maxOutput,
+			InputCost:       inputCost * 1_000_000,
+			OutputCost:      outputCost * 1_000_000,
+			CachedInputCost: cachedInputCost * 1_000_000,
+			MinTemperature:  0.0,
+			MaxTemperature:  2.0,
+		})
+	}
+
+	LogInfo("OpenRouter-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
 }

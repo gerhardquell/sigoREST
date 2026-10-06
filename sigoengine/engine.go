@@ -1150,6 +1150,8 @@ func modelsEndpointForProvider(provider string) (string, bool) {
 		return longcatModelsEndpoint, true
 	case "cheaperinference":
 		return cheaperinferenceModelsEndpoint, true
+	case "openrouter":
+		return openrouterModelsEndpoint, true
 	default:
 		return "", false
 	}

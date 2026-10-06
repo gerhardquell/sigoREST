@@ -471,6 +471,7 @@ func loadModelsFromProviders(reg *sigoengine.IDRegistry) map[string]ModelInfo {
 		{"zai", sigoengine.FetchZAIModels},
 		{"longcat", sigoengine.FetchLongcatModels},
 		{"cheaperinference", sigoengine.FetchCheaperinferenceModels},
+		{"openrouter", sigoengine.FetchOpenRouterModels},
 	}
 
 	for _, f := range fetchers {
