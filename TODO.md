@@ -77,8 +77,19 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
   inzwischen gelöscht. `KEY_0`/`KEY_1` sind Gerhards Keys
   (`OMNIROUTE_API_KEY_0`/`_1`), nur falsch benannt. Wer sie um 13:23 mit
   `claude-opus-4-7` benutzt hat, ist unbekannt. Die Keys stehen in der
-  Login-Umgebung, jeder Prozess hat sie. Bei einem Leck `KEY_0`/`KEY_1`
-  tauschen.
+  Login-Umgebung (`~/.bashrc`), jeder Prozess hat sie.
+  Dateisuche nach `cheaperinference.com`/`OMNIROUTE_API_KEY` in `~`,
+  `/u`, `/usr/local` und `/etc` ergab keinen lokalen Direkt-Aufrufer. Der
+  pi-Agent (`~/.pi/agent`) geht über sigoREST
+  (`baseUrl http://127.0.0.1:9080/v1`), seine letzte Session war am
+  2026-10-07 um 17:35. Übrig bleiben internes Routing bei cheaperinference
+  oder ein Leck der Keys. Vorschlag:
+  - [ ] `KEY_0`/`KEY_1` vorsorglich tauschen, dann neue Keys in
+    `/usr/local/slib/sigoREST/.env` und `~/.bashrc` eintragen und sigoREST
+    neu starten.
+  - [ ] cheaperinference-Support fragen, warum Calls auf `claude-opus-4-7`
+    mit 0 Tokens unter Gerhards Keys stehen (13:23:29–38), obwohl von ihm
+    in diesem Zeitfenster nur ein `gpt-6-sol`-Call kam.
 - [ ] Mammouth-`Spend=21.68` vs. sigoREST-Anteil diesen Monat nach echten
   Preisen ~$11,60. Der Rest kommt vermutlich aus anderer Nutzung (Web-App)
   oder einem anderen Zeitraum, im Mammouth-Account prüfen.
