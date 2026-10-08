@@ -479,8 +479,15 @@ Tages-/Monats-Ausgaben (`spendSince`, lokale Zeitzone via
 (`budget_config`-Tabelle, Singleton-Zeile). Nur bei `hard_stop_enabled:
 true` UND überschrittenem Limit wird der Call mit `HTTP 402
 budget_exceeded` abgelehnt — Default ist reines Tracking, kein Eingriff.
-Lücke: Modelle ohne Preis (Mammouth liefert keine) buchen $0 — ihr
-Verbrauch zählt nicht gegen das Limit.
+Modelle ohne Preis buchen $0 und zählen nicht gegen das Limit. Mammouth
+fiel bis 2026-10-08 komplett darunter: `/public/models` liefert Preise und
+Limits im LiteLLM-Format verschachtelt unter `model_info`
+(`input_cost_per_token`/`output_cost_per_token`, **USD pro Token** → ×1e6;
+`max_input_tokens`/`max_output_tokens`), der Fetcher las aber nur
+geratene Top-Level-Felder → alles lief über die statische, teils veraltete
+`mammouthKnownModels`-Tabelle (`claude-opus-5-5` $0, `claude-sonnet-5`
+3/15 statt 2/10 $/1M). Jetzt haben die `model_info`-Werte Vorrang, die
+Tabelle ist nur noch Fallback (Test: `sigoengine/mammouth_fetcher_test.go`).
 
 **Provider-Budget erschöpft ≠ Rate-Limit:** Mammouth (LiteLLM-Gateway)
 meldet ein erschöpftes User-Budget als HTTP 429 (`"type":"budget_exceeded"`,

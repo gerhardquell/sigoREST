@@ -225,6 +225,14 @@ type mammouthModel struct {
 	OutputPricePerMillion float64 `json:"output_price_per_million"`
 	InputCost             float64 `json:"input_cost"`
 	OutputCost            float64 `json:"output_cost"`
+	// Tatsächliches Format von /public/models (LiteLLM-Gateway): Preise und
+	// Limits verschachtelt unter model_info, Preise in USD pro TOKEN.
+	ModelInfo *struct {
+		MaxInputTokens     int     `json:"max_input_tokens"`
+		MaxOutputTokens    int     `json:"max_output_tokens"`
+		InputCostPerToken  float64 `json:"input_cost_per_token"`
+		OutputCostPerToken float64 `json:"output_cost_per_token"`
+	} `json:"model_info"`
 }
 
 func parseMammouthResponse(raw json.RawMessage) ([]Model, error) {
@@ -256,9 +264,17 @@ func convertMammouthModels(items []mammouthModel) []Model {
 		maxOut := firstNonZero(m.MaxOutputTokens, m.MaxOutput)
 		inCost := firstNonZeroFloat(m.InputPricePerMillion, m.InputCost)
 		outCost := firstNonZeroFloat(m.OutputPricePerMillion, m.OutputCost)
+		// Live-Werte aus model_info haben Vorrang (USD/Token → $/1M).
+		if mi := m.ModelInfo; mi != nil {
+			maxIn = firstNonZero(mi.MaxInputTokens, maxIn)
+			maxOut = firstNonZero(mi.MaxOutputTokens, maxOut)
+			inCost = firstNonZeroFloat(mi.InputCostPerToken*1_000_000, inCost)
+			outCost = firstNonZeroFloat(mi.OutputCostPerToken*1_000_000, outCost)
+		}
 
-		// Statische Preis-Fallback-Tabelle: Mammouth liefert keine Preise.
-		// Bekannte Modelle werden angereichert (nur Preise/Limits, Shortcode bleibt dynamisch).
+		// Statische Fallback-Tabelle nur noch für Felder, die die API nicht
+		// liefert (bis 2026-10-08 las der Fetcher model_info nicht und lief
+		// komplett über diese teils veraltete Tabelle).
 		if known, ok := mammouthKnownModels[m.ID]; ok {
 			if maxIn == 0 {
 				maxIn = known.MaxInputTokens
