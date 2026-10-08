@@ -4,6 +4,44 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-10-08: Untersuchung "sigoREST ruft konstant KIs ab": Budget-Hard-Stop-Lücke, Provider-Budget-429, Mammouth-Preise (TODO.md 20261008)
+
+**Zielsetzung:**
+Gerhard hatte im cheaperinference-Dashboard eine Serie von `claude-opus-4-7`-Calls mit 0 Tokens über drei Keys gesehen (`sk-...3rXw`, `KEY_0`, `KEY_1`, 13:23:29–38) und vermutete, dass sigoREST dauernd Modelle abruft. Auftrag: untersuchen. Daraus wurden drei Fixes, alle mit Test vorweg, live deployt.
+
+**Was herausgefunden wurde:**
+
+- **sigoREST ruft nichts von selbst ab.** Chat-Calls gibt es nur auf Client-Request; der Health-Monitor fragt nur `GET /models` ab, kein Modell ist fest verdrahtet.
+- **Hauptverbraucher war eine Claude-Code-Session** (golisp2-ide, gestartet über `/usr/local/bin/claude-multi` mit `ANTHROPIC_BASE_URL=127.0.0.1:9080`). `costs.db` zeigte seit 2026-10-07 1148 erfolgreiche Calls auf `ci-gpt-6*`, etwa alle 8 s in drei wachsenden Gesprächssträngen, zusammen $73,81.
+- **Der eigentliche Vorfall dauerte laut Journal nur etwa 70 s** (13:23:43–13:24:40). Ein Client fragte `claude-opus-4-7`, danach `claude-sonnet-4-6` an (nicht gestreamt, Opus→Sonnet-Fallback, in keinem Transkript). sigoREST schickte beide an Mammouth, und Mammouth lehnte jeden Call mit `HTTP 429 "ExceededBudget: User=93085 over budget. Spend=21.68, Budget=20.81"` ab. Das ist ein Ausgabenlimit pro User (LiteLLM-Gateway), unabhängig vom Guthaben, und alle sechs Mammouth-Keys hängen am selben User. sigoREST hielt die 429 für ein Rate-Limit: 4 Versuche mit Backoff pro Kanal, dann der nächste Kanal, bis 12 Circuit Breaker offen waren (6 Kanäle × 2 Modelle).
+- **Die cheaperinference-Zeilen selbst sind nicht aufgeklärt.** sigoREST schickt `claude-opus-4-7` nur an Mammouth und loggte im fraglichen Zeitfenster nichts. `sk-...3rXw` war ein Key von Gerhard, aber nicht der von sigoREST (inzwischen gelöscht). `KEY_0`/`KEY_1` sind Gerhards `OMNIROUTE_API_KEY_0`/`_1`, nur falsch benannt. Der Nutzer ist unbekannt; die Keys stehen in der Login-Umgebung, also hat jeder Prozess sie. Offen in `TODO.md`.
+
+**Was erreicht wurde:**
+
+### 1. Budget-Hard-Stop gilt jetzt auch für `/v1/messages` (`c9e8377`)
+Beim Test-Call kam überraschend `Budget überschritten (Tag: $25.28/$10.00) — Hard-Stop aktiv`: Gerhard hatte ein Tageslimit von $10 mit Hard-Stop gesetzt, trotzdem waren $25 verbraucht. `CheckBudget` wurde nur in `handleChatCompletions` aufgerufen; die Anthropic-Bridge hatte die Prüfung nie bekommen, und Claude Code lief ungebremst darüber. Fix: gemeinsame Methode `Server.budgetBlocked()` für beide Handler, die Bridge antwortet mit `402 billing_error` im Anthropic-Format. Diesen Fehler wiederholt Claude Code nicht, anders als 429. Live geprüft: Call 1 mit 200, danach `blocked:true`, Call 2 mit 402.
+
+### 2. Provider-Budget-429 ohne Retry und ohne Kanalwechsel (`c9e8377`)
+Neue Fehlerklasse `ErrQuotaExceeded`: `classifyHTTPError` erkennt 429/402 mit `budget_exceeded`/`ExceededBudget`/`insufficient_quota` im Body, nicht retrybar, kein Kanalwechsel, Client bekommt 402. Ein normales 429 bleibt Rate-Limit. Der Test mit dem echten Mammouth-Body aus dem Journal zeigte vorher 8 Upstream-Calls (4 Versuche × 2 Kanäle), danach 1. Live ließ sich das nicht mehr nachstellen, weil Mammouth inzwischen wieder antwortete.
+
+### 3. Mammouth-Preise und -Limits aus `model_info` (`ba1a7a2`)
+Auf Gerhards Hinweis `https://api.mammouth.ai/public/models` angesehen: Alle 107 Modelle haben Preise, aber im LiteLLM-Format verschachtelt unter `model_info` (`input_cost_per_token`, **USD pro Token**, dazu `max_input_tokens`/`max_output_tokens`). `mammouthModel` erwartete dagegen geratene Top-Level-Felder (`input_price_per_million`, `context_window`, …), die es nie gab. So lief alles über die statische Tabelle `mammouthKnownModels`: `claude-opus-4-7`/`claude-opus-5-5` mit $0, also am Hard-Stop vorbei, `claude-sonnet-5` mit 3/15 statt 2/10 $/1M. Diesen Monat waren deshalb rund $16 gebucht statt der echten ~$11,60. Jetzt haben die `model_info`-Werte Vorrang, die Tabelle ist nur noch Fallback. Live: 98/98 Mammouth-Modelle mit Preis. Alte `costs.db`-Einträge bewusst nicht rückwirkend korrigiert.
+
+### 4. Außerhalb des Repos
+- Tageslimit per `PUT /api/budget` von $10 auf $80 gesetzt (Hard-Stop bleibt aktiv).
+- `/usr/local/bin/claude-multi`: Drei Modellnamen gaben 404 (`che-gpt5-l88` existiert nicht, Tippfehler `ch-gpt56-s01`). Jetzt: Small-Fast und Haiku `che-gpt5-m`, Subagents `che-gpt56-s01`. Gilt erst für neu gestartete Sessions.
+
+**Learnings:**
+
+1. **In einer Proxy-Kette sieht jede Schicht nur ihren Ausschnitt.** Das Provider-Dashboard zeigt Fehlversuche, `costs.db` nur Erfolge, das Journal nur, was sigoREST selbst gesehen hat. Erst der Abgleich der Zeitstempel aller drei Quellen hat die Bruchstelle (13:23:29) gezeigt und belegt, dass die cheaperinference-Zeilen *nicht* von sigoREST kamen. Die erste Hypothese (Failover über die sigoREST-Kanäle `default`→`0`→`1`) passte optisch perfekt zum Dashboard und war trotzdem falsch; das Journal hat sie widerlegt.
+2. **HTTP 429 hat zwei Bedeutungen.** Ein Rate-Limit ist nach Sekunden vorbei, ein erschöpftes Budget erst beim Reset. Unterscheiden lässt sich das nur am Body. Retry und Failover helfen nur beim ersten Fall; beim zweiten vervielfachen sie nur die abgelehnten Calls.
+3. **Ein zweiter Einstiegspfad braucht dieselben Vorprüfungen.** Die Bridge wurde neben `handleChatCompletions` gebaut und übernahm Kosten-Buchung, Rate-Limiter und Circuit Breaker, aber nicht den Budget-Check. Solche Querschnittsprüfungen gehören in eine gemeinsame Methode, nicht als Kopie in jeden Handler.
+4. **Einen Fetcher immer gegen die echte Response prüfen, nicht gegen geratene Feldnamen.** `mammouthModel` deckte „mögliche Feldnamen“ ab, keiner davon existierte. Die Session vom 2026-10-04 hatte `/public/models` sogar live angesehen, aber nur nach einem Cache-Preis gesucht, und daraus „Mammouth liefert keine Preise“ abgeleitet. Ein `jq '.data[0]'` auf die echte Antwort hätte das Format sofort gezeigt. Jetzt gibt es einen Test mit einem echten Response-Ausschnitt.
+5. **Einen gestoppten Live-Dienst nicht vorschnell sich selbst zuschreiben.** Der Dienst fiel zweimal mit SIGTERM aus. Beim ersten Mal habe ich es meinem `pkill -f` zugeschrieben, ohne Beleg. Beim zweiten Mal hatte Gerhard ihn selbst für das Deployment gestoppt, während ich schon Makefile, Tests und Unit nach einer Ursache durchsuchte. Erst fragen, dann suchen. Test-Server trotzdem nur per PID beenden (Memory `feedback_test_server_kill_by_pid`).
+6. **Fallback-Tabellen veralten still.** `mammouthKnownModels` lieferte für `claude-sonnet-5` einen falschen Preis und für neue Modelle gar keinen, ohne dass es auffiel, weil $0 wie „gratis“ aussieht. Live-Daten haben Vorrang; die Tabelle füllt nur Lücken.
+
+---
+
 ## Session 2026-10-04 (Teil 2): `response_format` durchreichen + `cost_usd: null` bei fehlendem Preis (TODO.md)
 
 **Zielsetzung:**
