@@ -489,6 +489,22 @@ geratene Top-Level-Felder → alles lief über die statische, teils veraltete
 3/15 statt 2/10 $/1M). Jetzt haben die `model_info`-Werte Vorrang, die
 Tabelle ist nur noch Fallback (Test: `sigoengine/mammouth_fetcher_test.go`).
 
+**Stream-Usage ist opt-in (Bug bis 2026-10-08):** OpenAI-kompatible
+Provider schicken im SSE-Stream nur dann einen `usage`-Chunk, wenn
+`stream_options.include_usage` gesetzt ist. sigoREST setzte das nie →
+beide Stream-Pfade (`/v1/messages`, `/v1/chat/completions` mit
+`stream:true`) fielen still auf `EstimateUsage` zurück (Runen/3, kein
+Cache-Rabatt). Claude Code über die Bridge wurde dadurch ~4x zu teuer
+gebucht ($80 statt ~$20 am 2026-10-08), der Hard-Stop griff zu früh.
+Fix: `CallAPIStream` setzt `stream_options:{include_usage:true}` für alle
+Nicht-Anthropic-Provider (ein vom Client gesetzter Wert bleibt erhalten),
+`streamAnthropicResponse` wertet Usage über `ExtractUsage` aus (inkl.
+`cached_tokens`). Tests: `TestCallAPIStream_RequestsUsage`,
+`TestStreamAnthropicResponse_UsageIncludesCachedTokens`. `costs.db`-Werte
+für cheaperinference vor dem Fix sind überhöht (10-08 korrigiert, 10-07
+nicht). Gerhards Tageslimit: $55.93 (= 50 €) mit Hard-Stop, als
+Sicherheitsnetz gegen KI-Schwärme.
+
 **Provider-Budget erschöpft ≠ Rate-Limit:** Mammouth (LiteLLM-Gateway)
 meldet ein erschöpftes User-Budget als HTTP 429 (`"type":"budget_exceeded"`,
 `ExceededBudget: User=… over budget`), unabhängig vom Guthaben. Früher als

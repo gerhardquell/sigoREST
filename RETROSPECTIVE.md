@@ -4,6 +4,44 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-10-08 (Teil 2): Falscher Budget-Hard-Stop durch geschätzte Stream-Usage
+
+**Zielsetzung:**
+Am Abend lehnte sigoREST jeden Call mit "Tageslimit überschritten" ab, und Gerhard stoppte den Dienst. Auftrag: prüfen, ob das Limit ($80, Hard-Stop) wirklich erreicht war.
+
+**Was herausgefunden wurde:**
+
+- Laut `costs.db` war das Limit erreicht: $80.09, davon $79.65 für 1006 Calls auf `ci-gpt-6-sol` (12:49–17:11) mit 68 Mio. Input-Tokens. Auffällig: Bei 709 davon war kein Cache-Rabatt gebucht.
+- Gerhards Abrechnungs-Export von cheaperinference (`cheaper-inference-savings-…-eur.csv`) zeigte für den Tag nur 37,8 Mio. Prompt-Tokens, davon 73 % aus dem Cache, und €18,39 (≈ $20,57). Die Zahl der Requests stimmte fast überein (1042 zu 1024), die Tokens waren bei uns aber 1,8-mal zu hoch und die Kosten fast 4-mal.
+- **Ursache 1:** OpenAI-kompatible Provider schicken beim Streaming nur dann einen `usage`-Chunk, wenn `stream_options.include_usage` gesetzt ist. sigoREST setzte die Option nirgends. Mit einem Mini-Call direkt gegen cheaperinference nachgewiesen: ohne die Option kam kein `usage`, mit der Option kam er vollständig mit `cached_tokens`. Beide Stream-Pfade fielen deshalb still auf `EstimateUsage` zurück (Runen/3 über den ganzen Kontext, kein Cache). Claude Code streamt über `/v1/messages`, also wurde fast jeder Agent-Call geschätzt.
+- **Ursache 2:** Der Stream-Parser der Bridge (`streamAnthropicResponse`) hatte eine eigene, abgespeckte Usage-Auswertung, die nur `prompt_tokens`/`completion_tokens` las. Selbst mit `usage`-Chunk hätte der Cache-Rabatt gefehlt. `streamProviderResponse` (`main.go`) nutzte dagegen schon `ExtractUsage`.
+- Die 297 korrekt rabattierten Calls waren die nicht gestreamten (`CallAPI` → `ExtractUsage`).
+
+**Was erreicht wurde:**
+
+### 1. Fix: Usage im Stream anfordern und vollständig auswerten
+- `CallAPIStream` setzt für alle Nicht-Anthropic-Provider `stream_options:{include_usage:true}`, wenn der Client keinen eigenen Wert mitgibt. Das deckt `/v1/messages` und `/v1/chat/completions` (`stream:true`) an einer Stelle ab.
+- `streamAnthropicResponse` nutzt jetzt `sigoengine.ExtractUsage(chunk, "openai")` wie der Chat-Pfad.
+- Tests vorweg, beide waren vorher rot: `TestCallAPIStream_RequestsUsage` (Body-Prüfung per httptest, Client-Wert bleibt erhalten) und `TestStreamAnthropicResponse_UsageIncludesCachedTokens`.
+- End-to-End auf einem Test-Server (Port 19080): Bridge-Stream mit `ci-gpt-5-mini` bucht echte Tokens und mit warmem Cache den Rabatt ($0.000107 statt $0.000912). ZAI, Moonshot und Mammouth akzeptieren `stream_options` ohne Fehler und liefern jetzt Usage im Stream.
+
+### 2. Datenkorrektur `costs.db` für 2026-10-08 (außerhalb des Repos)
+Die 723 geschätzten cheaperinference-Events des Tages, erkannt am vollen Input-Preis pro Token, wurden proportional so skaliert, dass die Tagessumme genau zur Provider-CSV passt (Tokens ×0,417, Input-Kosten ×0,130). Danach: $20.79 statt $80.09. Echte Events blieben unverändert. Die DB-Dateien gehören root, deshalb lag die korrigierte Kopie im Scratchpad, zum Einspielen mit sudo durch Gerhard (alte `-wal`/`-shm` müssen vorher weg, sonst spielt SQLite die alte WAL auf die neue DB).
+
+Der Tagesvergleich mit der CSV zeigte, dass auch der 2026-10-07 betroffen war ($48.59 gebucht, $7.42 abgerechnet) und dass sigoREST vor dem 2026-10-03 kaum cheaperinference-Calls gesehen hat. Bewusst nicht korrigiert: Gerhard weiß jetzt, ab wann die Zahlen stimmen.
+
+### 3. Tageslimit 50 € (außerhalb des Repos)
+`daily_limit_usd = 55.93` (50 € bei 0,894 EUR/USD), Hard-Stop an. Gerhards Sicherheitsnetz gegen Kostenlawinen bei KI-Schwärmen, nicht als Arbeitsbremse gedacht.
+
+**Learnings:**
+
+1. **Ein stiller Fallback auf eine Schätzung ist ein falscher Messwert ohne Warnung.** `EstimateUsage` sollte Lücken füllen, war aber für den Hauptverkehr (Claude Code, gestreamt) die einzige Quelle. Da der Budget-Hard-Stop darauf beruht, hat die Schätzung den Dienst abgeschaltet. Wer einen Fallback baut, sollte zählen oder loggen, wie oft er greift.
+2. **Abgleich mit der Provider-Abrechnung ist der eigentliche Test für Kosten-Tracking.** Unit-Tests prüften, dass ein `usage`-Chunk korrekt gelesen wird, aber nicht, ob der Provider überhaupt einen schickt. Die CSV hat den Fehler in einer Minute gezeigt.
+3. **Zwei Parser für dasselbe Format laufen auseinander.** Wie bei `providerForModelCLI`: Die Bridge hatte eine eigene Kopie der Usage-Auswertung, die bei der Cache-Rabatt-Erweiterung (2026-10-04) nicht mitgezogen wurde. Jetzt nutzen beide `ExtractUsage`.
+4. **Opt-in-Felder von OpenAI-kompatiblen APIs gehören in die Fetcher-/Call-Checkliste.** `include_usage` ist im OpenAI-Standard opt-in, und kein Provider meldet, dass er ohne die Option nichts schickt.
+
+---
+
 ## Session 2026-10-08: Untersuchung "sigoREST ruft konstant KIs ab": Budget-Hard-Stop-Lücke, Provider-Budget-429, Mammouth-Preise (TODO.md 20261008)
 
 **Zielsetzung:**
