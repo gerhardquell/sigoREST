@@ -790,14 +790,10 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 			continue
 		}
 
-		if u, ok := chunk["usage"].(map[string]interface{}); ok {
-			usage = &sigoengine.UsageData{}
-			if v, ok := u["prompt_tokens"].(float64); ok {
-				usage.InputTokens = int(v)
-			}
-			if v, ok := u["completion_tokens"].(float64); ok {
-				usage.OutputTokens = int(v)
-			}
+		// Dieselbe Auswertung wie streamProviderResponse (main.go), inkl.
+		// prompt_tokens_details.cached_tokens für den Cache-Rabatt.
+		if u := sigoengine.ExtractUsage(chunk, "openai"); u != nil {
+			usage = u
 		}
 
 		choices, ok := chunk["choices"].([]interface{})

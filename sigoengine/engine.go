@@ -1369,6 +1369,16 @@ func CallAPIStream(ctx context.Context, cfg *ProviderConfig, request map[string]
 	LogDebug("Making streaming API request", logF)
 
 	request["stream"] = true
+	// OpenAI-kompatible Provider schicken den usage-Chunk im Stream nur auf
+	// Anfrage. Ohne ihn bleibt dem Aufrufer nur EstimateUsage (ohne
+	// Cache-Rabatt, grob überschätzt) — Kosten-Tracking und Budget-Hard-Stop
+	// lagen dadurch für Claude Code über die Bridge ~4x zu hoch. Ein vom
+	// Client gesetztes stream_options bleibt unangetastet.
+	if cfg.Type != "anthropic" {
+		if _, ok := request["stream_options"]; !ok {
+			request["stream_options"] = map[string]interface{}{"include_usage": true}
+		}
+	}
 
 	jsonData, err := json.Marshal(request)
 	if err != nil {

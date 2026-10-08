@@ -465,6 +465,29 @@ func TestStreamAnthropicResponse_UsageCapturedAndIncludesInputTokens(t *testing.
 	}
 }
 
+// TestStreamAnthropicResponse_UsageIncludesCachedTokens: TODO 20261008 —
+// der Bridge-Stream las nur prompt_tokens/completion_tokens, nie
+// prompt_tokens_details.cached_tokens. Agent-Loops (Claude Code) mit ~70 %
+// Cache-Anteil wurden dadurch voll zum Input-Preis gebucht.
+func TestStreamAnthropicResponse_UsageIncludesCachedTokens(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	sse := `data: {"choices":[{"delta":{"content":"Hallo"}}]}` + "\n\n"
+	sse += `data: {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":800}}}` + "\n\n"
+	sse += "data: [DONE]\n\n"
+
+	_, usage, err := srv.streamAnthropicResponse(httptest.NewRecorder(), io.NopCloser(strings.NewReader(sse)), "ci-gpt-6-sol")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if usage == nil {
+		t.Fatalf("expected non-nil usage")
+	}
+	if usage.InputTokens != 1000 || usage.OutputTokens != 5 || usage.CachedTokens != 800 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+}
+
 // TestStreamAnthropicResponse_ExtendsWriteDeadlinePerChunk: TODO-20261003-kosten.md
 // Punkt 3 — derselbe 5-Minuten-WriteTimeout-Bug wie bei streamProviderResponse
 // (main.go) betrifft auch die Anthropic-Bridge: jedes writeAnthropicSSEEvent
