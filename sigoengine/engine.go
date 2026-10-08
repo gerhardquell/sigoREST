@@ -51,6 +51,10 @@ const (
 	ErrTimeout     = "TIMEOUT"
 	ErrServerError = "SERVER_ERROR"
 	ErrClientError = "CLIENT_ERROR"
+	// ErrQuotaExceeded: Provider-Budget/Kontingent erschöpft (z.B. LiteLLM
+	// "budget_exceeded", OpenAI "insufficient_quota"). Kommt oft als HTTP 429,
+	// ist aber kein Rate-Limit — ein Retry ändert nichts bis zum Budget-Reset.
+	ErrQuotaExceeded = "QUOTA_EXCEEDED"
 )
 
 // **********************************************************************
@@ -97,7 +101,7 @@ func (e *APIError) IsRetryable() bool {
 	switch e.Type {
 	case ErrRateLimit, ErrTimeout, ErrServerError:
 		return true
-	case ErrAuthFailed, ErrClientError:
+	case ErrAuthFailed, ErrClientError, ErrQuotaExceeded:
 		return false
 	default:
 		return false
@@ -149,9 +153,30 @@ func ClassifyError(err error) *APIError {
 	}
 }
 
+// quotaExceededMarkers erkennen ein erschöpftes Budget im Fehler-Body:
+// LiteLLM-Gateways (Mammouth) senden type "budget_exceeded" + Message
+// "ExceededBudget: ...", OpenAI-kompatible Provider "insufficient_quota".
+var quotaExceededMarkers = []string{"budget_exceeded", "ExceededBudget", "insufficient_quota"}
+
+func isQuotaExceededBody(body string) bool {
+	for _, m := range quotaExceededMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // classifyHTTPError klassifiziert HTTP-Status-Codes als APIError
 func classifyHTTPError(statusCode int, message string, err error) *APIError {
 	switch {
+	case (statusCode == 429 || statusCode == 402) && isQuotaExceededBody(message):
+		return &APIError{
+			Type:       ErrQuotaExceeded,
+			StatusCode: statusCode,
+			Message:    message,
+			Err:        err,
+		}
 	case statusCode == 429:
 		return &APIError{
 			Type:       ErrRateLimit,

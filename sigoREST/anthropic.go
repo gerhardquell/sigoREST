@@ -361,6 +361,8 @@ func anthropicErrorType(internalType string) string {
 		return "not_found_error"
 	case sigoengine.ErrCircuitOpen:
 		return "overloaded_error"
+	case sigoengine.ErrQuotaExceeded:
+		return "billing_error"
 	default:
 		// ErrTimeout, ErrServerError, ErrAPIFailed, unbekannt: generisches
 		// Fallback aus Anthropics Vokabular.
@@ -411,6 +413,8 @@ func (s *Server) writeAPIError(w http.ResponseWriter, modelID string, err error)
 		httpStatus = http.StatusBadRequest
 	case sigoengine.ErrCircuitOpen:
 		httpStatus = http.StatusServiceUnavailable
+	case sigoengine.ErrQuotaExceeded:
+		httpStatus = http.StatusPaymentRequired
 	}
 	writeAnthropicError(w, anthropicErrorType(apiErr.Type), apiErr.Message, httpStatus)
 }
@@ -450,6 +454,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	ch, err := s.channelManager.Resolve(provider, lr.Channel)
 	if err != nil {
 		writeAnthropicError(w, anthropicErrorType(sigoengine.ClassifyError(err).Type), err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	if msg, blocked := s.budgetBlocked(); blocked {
+		// billing_error/402 = Anthropics Vokabular für "kein Budget" —
+		// Clients wie Claude Code wiederholen das nicht (anders als 429).
+		writeAnthropicError(w, "billing_error", msg, http.StatusPaymentRequired)
 		return
 	}
 
@@ -662,10 +673,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, false, lastErr.Error())
-		if streamStarted || sigoengine.ClassifyError(lastErr).Type == sigoengine.ErrClientError {
+		if t := sigoengine.ClassifyError(lastErr).Type; streamStarted || t == sigoengine.ErrClientError || t == sigoengine.ErrQuotaExceeded {
 			// streamStarted: Client hat bereits einen halb-offenen Stream —
 			// ein Failover auf den nächsten Kanal würde einen zweiten
 			// Stream-Preamble auf denselben ResponseWriter schreiben.
+			// ErrQuotaExceeded: Budget gilt pro Provider-Account, alle
+			// Keys hängen am selben User — Failover bringt nichts.
 			break
 		}
 	}

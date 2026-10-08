@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"sigorest/sigoengine"
 )
@@ -690,5 +691,86 @@ func TestHandleMessages_ThinkingForwardedAsReasoningEffort(t *testing.T) {
 	}
 	if _, ok := gotBody["thinking"]; ok {
 		t.Fatalf("did not expect thinking object at OpenAI-compatible upstream, got: %v", gotBody)
+	}
+}
+
+// TestHandleMessages_RespectsHardStopBudget: TODO.md 20261008 — der
+// Budget-Hard-Stop lief nur in handleChatCompletions. Claude Code (über
+// /v1/messages) überschritt das Tageslimit deshalb ungebremst ($25 bei $10
+// Limit). Bei überschrittenem Limit muss auch die Bridge mit HTTP 402 im
+// Anthropic-Fehlerformat ablehnen, ohne den Provider anzufragen.
+func TestHandleMessages_RespectsHardStopBudget(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	srv, dir := newTestServer(t)
+	costDB, err := sigoengine.OpenCostDB(dir)
+	if err != nil {
+		t.Fatalf("OpenCostDB: %v", err)
+	}
+	defer costDB.Close()
+	srv.costDB = costDB
+	if err := costDB.SetBudgetConfig(sigoengine.BudgetConfig{DailyLimitUSD: 5, HardStopEnabled: true}); err != nil {
+		t.Fatalf("SetBudgetConfig: %v", err)
+	}
+	if err := costDB.RecordUsage(sigoengine.UsageEvent{Timestamp: time.Now(), Model: "claude-h", Provider: "mammouth", Channel: "mammouth-default", TotalCostUSD: 6}); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	srv.models["claude-h"] = ModelInfo{ID: "claude-h", Endpoint: upstream.URL}
+
+	body := `{"model":"claude-h","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleMessages(rr, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)))
+
+	if rr.Code != http.StatusPaymentRequired {
+		t.Fatalf("erwartet 402, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+	var env anthropicErrorEnvelope
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil || env.Type != "error" || env.Error.Type != "billing_error" {
+		t.Fatalf("erwartet Anthropic-Fehler billing_error, bekommen: %s", rr.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("erwartet keinen Provider-Call bei Hard-Stop, bekommen %d", upstreamCalls)
+	}
+}
+
+// TestHandleMessages_ProviderBudgetExceededNoRetryNoFailover: TODO.md
+// 20261008 — Mammouth meldete ein erschöpftes User-Budget als HTTP 429.
+// sigoREST hielt das für ein Rate-Limit: 4 Versuche mit Backoff pro Kanal,
+// dann Failover über alle Kanäle (alle Keys = derselbe User, also sinnlos).
+// Erwartet: genau ein Upstream-Call, 402 billing_error an den Client.
+func TestHandleMessages_ProviderBudgetExceededNoRetryNoFailover(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"ExceededBudget: User=93085 over budget. Spend=21.67904175, Budget=20.81356348856591","type":"budget_exceeded","param":null,"code":"429"}}`)
+	}))
+	defer upstream.Close()
+
+	srv, _ := newTestServer(t)
+	if err := srv.channelManager.Registry().SetActive("mammouth", "0", true); err != nil {
+		t.Fatalf("failed to activate second channel: %v", err)
+	}
+	srv.models["claude-h"] = ModelInfo{ID: "claude-h", Endpoint: upstream.URL}
+
+	body := `{"model":"claude-h","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	srv.handleMessages(rr, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)))
+
+	if upstreamCalls != 1 {
+		t.Fatalf("erwartet genau 1 Upstream-Call (kein Retry, kein Failover), bekommen %d", upstreamCalls)
+	}
+	if rr.Code != http.StatusPaymentRequired {
+		t.Fatalf("erwartet 402, bekommen %d: %s", rr.Code, rr.Body.String())
+	}
+	var env anthropicErrorEnvelope
+	if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil || env.Error.Type != "billing_error" {
+		t.Fatalf("erwartet billing_error, bekommen: %s", rr.Body.String())
 	}
 }

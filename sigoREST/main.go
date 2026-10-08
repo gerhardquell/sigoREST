@@ -767,6 +767,29 @@ func (s *Server) providerForModelLocked(modelID string) string {
 	return sigoengine.ResolveProvider(endpoint, modelID)
 }
 
+// budgetBlocked prüft den Budget-Hard-Stop vor einem Provider-Call. Nur bei
+// aktiviertem Hard-Stop und überschrittenem Limit wird blockiert — reines
+// Tracking blockiert nie, ein DB-Fehler auch nicht (nur Warnung). Gemeinsam
+// genutzt von /v1/chat/completions und /v1/messages; die Bridge hatte den
+// Check bis TODO 20261008 nicht und umging so das Tageslimit.
+func (s *Server) budgetBlocked() (string, bool) {
+	if s.costDB == nil {
+		return "", false
+	}
+	status, err := s.costDB.CheckBudget(time.Now())
+	if err != nil {
+		sigoengine.LogWarn("Budget-Check fehlgeschlagen", map[string]interface{}{"error": err.Error()})
+		return "", false
+	}
+	if !status.Blocked {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"Budget überschritten (Tag: $%.2f/$%.2f, Monat: $%.2f/$%.2f) — Hard-Stop aktiv",
+		status.DailySpendUSD, status.DailyLimitUSD, status.MonthlySpendUSD, status.MonthlyLimitUSD,
+	), true
+}
+
 // recordUsage aktualisiert die Token-Statistiken für ein Modell und den
 // tatsächlich genutzten Kanal (RAM, seit Serverstart) und schreibt zusätzlich
 // ein persistentes Kosten-Event nach costs.db (sessionID optional, leer wenn
@@ -921,18 +944,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Budget-Check: nur bei aktiviertem Hard-Stop und überschrittenem Limit
-	// wird der Call abgelehnt — reines Tracking blockiert nie.
-	if s.costDB != nil {
-		if status, err := s.costDB.CheckBudget(time.Now()); err != nil {
-			sigoengine.LogWarn("Budget-Check fehlgeschlagen", map[string]interface{}{"error": err.Error()})
-		} else if status.Blocked {
-			writeError(w, fmt.Sprintf(
-				"Budget überschritten (Tag: $%.2f/$%.2f, Monat: $%.2f/$%.2f) — Hard-Stop aktiv",
-				status.DailySpendUSD, status.DailyLimitUSD, status.MonthlySpendUSD, status.MonthlyLimitUSD,
-			), "budget_exceeded", http.StatusPaymentRequired)
-			return
-		}
+	if msg, blocked := s.budgetBlocked(); blocked {
+		writeError(w, msg, "budget_exceeded", http.StatusPaymentRequired)
+		return
 	}
 
 	// Defaults setzen
@@ -1222,10 +1236,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.channelManager.Registry().MarkChannelHealth(currentCh.Provider, currentCh.Name, false, lastErr.Error())
 
 		apiErr := sigoengine.ClassifyError(lastErr)
-		if streamStarted || apiErr.Type == sigoengine.ErrClientError {
+		if streamStarted || apiErr.Type == sigoengine.ErrClientError || apiErr.Type == sigoengine.ErrQuotaExceeded {
 			// streamStarted: Client hat bereits einen halb-offenen Stream —
 			// ein Failover auf den nächsten Kanal würde einen zweiten
 			// Stream-Preamble auf denselben ResponseWriter schreiben.
+			// ErrQuotaExceeded: Budget gilt pro Provider-Account, alle
+			// Keys hängen am selben User — Failover bringt nichts.
 			break
 		}
 		sigoengine.LogWarn("Failing over to next channel", map[string]interface{}{
@@ -1300,6 +1316,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		case sigoengine.ErrCircuitOpen:
 			httpStatus = http.StatusServiceUnavailable // 503
 			errType = "circuit_open"
+		case sigoengine.ErrQuotaExceeded:
+			httpStatus = http.StatusPaymentRequired // 402, Provider-Budget erschöpft
+			errType = "budget_exceeded"
 		}
 
 		writeError(w, apiErr.Message, errType, httpStatus)

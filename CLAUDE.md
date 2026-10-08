@@ -468,14 +468,28 @@ antworten mit `503 cost_tracking_disabled`. Ein DB-Fehler beim
 Schreiben selbst wird nur geloggt (`LogWarn`), niemals dem
 API-Response-Pfad in den Weg gestellt.
 
-**Budget-Check vor jedem Call:** In `handleChatCompletions`, direkt nach
-dem Provider-Ping (vor dem eigentlichen API-Call, gleiches Muster wie
-"Provider nicht erreichbar → kein API-Call"). `CheckBudget(now)` prüft
+**Budget-Check vor jedem Call:** `Server.budgetBlocked()` (`main.go`),
+aufgerufen in `handleChatCompletions` (nach dem Provider-Ping) UND in
+`handleMessages` (Anthropic-Bridge, Antwort dort `402 billing_error` im
+Anthropic-Format). Bis 2026-10-08 fehlte der Check in der Bridge — Claude
+Code über `ANTHROPIC_BASE_URL` überschritt ein $10-Tageslimit mit Hard-Stop
+ungebremst auf $25 (TODO 20261008). `CheckBudget(now)` prüft
 Tages-/Monats-Ausgaben (`spendSince`, lokale Zeitzone via
 `StartOfDay`/`StartOfMonth`) gegen die konfigurierten Limits
 (`budget_config`-Tabelle, Singleton-Zeile). Nur bei `hard_stop_enabled:
 true` UND überschrittenem Limit wird der Call mit `HTTP 402
 budget_exceeded` abgelehnt — Default ist reines Tracking, kein Eingriff.
+Lücke: Modelle ohne Preis (Mammouth liefert keine) buchen $0 — ihr
+Verbrauch zählt nicht gegen das Limit.
+
+**Provider-Budget erschöpft ≠ Rate-Limit:** Mammouth (LiteLLM-Gateway)
+meldet ein erschöpftes User-Budget als HTTP 429 (`"type":"budget_exceeded"`,
+`ExceededBudget: User=… over budget`), unabhängig vom Guthaben. Früher als
+`ErrRateLimit` klassifiziert → 4 Retries pro Kanal × Failover über alle
+Kanäle (alle Keys = derselbe User). Jetzt: `classifyHTTPError` erkennt
+429/402 mit `budget_exceeded`/`ExceededBudget`/`insufficient_quota` im Body
+als `ErrQuotaExceeded` — nicht retrybar, kein Failover, Client bekommt 402
+(`budget_exceeded` bzw. `billing_error` in der Bridge).
 
 **Bekannter Bug + Fix (Off-by-One bei `Summary()`):** gespeicherte
 Timestamps sind ganze Sekunden (`ts.Unix()`), aber `until` in
