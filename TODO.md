@@ -94,8 +94,15 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
 - [ ] Mammouth-`Spend=21.68` vs. sigoREST-Anteil diesen Monat nach echten
   Preisen ~$11,60. Der Rest kommt vermutlich aus anderer Nutzung (Web-App)
   oder einem anderen Zeitraum, im Mammouth-Account prüfen.
-- [ ] `costs.db`: 130 Zeilen in Stunde 13 mit `total_tokens=0` trotz
+- [x] `costs.db`: 130 Zeilen in Stunde 13 mit `total_tokens=0` trotz
   >130k `input_tokens` (Kosten stimmen). Vermutlich Streaming-Usage-Pfad.
+  Erledigt (2026-10-12): Ursache war der eigene Usage-Parser der Bridge
+  (`streamAnthropicResponse`), der `TotalTokens` nie setzte; seit `083161f`
+  nutzt die Bridge `ExtractUsage`. Betroffen sind 186 Zeilen (2026-10-01,
+  -05, -07), die letzte vom 2026-10-07 23:40. Kosten korrekt, nur die
+  Spalte `total_tokens` ist zu niedrig. Nachträgliche Korrektur (root):
+  `UPDATE usage_events SET total_tokens = input_tokens + output_tokens
+  WHERE total_tokens = 0 AND (input_tokens > 0 OR output_tokens > 0);`
 - [x] Mammouth-Streams liefern keine Usage-Daten (`input_tokens: 0` im SSE).
   Kosten fallen dann auf `EstimateUsage` zurück.
   Erledigt (2026-10-12, live geprüft): Seit dem `include_usage`-Fix kommt
