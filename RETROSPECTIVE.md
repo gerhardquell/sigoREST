@@ -4,6 +4,68 @@ Dieses Dokument enthält detaillierte Historie vergangener Entwicklungssessions.
 
 ---
 
+## Session 2026-10-12: Prompt-Audit der Claude-Code-Konfiguration, CLAUDE.md entschlackt, README in README.md.d/ aufgeteilt
+
+**Zielsetzung:**
+Prompt-Audit (`/claude-api prompt-audit`) der Claude-Code-Konfiguration, die in Sessions dieses Projekts lädt: Projekt-`CLAUDE.md` und Gerhards Konfiguration unter `~/.claude` (Skills, Agents, Plugins), geprüft gegen Claude Opus 5.5. Danach Gerhards Frage: Gehört das meiste aus `CLAUDE.md` nicht eher ins README?
+
+**Was herausgefunden wurde:**
+
+- `CLAUDE.md` war auf 789 Zeilen gewachsen und lud komplett in jede Session. Mehrere Angaben waren vom Repo widerlegt:
+  - Das CLI-Default-Modell stand als `claude-h` drin. Der Code sagt `gpt41`, und ein Modell `claude-h` gibt es nirgends mehr. Neun Beispielbefehle zeigten damit ins Leere.
+  - Zeile 3 war ein liegengebliebener `claude --worktree … --resume`-Befehl für einen Worktree, den es nicht mehr gibt.
+  - In der Provider-Liste fehlte OpenRouter.
+- Viele Abschnitte erzählten Bug-Historie ("Bug bis 2026-09-27", "Zwei Bugs beim Umbau gefunden" mit drei Punkten), statt die geltende Regel zu nennen.
+- Ein Teil dieser Historie stand nur in `CLAUDE.md`. `RETROSPECTIVE.md` verwies sogar mit "siehe unten" auf eine Provider-Kennzeichnung-Session, die es hier nie gab.
+- Auch das alte `README.md` war veraltet: Shortcodes ohne Registry-Präfix (`cl46-s`, `kimi`, `glm51` gelten seit der Registry nicht mehr), Provider-Tabellen ohne Longcat, cheaperinference und OpenRouter, die Clients `cpp/` und `pi/` fehlten.
+- `README.md` und `CLAUDE.md` beschrieben dieselben Dinge doppelt und teils widersprüchlich (Flags, Endpoints, Session-Pfade).
+
+**Was erreicht wurde:**
+
+### 1. Audit-Befunde in `CLAUDE.md` behoben (`3da5063`)
+- `claude-h` ersetzt: CLI-Default `gpt41`, Server-Beispiele mit `<shortcode>`.
+- Den Resume-Befehl entfernt und OpenRouter in die Provider-Liste aufgenommen.
+- Die Sprachregel steht ohne `<IMPORTANCE>`-Tag da.
+- Alle "Bug bis …"-Passagen als geltende Regel mit Symptom und Regressionstest formuliert.
+- Historie, die nur dort stand, hier als Nachträge ans Ende gehängt (Provider-Kennzeichnung, Off-by-One bei `Summary()`).
+
+### 2. README in `README.md.d/` aufgeteilt (`c496660`)
+- `README.md` enthält nur noch Überblick, Schnellstart, Inhaltsverzeichnis und Entwicklung.
+- Neun Themen-Dateien: Architektur, Konfiguration, API, Provider & Modelle, Shortcode-Registry, Kanäle, Kosten & Budget, Clients, Betrieb.
+- Inhalt aus `README.md` und den Architektur-Abschnitten von `CLAUDE.md` zusammengeführt. Bei Widersprüchen gilt der Stand von Code und Live-Server; Beispiel-Shortcodes kommen per GET aus `/api/shortlist` (Stand 2026-10-12).
+- Geprüft per Skript: Alle Begriffe in Backticks aus beiden Quellen sind in den neuen Dateien vorhanden, außer bewusst weggelassener Historie und alter Beispiele. Alle relativen Links und Sprungmarken lösen auf.
+- `README_EN.md` und `README_CN.md` sind eingefroren und tragen einen Hinweis. `docs/systemd-install.md` bleibt an seinem Ort, weil die eingefrorenen Dateien darauf verlinken.
+
+### 3. `CLAUDE.md` auf Regeln gekürzt (`bb22f0e`)
+- Von 789 auf 104 Zeilen (rund 4400 → 600 Wörter).
+- Inhalt jetzt: Projekt in Kürze, Verweistabelle auf `README.md.d/`, Befehle samt Test-Server-Ports, harte Regeln für Provider-, Server- und Kosten-Code, Betriebshinweise.
+- Die Verweise sind einfache Pfade ohne `@`-Import. Ein `@`-Import würde die Datei sofort mitladen, und die Ersparnis wäre weg.
+
+### 4. Aufräumen außerhalb des Repos
+- **Noch offen** aus dem Audit, betrifft die globale Konfiguration und ist nicht angewendet:
+  - P6: toter graphify-Verweis in `~/.claude/CLAUDE.md`
+  - P7: Zirkelverweis in `RTK.md`
+  - P8: kleingeschriebene Tool-Namen in den Agents
+  - P9: Lehrbuch-Zeilen in `db-expert`
+  - P10: "seit 20261001" in `desktop-start`
+  - P11/P12: `codereview-feynman`, Änderung nötig in der claude.ai-Quelle
+- **Skills:**
+  - `codeguide` ist jetzt aktiv: Die Datei lag als `~/.claude/skills/codeguide.md` statt in `skills/codeguide/SKILL.md` und wurde deshalb nie geladen. Der Fehler stand schon im Plan vom März.
+  - Eine lose, ältere Kopie von `codereview-feynman` ist gelöscht.
+- **Agent `db-expert`:** Die Ausnahme für die `n_`-Standardfelder ist jetzt dokumentiert.
+- **Plugins:** superpowers ist deaktiviert.
+- **hyperresearch:** komplett entfernt (Skill, pip-Paket, Projektverzeichnis). Es war nie benutzt worden: Die Datenbank war leer, Reports gab es keine.
+
+**Learnings:**
+
+1. **Eine Agent-Anleitung, die jede Session lädt, ist keine Architektur-Doku.** Was nur beim Arbeiten an einem Bereich gebraucht wird, gehört in eine Datei, auf die verwiesen wird. In `CLAUDE.md` bleibt, was bei jeder Änderung gilt.
+2. **Faktenangaben in Anleitungen veralten leise.** `claude-h` war seit dem Registry-Umbau falsch, und niemand hat es bemerkt, weil kein Test eine Markdown-Datei prüft. Der Abgleich gegen Code (`flag.String("m", …)`) und gegen den Live-Server (`/api/shortlist`) hat es in Sekunden gezeigt.
+3. **Historie und Regel trennen.** "Bug bis Datum X, Fix Y" zwingt den Leser, die heute geltende Regel selbst herauszulesen. Die Regel steht in `CLAUDE.md`/`README.md.d`, die Geschichte hier.
+4. **Beim Verschieben auf Verweise achten, die ins Leere zeigen würden.** Die Retro verwies auf Historie, die nur in `CLAUDE.md` stand. Ein bloßes Löschen hätte sie verloren.
+5. **Skill-Layout prüfen:** Claude Code lädt nur `skills/<name>/SKILL.md` mit Frontmatter. Eine lose `.md` direkt unter `skills/` ist unsichtbar, ohne dass eine Fehlermeldung kommt.
+
+---
+
 ## Session 2026-10-08 (Teil 2): Falscher Budget-Hard-Stop durch geschätzte Stream-Usage
 
 **Zielsetzung:**
