@@ -48,7 +48,7 @@ Prompt-Audit (`/claude-api prompt-audit`) der Claude-Code-Konfiguration, die in 
   - P8: Tool-Namen in den Agents großgeschrieben (`Read, Write, Bash`)
   - P9: Lehrbuch-Zeilen aus `db-expert` entfernt
   - P10: "seit 20261001" aus `desktop-start` gestrichen
-- **Noch offen:** P11/P12 für `codereview-feynman` — die Änderung muss in der claude.ai-Quelle gemacht werden, ein lokaler Edit würde beim Sync überschrieben.
+  - P11/P12: `codereview-feynman` in der claude.ai-Quelle geändert; die synchronisierte `SKILL.md` enthält die Änderung (Prüfung: `grep -c 'Ausnahmefall\|In GoLisp2'` = 4)
 - **Skills:**
   - `codeguide` ist jetzt aktiv: Die Datei lag als `~/.claude/skills/codeguide.md` statt in `skills/codeguide/SKILL.md` und wurde deshalb nie geladen. Der Fehler stand schon im Plan vom März.
   - Eine lose, ältere Kopie von `codereview-feynman` ist gelöscht.
