@@ -96,8 +96,12 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
   oder einem anderen Zeitraum, im Mammouth-Account prüfen.
 - [ ] `costs.db`: 130 Zeilen in Stunde 13 mit `total_tokens=0` trotz
   >130k `input_tokens` (Kosten stimmen). Vermutlich Streaming-Usage-Pfad.
-- [ ] Mammouth-Streams liefern keine Usage-Daten (`input_tokens: 0` im SSE).
+- [x] Mammouth-Streams liefern keine Usage-Daten (`input_tokens: 0` im SSE).
   Kosten fallen dann auf `EstimateUsage` zurück.
+  Erledigt (2026-10-12, live geprüft): Seit dem `include_usage`-Fix kommt
+  bei `/v1/chat/completions` und `/v1/messages` echte Usage, `costs.db`
+  bucht exakt. `input_tokens: 0` steht nur im `message_start`-Event der
+  Bridge; die echten Werte folgen im abschließenden `message_delta`.
 - [ ] Log-Zeitstempel enden auf `Z`, sind aber Lokalzeit (`13:23:43Z` =
   13:23:43 CEST).
 - [ ] Alte Mammouth-Einträge in `costs.db` sind mit falschen Preisen
