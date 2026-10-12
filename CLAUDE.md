@@ -1,770 +1,108 @@
 # CLAUDE.md
 
-Anleitung für Claude Code (claude.ai/code) bei Arbeit mit diesem Repo.
-
-## Developer
+Anleitung für Claude Code bei Arbeit mit diesem Repo.
 
 - Sprache: Deutsch. Gerhard duzen und mit Namen ansprechen.
 
-## Project Overview
+## Projekt
 
-sigoREST = drei-schichtiges Go-Projekt, zwei User-Interfaces:
+sigoREST: Go-Projekt (Modul `sigorest`, Go 1.26) mit drei Schichten — Shared
+Package `sigoengine/`, CLI `cmd/sigoE/`, OpenAI-kompatibler REST-Server
+`sigoREST/` (~100 parallele Verbindungen, Anthropic-Bridge unter
+`/v1/messages`). Provider: Mammouth, Moonshot, Z.ai, Longcat,
+cheaperinference, OpenRouter, lokales Ollama.
 
-- **sigoE CLI**: Command-line Engine für direkte AI-Abfragen
-- **sigoREST Server**: OpenAI-kompatibler REST-Server für parallele Verbindungen (~100)
+Ausführliche Doku in `README.md.d/` — bei Arbeit am jeweiligen Bereich dort
+nachlesen:
 
-Beide nutzen **Shared Package** `sigoengine` für:
-- Model-Registry (Modelle von Mammouth.ai, Moonshot.ai, Z.ai, Longcat, cheaperinference, OpenRouter)
-- API-Abstraktion (OpenAI + Anthropic Formate)
-- Multi-Channel-Support mit Failover + pro-Kanal Rate-Limiting + Health-Monitor
-- Circuit Breaker + Retry Logic
-- Session-Management (JSON-basiert)
-- Thread-safes Logging
+| Bereich | Datei |
+|---------|-------|
+| Aufbau, `sigoengine`-Exporte, Circuit Breaker, Sessions, Logging | `README.md.d/README_architektur.md` |
+| Flags, Zugriffskontrolle, API-Keys, Datenverzeichnis | `README.md.d/README_konfiguration.md` |
+| Endpoints, Request-/Response-Erweiterungen, Bridge | `README.md.d/README_api.md` |
+| Fetcher, Provider-Eigenheiten, Shortcodes, Provider-Erkennung, CSV, Ollama | `README.md.d/README_provider-modelle.md` |
+| Persistente Shortcode-Registry (`id_registry.db`) | `README.md.d/README_shortcode-registry.md` |
+| Kanäle, Failover, Rate-Limiter, Health-Monitor | `README.md.d/README_kanaele.md` |
+| Usage, Kosten, Budget (`costs.db`) | `README.md.d/README_kosten-budget.md` |
+| Installation, systemd, Kommunikationsprotokoll | `README.md.d/README_betrieb.md` |
 
-## Development Commands
+Session-Historie und Lektionen: `RETROSPECTIVE.md`. Offene Punkte: `TODO.md`.
+Die Doku in `README.md` + `README.md.d/` wird mitgepflegt;
+`README_EN.md`/`README_CN.md` sind eingefroren und werden nicht angefasst.
 
-### Alle Programme bauen (Makefile → `./build/`)
-Alle kompilierten Binaries landen im `./build/`-Verzeichnis (in `.gitignore`).
+## Befehle
+
 ```bash
-make build          # alle: sigoREST, sigoE, mockprovider
-make sigorest       # nur REST-Server
-make sigoe          # nur CLI
-make mockprovider   # nur Mock-Provider (für Rate-Limit-Tests)
-make test           # alle Tests
-make clean          # ./build/ entfernen
+make build          # sigoREST, sigoE, mockprovider → ./build/
+make test           # alle Tests (= go test ./...)
+go test ./sigoengine/ -run TestFetchWithRetry   # einzelne Tests (Regex)
 ```
 
-### REST-Server starten
-```bash
-# HTTP localhost:9080, HTTPS privates Netz:9443
-./build/sigoREST -v debug
-```
-
-### CLI nutzen
-```bash
-# Alle verfügbaren Modelle auflisten
-./build/sigoE -l
-
-# Prompt senden
-echo "Hallo" | ./build/sigoE -m gpt41
-
-# Mit Session
-./build/sigoE -m gpt41 -s projekt-x "Erste Nachricht"
-./build/sigoE -m gpt41 -s projekt-x "Zweite Nachricht"
-```
-
-### Server testen
-```bash
-# Health check
-curl -s http://localhost:9080/api/health
-
-# Chat completion (<shortcode> aus: curl -s http://localhost:9080/api/shortcodes)
-curl -s http://localhost:9080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"<shortcode>","messages":[{"role":"user","content":"Hallo"}]}'
-
-# Modell-Liste
-curl -s http://localhost:9080/v1/models | jq '.data[].id'
-```
-
-### Running Tests
-Go-Tests liegen in `sigoengine/` (engine.go ist getrennt von `*_test.go`):
-```bash
-go test ./...                              # alle Tests
-go test ./sigoengine/ -v                   # mit Details
-go test ./sigoengine/ -run TestFetchWithRetry   # einzelner Test (Regex)
-```
-Abgedeckt u.a.: `retry`, `shortcode`, `usage`, `finish_reason`, `env`,
-`commlog`, `models_csv`. Der Server hat Handler-Tests in
-`sigoREST/main_test.go` (u.a. mit Fake-Ollama `startFakeOllama`); die CLI hat
-keine Go-Tests → manuell testen. Nach Server-Änderungen zusätzlich einen
-echten Call gegen einen Test-Server auf freiem Port (`-http-port 19080
--https-port 19443 -data-dir <tmp>`) — der Live-Dienst belegt 9080/9443.
-
-## Architecture
-
-### Drei-Schichten-Design
-
-```
-sigorest/
-├── sigoengine/                  # Shared Package (thread-safe), mehrere Dateien:
-│   ├── engine.go                #   CallAPI, CircuitBreaker, Session, Logging
-│   ├── models.go                #   Model-Typ, CoreModels (Fallback-Liste)
-│   ├── models_registry.go       #   Lookup-Maps, Laden JSON→CSV→CoreModels
-│   ├── provider_fetchers.go     #   Dynamischer Abruf Mammoth/Moonshot/ZAI/Longcat/cheaperinference
-│   ├── retry.go                 #   FetchWithRetry (Backoff gegen Boot-DNS-Race)
-│   ├── shortcode.go             #   Shortcode-Generierung (Familie+Version+Variante)
-│   ├── channel.go               #   Channel-Datenmodell + Registry (Multi-Channel)
-│   ├── channel_manager.go       #   Kanal-Auflösung + Failover-Logik
-│   ├── channel_health.go        #   Hintergrund-Health-Monitor (lazy, kein Chat-Ping)
-│   ├── loadconfig_channel.go    #   LoadConfig-Erweiterung für Kanal-Auswahl
-│   ├── rate_limiter.go          #   Pro-Kanal Rate-Limiter (hybrid, siehe unten)
-│   ├── session_memory.go        #   Session-/Memory-Pfade pro Kanal
-│   ├── models_csv.go            #   WriteModelsCSV (Export im Registry-CSV-Format)
-│   ├── commlog.go               #   Kommunikationsprotokoll (-comm-log, JSONL, RoundTripper)
-│   ├── env.go                   #   Optionale ./.env Datei (veraltete ./env mit Warnung)
-│   ├── costdb.go                #   Kosten-Tracking (SQLite, WAL) + Budget-Check
-│   ├── id_registry.go           #   Persistente Shortcode-Registry (SQLite, assign-once)
-│   ├── provider_id.go           #   Kanonische Provider-Erkennung + 5-Zeichen-Code
-│   └── version.go               #   Zentrale Versions-Konstante
-├── cmd/sigoE/main.go            # CLI-Wrapper
-├── sigoREST/main.go             # REST-Server
-├── sigoREST/costhandlers.go     # /api/costs, /api/budget Handler
-└── sigoREST/memory.json         # Globaler Memory-Block (embedded + Disk)
-```
-
-### sigoengine — Shared Package
-
-Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Exportiert u.a.:
-
-| Export | Zweck |
-|--------|-------|
-| `MammothModels` | Model-Registry (Map: name → config) |
-| `LoadConfig(model)` | Lädt ProviderConfig aus Registry + ENV |
-| `CallAPI(ctx, cfg, req, timeout)` | HTTP-Call mit Retry → `(string, *UsageData, error)` |
-| `UsageData` | Token-Verbrauch (InputTokens, OutputTokens, TotalTokens) |
-| `CircuitBreaker` | Pro-Modell Fehlerisolierung |
-| `Session{History []Message}` | Gesprächsverlauf (max 20) |
-| `Log*()` | Thread-safes Logging (DEBUG/INFO/WARN/ERROR/FATAL) |
-| `DiscoverOllamaModels(endpoint)` | Auto-Discovery lokaler LLMs |
-| `ResolveModelName(shortcode)` | Shortcode → vollständiger Name |
-| `Fetch{Mammouth,Moonshot,ZAI,Longcat,Cheaperinference,OpenRouter}Models()` | Dynamischer Modell-Abruf pro Provider |
-| `FetchWithRetry(name, attempts, backoff, fn)` | Retry-Wrapper mit Backoff um einen Fetcher |
-| `GenerateShortcode(id, used)` | Sprechender Shortcode aus Modellname |
-| `ChannelRegistry` / `ChannelManager` | Multi-Channel-Verwaltung + Failover-Auflösung |
-| `LoadConfigWithChannel(model, ch)` | Wie `LoadConfig`, aber für einen bestimmten Kanal |
-| `RateLimiter.Acquire/Release` | Pro-Kanal hybrides Rate-Limiting (→ `ErrRateLimited`) |
-| `StartHealthMonitor(...)` | Lazy Hintergrund-Health-Check (GET `/models`, kein Chat-Ping) |
-| `OpenCostDB(dataDir)` | Öffnet/erstellt `costs.db` (SQLite, WAL), Schema-Migration |
-| `CostDB.RecordUsage/Summary/CheckBudget` | Kosten-Event schreiben, Zeitraum aggregieren, Budget prüfen |
-| `CalcCostUSD(inTok, outTok, cachedTok, inPrice, outPrice, cachedPrice)` | Token→USD anhand Modell-Preisen ($/1M Tokens); cachedTok zum günstigeren cachedPrice, wenn >0 bekannt (sonst wie bisher voll zu inPrice) |
-| `OpenIDRegistry(dataDir)` | Öffnet/erstellt `id_registry.db` (SQLite, WAL), Schema-Migration |
-| `IDRegistry.AssignModel(provider, upstreamID, hint)` | Einmalig vergebener Shortcode für ein Modell (assign-once, Hint = semantischer Code des Fetchers) |
-| `IDRegistry.SyncProvider(provider, seeds)` | Live-Liste abgleichen: Shortcodes vergeben, fehlende Modelle zählen/retiren |
-| `IDRegistry.ResolveShortcode(input)` | Shortcode → Eintrag + Kanal-Suffix (auch retired Modelle) |
-| `ResolveProvider(endpoint, modelID)` | Kanonische Provider-Erkennung (Endpoint zuerst, Namens-Heuristik als Fallback) |
-| `ProviderCode(provider)` | Normiert Provider-Namen auf festen 5-Zeichen-Code (`mammo`, `zai__`, ...) |
-
-**Thread-Safety:**
-- `sync.RWMutex` für Logging-Konfiguration
-- `sync.Once` für Shortcode-Lookup-Map
-- `sync.RWMutex` für Ollama-Registry
-- `sync.RWMutex` je Rate-Limiter-Key, `sync.RWMutex` für Channel-Registry
-
-### cmd/sigoE/main.go — CLI-Wrapper
-
-Schlanker Wrapper nutzt sigoengine. Rückwärtskompatibel zu ursprünglichem sigoEngine Binary.
-
-**Flags:**
-- `-m` Modell (default: `gpt41`, Shortcode oder vollständiger Name)
-- `-s` Session-ID (für Gesprächsverlauf)
-- `-n` Max Tokens (0 = Modell-Default)
-- `-T` Temperatur (-1 = Modell-Default)
-- `-t` Timeout Sekunden (default: 180)
-- `-r` Retries (default: 3)
-- `-l` Alle Modelle auflisten
-- `-i` Modell-Info anzeigen
-- `-v` Log-Level: `debug|info|warn|error`
-- `-j` JSON-Ausgabe
-- `-q` Quiet Mode (nur Fehler)
-
-### sigoREST/main.go — REST-Server
-
-OpenAI-kompatibler Server mit IP-basierter Zugriffskontrolle.
-
-**Zwei Listener teilen einen `http.ServeMux`:**
-- HTTP `:9080` — Nur localhost (127.0.0.0/8)
-- HTTPS `:9443` — Privates Netz (192.168.0.0/16, 10.0.0.0/8)
-
-**Modell-Quelle (wichtig):** Der Server lädt seine Modelle beim Start
-**dynamisch** über `loadModelsFromProviders()` (Mammoth/Moonshot/ZAI/Longcat/cheaperinference
-per HTTP) plus Ollama-Discovery — **nicht** aus einer models.csv. Nur
-`memory.json` ist embedded (`//go:embed memory.json`), Disk hat Vorrang. Die
-CSV/Registry (`models_registry.go`) ist primär für die CLI; der Server nutzt
-sie nicht.
-
-**Endpoints:**
-| Pfad | Methode | Zweck |
-|-------|---------|-------|
-| `/v1/chat/completions` | POST | OpenAI-kompatible Chat API |
-| `/v1/models` | GET | Modell-Liste (ID + Shortcode), `owned_by` = kanonischer Provider |
-| `/v1/messages` | POST | Anthropic-Messages-API-Bridge (Claude Code o.ä.), Tool-Calling, alle Provider |
-| `/api/models` | GET | Volle Modell-Infos (Preise, Limits, `provider`/`provider_code`); `?format=csv` → Registry-CSV (als CLI-`models.csv` nutzbar) |
-| `/api/shortcodes` | GET | Kompaktes Mapping `{id: shortcode}` (nach ID sortiert) |
-| `/api/shortlist` | GET | Kompakt: Shortcode + Provider + 5-Zeichen-Code, sortiert |
-| `/api/channels` | GET | Status aller Kanäle (inkl. `min_interval_ms`/`max_wait_ms`) |
-| `/api/channels/:provider/:name` | GET | Einzelkanal-Detail |
-| `/api/channels/:provider/:name/enable` | POST | Kanal aktivieren |
-| `/api/channels/:provider/:name/disable` | POST | Kanal deaktivieren |
-| `/api/channels/:provider/:name/memory` | GET/PUT | Kanal-spezifischer Memory-Block |
-| `/api/channels/:provider/:name/system-prompt` | GET/PUT | Kanal-spezifischer System-Prompt |
-| `/api/health` | GET | Server-Status + Circuit-Breaker |
-| `/api/memory` | GET/PUT | Globaler Memory-Block |
-| `/api/usage`  | GET | Token-Statistiken (RAM, Reset bei Neustart) |
-| `/api/costs`  | GET | Token-Statistiken + USD-Kosten, persistent (SQLite, `costs.db`) |
-| `/api/budget` | GET/PUT | Tages-/Monats-Budget-Limits + Verbrauchsstatus, optional Hard-Stop |
-| `/api/system-prompt` | GET/PUT | Globaler System-Prompt |
-| `/api/version` | GET | Version + Component-Name |
-| `/api/help`   | GET | Endpoint-Dokumentation |
-| `/ping`       | GET | Load-Balancer Health-Check |
-
-**sigoREST-Erweiterungen im Request:**
-```json
-{
-  "model": "<shortcode>",
-  "messages": [...],
-  "session_id": "mein-projekt",   // Optional
-  "timeout": 120,                  // Optional (default 180)
-  "retries": 3,                    // Optional (default 3)
-  "bare": true,                    // Optional: kein Memory, kein Server-System-Prompt
-  "system_prompt": "…",            // Optional: per-Request Override; bei bare der einzige Kontext
-  "response_format": {"type": "json_object"}  // Optional: 1:1 an OpenAI-kompatible Provider durchgereicht
-}
-```
-Mit `bare:true` legt der Server weder globalen/Kanal-Memory noch den
-Server-System-Prompt vor die Anfrage — nur ein nicht-leerer `system_prompt`
-zählt dann noch. Ein älteres sigoREST ohne `bare`-Unterstützung ignoriert
-das Feld (Memory/Server-Prompt kommen dann wieder dazu).
-`response_format` ist kein sigoREST-Feld, sondern Standard-OpenAI — wurde
-bis TODO 20261003 beim Dekodieren still verworfen (`ChatRequest` kannte das
-Feld nicht). Jetzt 1:1 im Request-Body an den Provider durchgereicht (nicht
-validiert — ein ungültiger Wert wird vom Provider selbst abgelehnt). Betrifft
-nur `/v1/chat/completions`; `/v1/messages` (Anthropic-Bridge) hat kein
-äquivalentes Feld im Anthropic-Wire-Format.
-
-**sigoREST-Erweiterungen in der Response (`usage`):**
-```json
-{
-  "prompt_tokens_details": { "cached_tokens": 0 },
-  "completion_tokens_details": { "reasoning_tokens": 0 },
-  "cost_usd": 0.0
-}
-```
-`cost_usd` = `CalcCostUSD(input_cost, output_cost, cached_input_cost)`.
-Cache-Rabatt nur, wenn der Provider einen Cache-Read-Preis liefert (aktuell
-nur cheaperinference, `ModelInfo.CachedInputCost`) — sonst (0) zählen
-Cache-Reads weiterhin voll zum `input_cost`, eine obere Schranke
-(`prompt_tokens` enthält dort die gecachten Tokens mit).
-
-`cost_usd` ist `null` statt `0.0`, wenn für das Modell kein Preis bekannt ist
-(`InputCost`/`OutputCost` beide 0 UND nicht Ollama) — ein Fetcher ohne
-Preisdaten für dieses Modell heißt "unbekannt", nicht "gratis" (TODO.md
-20261003, golisp2-Anlass: `(json-parse (sigo …))` bekam sonst `0` statt
-`:null`). Ollama bleibt `0.0` (bekannt kostenlos, lokale Inferenz). Gilt für
-Streaming (eigener Chunk vor `[DONE]`) und Non-Streaming gleich
-(`buildChatUsage`). `/api/costs` ergänzt dieselbe Unterscheidung pro Modell
-als `price_known: {"<model-id>": bool}` neben der gewohnten Zusammenfassung.
-
-### Dynamisches Modell-Laden (Server)
-
-`loadModelsFromProviders()` ruft beim Start sequenziell sechs Provider-APIs ab.
-Jeder Fetcher ist in `FetchWithRetry` gewickelt (4 Versuche, 2s/4s/8s Backoff).
-Einzelne Fehlschläge werden geloggt; der Server startet mit dem Rest weiter.
-
-**Wichtige Fallback-Asymmetrie** (relevant bei Netz-/DNS-Problemen):
-| Provider | bei Fehler | Folge |
-|----------|-----------|-------|
-| Mammoth (`/public/models`, kein Key) | `return nil, err` | 0 Modelle |
-| Moonshot (`MOONSHOT_API_KEY`) | `return nil, err` | 0 Modelle |
-| ZAI (`ZAI_API_KEY`) | `return zaiStaticModels, nil` | statische Modelle |
-| Longcat (`LONGCAT_API_KEY`) | `return longcatKnownModels, nil` | statische Modelle |
-| cheaperinference (`OMNIROUTE_API_KEY`) | `return nil, err` | 0 Modelle (kein Static-Fallback — Preise sind der Zweck) |
-| OpenRouter (`OPENROUTER_API_KEY`) | `return nil, err` | 0 Modelle (kein Static-Fallback — Preise sind der Zweck, wie cheaperinference) |
-
-→ Wenn beim Boot nur die statischen ZAI/Longcat-Modelle erscheinen ("no such
-host" im Log): DNS war beim Start noch nicht oben. Schutz: systemd-Unit mit
-`Wants/After=network-online.target` (nicht `network.target`!) **plus** der
-Retry. Siehe `docs/systemd-install.md`. Workaround zur Laufzeit:
-`systemctl restart sigoREST`.
-
-**cheaperinference — Aggregator statt Einzel-Provider:** `GET /v1/models`
-liefert live Preise (`pricing.input_per_million`/`output_per_million`) und
-Kontextfenster (`context_length`/`max_output_tokens`) für alle Modelle mit,
-gefiltert auf `type=="text" && endpoint=="/v1/chat/completions"` (aktuell 60
-von 66, Rest sind Bild-/Video-Modelle). Kein statisches Known-Model-Mapping
-nötig wie bei ZAI/Longcat/Moonshot. IDs sind `ci-`-präfixt (z.B.
-`ci-claude-opus-5`), weil dieselben Modelle oft auch direkt über
-Mammouth/Moonshot/ZAI laufen und sonst die ID-Map kollidieren würde.
-`sigoengine.Model.UpstreamID` trägt den unpräfixten Original-Namen; in
-`handleChatCompletions` wird `cfg.Model` (nicht nur `cfg.Endpoint`) damit
-überschrieben, sonst schickt der Server `"ci-claude-opus-5"` als `model`-Feld
-raus, das die API nicht kennt.
-
-**OpenRouter — Aggregator mit Vendor-Präfix in der ID:** `GET /v1/models`
-ist öffentlich (kein Key nötig laut OpenRouter-Doku, Fetcher schickt ihn
-trotzdem mit — konsistent zu den anderen Bearer-Fetchern) und liefert live
-Preise (`pricing.prompt`/`completion`/`input_cache_read`, **USD pro Token**,
-nicht USD/1M wie der Rest der Registry — Fetcher multipliziert ×1e6),
-Kontextfenster (`context_length`) und `top_provider.max_completion_tokens`.
-Gefiltert auf `architecture.modality` mit Text-Output (Suffix `->text`),
-sonst landen auch reine Bild-/Audio-Ausgabe-Modelle in der Chat-Liste.
-IDs sind bereits `<vendor>/<modell>` (z.B. `anthropic/claude-opus-5`) und
-werden unverändert als `model`-Feld an die API geschickt — kein
-`UpstreamID`-Mapping wie bei cheaperinference nötig, keine ID-Kollision mit
-anderen Fetchern (deren IDs kein `/` enthalten).
-**Shortcode-Falle dabei gefunden:** `GenerateShortcode` erkennt Familien nur
-am Anfang des Strings (`"claude-..."`, `"gpt-..."`). Ungekürzt auf die volle
-OpenRouter-ID angewandt, matcht das nie — alle Modelle eines Vendors landen
-über den Cutter-Fallback auf praktisch demselben Code (`anthropic/...` →
-immer der Cutter-Code von `"anthropic"`, nicht vom eigentlichen Modellnamen).
-Fix in `FetchOpenRouterModels`: Vendor-Teil vor dem `/` abschneiden, erst der
-Rest geht in `generateProviderShortcode` — `anthropic/claude-opus-5` erkennt
-dann korrekt die Familie `claude`.
-
-**`:batch`-Varianten werden komplett gefiltert, nicht nur umbenannt.**
-Erst beim echten Chat-Call aufgefallen: OpenRouter lehnt `:batch`-IDs über
-`/chat/completions` mit HTTP 404 ab ("cannot be used with the
-chat/completions endpoint") — sie laufen über eine separate Async-Batch-API
-mit eigenem Adapter, die sigoREST nicht anbietet. Jeder `:batch`-Shortcode
-wäre also ein toter Eintrag, der bei jedem Call scheitert. Fix in
-`FetchOpenRouterModels`: IDs mit `strings.HasSuffix(item.ID, ":batch")`
-werden schon beim Fetch verworfen (73 von 449 betroffen, Stand 2026-10-06).
-Andere `:`-Suffixe (`:free`, `:beta`, `:nitro`, `:floor`, `:extended`) sind
-normale Chat-Completion-Routing-Modifier und bleiben drin.
-
-**Shortcode-Falle `:`-Suffixe allgemein (nicht nur `:batch`).**
-`GenerateShortcode` splittete Parts bisher nur auf `-` — ein ganzer
-`:free`/`:beta`/...-Teil landete als ein Stück im Cutter-Fallback statt in
-`variantMap` erkannt zu werden (`cl45:free-o` statt etwas Sprechendem).
-Fix in `shortcode.go`: Split jetzt über `strings.FieldsFunc` auf `-` UND
-`:`, `variantMap` um `batch`/`free`/`nitro`/`floor`/`extended` ergänzt
-(dieselbe Kategorie wie `beta`/`thinking`, nur anders delimitiert) →
-`claude-opus-4.5:free` → `cl45-ofree`. Der `batch`-Eintrag in `variantMap`
-bleibt trotz des Filters harmlos drin (greift nur, falls doch mal ein
-Modellname das Wort "batch" hyphen-getrennt enthält).
-Eine vorbestehende Marotte bleibt unverändert: Modelle ohne Ziffern-Version
-vor dem ersten erkannten Varianten-Wort (z.B. `claude-fable-5.1:free`,
-`gpt-oss-120b:free`) lassen das erste Treffer-Wort als "Subfamily" vorn
-landen (`cl-freef025.1` statt `cl-f025.1free`) — dieselbe Ursache wie das
-dokumentierte `fable`-Kuriosum, kein neuer Bug.
-
-**Shortcode-Generierung:** `GenerateShortcode` (in `shortcode.go`) baut sprechende
-Kürzel: Familie (longest-prefix, z.B. `gpt`/`claude→cl`/`gemini→gem`) + Subfamily
-(`sonnet→s`) + Version (`5.1→51`) + Variante (`mini→m`/`flash→f`), Kollision via
-numerischem Suffix, Cutter-Sanborn-Fallback für Unbekanntes.
-
-**Shortcode-Resolution:** Server prüft zuerst nach ID, dann scannt alle Shortcodes.
-Bei Treffer wird ID für den API-Call verwendet.
-
-### CSV/Registry-Format (CLI, `sigoengine/models_registry.go`)
-
-Lade-Reihenfolge der Registry: JSON → CSV → `CoreModels`. Semikolon-getrennte CSV,
-11 Felder (Semikolon weil Komma in JSON-Arrays/Listen kollidiert):
-```
-id;shortcode;endpoint;apikey;max_input;max_output;input_cost;output_cost;min_temp;max_temp;requires_completion_tokens
-```
-Optional danach `;provider;provider_code;upstream_id;cached_input_cost` — so
-exportiert `GET /api/models?format=csv` (`sigoengine.WriteModelsCSV`,
-Kopfzeile mit `#` = Parser-Kommentar). Beim Laden werden `upstream_id`
-(nötig für `ci-*`) und `cached_input_cost` übernommen, Provider wird neu
-berechnet.
-`requires_completion_tokens=true` → Modell nutzt `max_completion_tokens` statt
-`max_tokens` (z.B. GPT-5). `apikey` ist der ENV-Var-Name (leer bei Ollama).
-`cached_input_cost` ($/1M Cache-Read-Tokens, 0 = kein bekannter Rabatt) —
-aktuell nur von cheaperinference befüllt (`pricing.cache_read_input_per_million`);
-Mammouth/Moonshot/ZAI/Longcat liefern keinen solchen Preis, Cache-Reads
-zählen dort weiterhin voll zum `input_cost` (obere Schranke, siehe
-`CalcCostUSD` in `sigoengine/costdb.go`).
-
-### Ollama Auto-Discovery
-
-Ollama-Modelle beim Serverstart via `GET /api/tags` entdeckt:
-
-```go
-ollamaEndpoint := "http://localhost:11434"
-sigoengine.DiscoverOllamaModels(ollamaEndpoint)
-```
-
-**Shortcode-Schema:**
-- `llama3:latest` → `ollama-llama3` (`:latest` weggeschnitten)
-- `gemma3:12b` → `ollama-gemma3-12b` (andere Tags als Suffix)
-
-Ollama-Modelle: kein API-Key (`APIKey: ""`), nutzen `http://localhost:11434/v1/chat/completions`.
-
-**Limitation:** Nur Startzeit-Discovery → Neustart nötig nach `ollama pull`.
-
-**Kanal ohne Key:** Chat läuft auch für Ollama über
-`ChannelManager.Resolve`, aber `DiscoverFromEnv` legt Kanäle nur für
-Provider mit API-Key an (`knownProviders`). Deshalb läuft die
-Ollama-Discovery VOR der Registry, und `newChannelRegistry`
-(`sigoREST/main.go`) registriert bei gefundenen Modellen
-`AddKeylessChannel("ollama")` → Kanal `ollama-default`, danach
-`LoadState` (per API deaktiviert bleibt deaktiviert). Kein Sonderweg im
-Handler. Fehlt der Kanal, endet jeder Ollama-Chat (auch `/v1/messages`)
-mit `404 CONFIG_NOT_FOUND: no active channel for provider`, während
-`/v1/embeddings` (ohne Kanal) weiter funktioniert. Regressionstest:
-`TestHandleChatCompletions_OllamaWithoutAPIKey`.
-
-### Circuit Breaker
-
-Pro Modell ein Circuit Breaker (nicht global):
-
-Server nutzt `NewEnhancedCircuitBreaker` pro Modell (`handleChatCompletions`):
-| Parameter | Wert |
-|-----------|-------|
-| Threshold | 5 Fehler |
-| Window | 60s Zeitfenster |
-| Cooldown | 10s vor Half-Open |
-| HalfOpenMax | 3 Requests in Half-Open |
-| Scope | Pro Modell (`map[string]*...`) |
-
-Fehler bei einem Modell blockieren andere nicht.
-
-### Multi-Channel, Failover, Rate-Limiting, Health-Monitor
-
-Ein Provider kann mehrere **Kanäle** (API-Keys) haben (`ChannelRegistry` in
-`channel.go`, Config `channels.json`). Bei einem Request probiert der
-`ChannelManager` (`channel_manager.go`) die Kanäle eines Providers der Reihe
-nach durch — Failover ist transparent für den Client.
-
-**Rate-Limiter (hybrid, pro Kanal, nicht pro Provider):** `RateLimiter.Acquire`
-wartet bis `minInterval` seit letztem Call vergangen ist; würde die Wartezeit
-`maxWait` überschreiten, schlägt der Call mit `ErrRateLimited` fehl → Server
-probiert den nächsten Kanal. Erst wenn alle Kanäle eines Providers erschöpft
-sind, geht HTTP 429 + `Retry-After` an den Client. Konfigurierbar global
-(`-rate-min-interval`, `-rate-max-wait`) und pro Kanal (`MinInterval`/`MaxWait`
-in `channels.json`, ms). Granularität ist bewusst pro Kanal: ein
-Provider-weiter Limiter würde alle Failover-Keys gleichzeitig blockieren.
-
-**Health-Monitor** (`channel_health.go`, `StartHealthMonitor`): lazy
-Hintergrund-Check, reaktiviert Reserve-Kanäle bei Bedarf. Probe läuft über
-GET `/models` (oder Äquivalent), **nicht** über einen echten Chat-Call — kein
-API-Kosten-Verbrauch im Leerlauf.
-
-**Manuelles disable hat Vorrang (Gerhards Vorgabe, 2026-09-27):**
-`/api/channels/.../disable` → `SetActiveManual` → `Channel.ManuallyDisabled`
-(persistiert in `channels.json`, sichtbar in `/api/channels`). Der
-Health-Monitor überspringt solche Kanäle bei der Reserve-Suche und
-aktiviert sie **nie** wieder — auch nicht, wenn es der einzige Kanal des
-Providers ist; eine andere Reserve darf einspringen. Nur `/enable`
-(`SetActiveManual(true)`) löscht das Flag. Automatische Übergänge
-(Health-Monitor, Auth-Fehler im Chat-Handler) nutzen `SetActive` und
-lassen das Flag unangetastet. Vorher holte `runHealthChecks` einen
-manuell abgeschalteten einzigen Kanal nach einem Intervall zurück.
-
-Details/Historie siehe `RETROSPECTIVE.md`, Session 2026-08-18.
-
-### Kosten-Tracking (`sigoengine/costdb.go`, `sigoREST/costhandlers.go`)
-
-Persistente SQLite-Datenbank (`modernc.org/sqlite`, pure Go, kein CGO,
-WAL-Mode) unter `<data-dir>/costs.db`, ergänzend zum RAM-only
-`/api/usage`. Jeder abgeschlossene Chat-Call (`/v1/chat/completions`
-und `/v1/messages`, über `recordUsage`/`recordUsageWithSession` in
-`main.go`) schreibt ein Event in `usage_events`: Modell, Provider, Kanal,
-Session-ID (optional), Tokens, sowie USD-Kosten berechnet aus
-`ModelInfo.InputCost`/`OutputCost` ($/1M Tokens, `CalcCostUSD`). Modelle
-ohne Preisangabe (Ollama) landen mit $0 Kosten im Log, nicht komplett
-ohne Eintrag — Token-/Request-Zahlen bleiben so auswertbar.
-
-**Nil-safe by design:** `Server.costDB` ist ein `*sigoengine.CostDB`, den
-alle Methoden auf `nil`-Empfänger sauber abfangen (No-Op statt Panic).
-Schlägt `OpenCostDB` beim Serverstart fehl (z.B. Disk voll,
-Berechtigungsproblem), läuft der Server ohne Kosten-Persistenz weiter —
-`recordUsage` überspringt den DB-Write, `/api/costs`/`/api/budget`
-antworten mit `503 cost_tracking_disabled`. Ein DB-Fehler beim
-Schreiben selbst wird nur geloggt (`LogWarn`), niemals dem
-API-Response-Pfad in den Weg gestellt.
-
-**Budget-Check vor jedem Call:** `Server.budgetBlocked()` (`main.go`),
-aufgerufen in `handleChatCompletions` (nach dem Provider-Ping) UND in
-`handleMessages` (Anthropic-Bridge, Antwort dort `402 billing_error` im
-Anthropic-Format). Jeder neue Chat-Pfad braucht diesen Check — ohne ihn
-läuft Claude Code über `ANTHROPIC_BASE_URL` ungebremst am Hard-Stop
-vorbei. `CheckBudget(now)` prüft
-Tages-/Monats-Ausgaben (`spendSince`, lokale Zeitzone via
-`StartOfDay`/`StartOfMonth`) gegen die konfigurierten Limits
-(`budget_config`-Tabelle, Singleton-Zeile). Nur bei `hard_stop_enabled:
-true` UND überschrittenem Limit wird der Call mit `HTTP 402
-budget_exceeded` abgelehnt — Default ist reines Tracking, kein Eingriff.
-Modelle ohne Preis buchen $0 und zählen nicht gegen das Limit — ein
-Fetcher, der Preise nicht findet, hebelt das Budget also still aus.
-Mammouth: `/public/models` liefert Preise und Limits im LiteLLM-Format
-verschachtelt unter `model_info` (`input_cost_per_token`/
-`output_cost_per_token`, **USD pro Token** → ×1e6;
-`max_input_tokens`/`max_output_tokens`). Diese Werte haben Vorrang, die
-statische `mammouthKnownModels`-Tabelle ist nur Fallback und teils
-veraltet (Test: `sigoengine/mammouth_fetcher_test.go`).
-
-**Stream-Usage ist opt-in:** OpenAI-kompatible Provider schicken im
-SSE-Stream nur dann einen `usage`-Chunk, wenn
-`stream_options.include_usage` gesetzt ist. Deshalb setzt
-`CallAPIStream` `stream_options:{include_usage:true}` für alle
-Nicht-Anthropic-Provider (ein vom Client gesetzter Wert bleibt erhalten),
-und `streamAnthropicResponse` wertet Usage über `ExtractUsage` aus (inkl.
-`cached_tokens`). Fehlt der Chunk, fallen beide Stream-Pfade still auf
-`EstimateUsage` zurück (Runen/3, kein Cache-Rabatt) — die Buchung ist
-dann ein Mehrfaches zu hoch und der Hard-Stop greift zu früh. Tests:
-`TestCallAPIStream_RequestsUsage`,
-`TestStreamAnthropicResponse_UsageIncludesCachedTokens`. `costs.db`-Werte
-für cheaperinference bis einschließlich 2026-10-07 sind überhöht.
-Gerhards Tageslimit: $55.93 (= 50 €) mit Hard-Stop, als Sicherheitsnetz
-gegen KI-Schwärme.
-
-**Provider-Budget erschöpft ≠ Rate-Limit:** Mammouth (LiteLLM-Gateway)
-meldet ein erschöpftes User-Budget als HTTP 429 (`"type":"budget_exceeded"`,
-`ExceededBudget: User=… over budget`), unabhängig vom Guthaben. Früher als
-`ErrRateLimit` klassifiziert → 4 Retries pro Kanal × Failover über alle
-Kanäle (alle Keys = derselbe User). Jetzt: `classifyHTTPError` erkennt
-429/402 mit `budget_exceeded`/`ExceededBudget`/`insufficient_quota` im Body
-als `ErrQuotaExceeded` — nicht retrybar, kein Failover, Client bekommt 402
-(`budget_exceeded` bzw. `billing_error` in der Bridge).
-
-**`until` aufrunden (`Summary()`):** gespeicherte Timestamps sind ganze
-Sekunden (`ts.Unix()`), `until` in `/api/costs` ist `time.Now()` mit
-Nanosekunden-Anteil. `ceilUnix()` rundet `until` für die
-`Summary()`-Query auf die nächste volle Sekunde auf; mit `until.Unix()`
-(floor) fiele ein Event aus derselben Sekunde heraus ("Chat-Call meldet
-Erfolg, `/api/costs` zeigt 0 Requests"). Regressionstest:
-`TestSummary_IncludesEventFromSameInstantAsUntil`.
-
-### ID-/Shortcode-Registry (`sigoengine/id_registry.go`)
-
-Persistente SQLite-Datenbank (`modernc.org/sqlite`, WAL) unter
-`<data-dir>/id_registry.db`. Sie vergibt jedem Provider ein
-3-Zeichen-Kürzel und jedem `(provider, upstream_id)`-Paar **einmalig**
-einen Shortcode im Format `{provider3}-{semanticCode}` (z.B.
-`zai-glm45`, `mam-cl45-s`, optional Kanal-Suffix `-2`). Einmal vergeben,
-bleibt ein Shortcode für immer bei seinem Modell und wird nie
-wiederverwendet — das löst das Problem, dass der Server seine Modelle
-bei jedem Boot dynamisch von Live-Provider-APIs lädt und pro Boot neu
-berechnete Kürzel sich bei jeder Änderung der Live-Liste verschoben.
-
-- **Semantischer Code kommt vom Fetcher, nicht aus einer Neuberechnung:**
-  `SyncProvider` bekommt pro Modell einen `ProviderModelSeed` mit
-  `SemanticHint` (= `Model.Shortcode` aus `provider_fetchers.go`, bei
-  cheaperinference ohne das `ci-`-Präfix). Die Fetcher berechnen ihre
-  Codes mit einer fetch-weiten `used`-Map und liefern deshalb innerhalb
-  eines Providers unterscheidbare Kürzel.
-- **Beide Zweige von `GenerateShortcode` lösen Kollisionen auf.** Der
-  No-Family-Zweig (`shortcode.go`, IDs ohne Präfix-Treffer wie `ci-...`,
-  `LongCat-...`) nutzt `cutterCode(modelID)`, das nur den längsten
-  Tabellen-Präfix liefert — viele IDs ergeben also denselben Code. Deshalb
-  laufen Familien- und No-Family-Pfad durch denselben
-  `resolveCollision(sc, used)`-Helper (`l62`, `l62-2`, `l62-3`). Ein neuer
-  Zweig muss das auch tun. Regressionstest:
-  `TestGenerateShortcode_NoFamilyMatchStillDeduplicates`.
-- **Kollisions-Suffix ist `.2`/`.3`**, nicht `-2` — `-` trennt den Kanal
-  ab, `zai-glm45-2` wäre sonst zweideutig.
-- **Retire nach 3 aufeinanderfolgenden ERFOLGREICHEN Fetches ohne das
-  Modell** (`miss_streak`); ein fehlgeschlagener Fetch lässt den Zähler
-  unangetastet. Retired Modelle bleiben auflösbar und werden mit
-  **HTTP 410** abgelehnt (kein stiller Fallback auf ein anderes Modell).
-  Taucht ein retired Modell wieder auf, bekommt es seinen alten
-  Shortcode zurück.
-- **Nil-safe wie `costDB`:** schlägt `OpenIDRegistry` beim Start fehl,
-  läuft der Server mit pro Boot berechneten Shortcodes weiter. Scheitert
-  die Zuweisung für ein einzelnes Modell, wird nur dieses Modell
-  übersprungen (`LogWarn`) — nicht der ganze Provider-Sync.
-
-**Zwei operative Eigenheiten, die man kennen sollte:**
-
-1. **Shortcodes ändern sich einmalig beim Upgrade.** Beim ersten Boot mit
-   dieser Version werden alle Kürzel neu vergeben: aus `glm46` wird
-   `zai-glm46`, aus `cl45-s` wird `mam-cl45-s`. Es gibt bewusst keine
-   Kompatibilitätsschicht — Clients (Skripte, `ANTHROPIC_BASE_URL`-Configs,
-   C++-Client) müssen `/api/shortcodes` einmal neu abrufen. Siehe
-   `TODO.md`, Abschnitt "Shortcode".
-2. **Retirement zählt Boots, nicht Fetch-Zyklen.** `SyncProvider` wird nur
-   aus `loadModelsFromProviders()` aufgerufen, und das passiert
-   ausschließlich beim Serverstart. Auf einem langlaufenden Deployment
-   braucht ein verschwundenes Modell also 3 **Neustarts** bis zum
-   Retire, nicht 3 Abrufe. Der HTTP-410-Pfad ist damit erreichbar, aber
-   in der Praxis träge. Bewusste Scope-Entscheidung (Boot-Sync statt
-   Hintergrund-Poller), kein Bug.
-
-### Provider-Kennzeichnung (`sigoengine/provider_id.go`)
-
-Vorher: drei unabhängige, unterschiedlich vollständige
-Provider-Erkennungen — `sigoREST/main.go:providerForModel()` (nur
-Endpoint-Substring + Namens-Fallback), `cmd/sigoE/main.go:listAllModels()`
-(nur Mammoth/Moonshot/Z.ai, alles andere landete in "Other" — Longcat,
-cheaperinference, Ollama fehlten komplett) und `sigoengine/channel.go:
-knownProviders` (nur für ENV-Var-Discovery gedacht, nie für
-Anzeige-Zwecke). Jetzt eine kanonische Quelle:
-
-- `ProviderFromEndpoint(endpoint)` — erkennt anhand der Endpoint-URL
-  (`mammouth`, `moonshot`, `z.ai`, `longcat`, `cheaperinference`,
-  `localhost:11434`/`127.0.0.1:11434` → `ollama`); `""` bei keinem Match
-- `ProviderFromModelID(modelID)` — Namens-Heuristik als Fallback
-  (`ollama-`-Präfix, `kimi`, `glm`, `longcat`, `ci-`-Präfix, `/` →
-  `openrouter` — einzige IDs mit Slash), Default `"mammouth"`
-- `ResolveProvider(endpoint, modelID)` — kombiniert beide: Endpoint
-  zuerst (zuverlässiger, vom Server selbst gesetzt), Namens-Heuristik
-  nur als Fallback
-- `ProviderCode(provider)` — normiert auf festen 5-Zeichen-Code
-  (`providerCodes`-Map: `mammo`, `moons`, `zai__`, `longc`, `cheap`,
-  `ollam`, `openr`; unbekannte Provider werden mit `_` aufgefüllt bzw.
-  hart auf 5 Zeichen gekappt)
-
-Genutzt von `sigoREST/main.go` (`providerForModel`/
-`providerForModelLocked` sind dünne Wrapper, die die alte Logik
-ersetzen), `/api/shortlist`, `/api/models` (`provider`/`provider_code`),
-`/v1/models` (`owned_by` — vorher hart `"sigorest"`) und `cmd/sigoE`
-(`-l`, `-i`).
-
-**Regeln dazu** (Hintergrund: `RETROSPECTIVE.md`, Nachtrag Provider-Kennzeichnung):
-- Wer `s.mu` schon hält, ruft die lock-freien Varianten
-  (`providerForModelLocked()`, `lookupModelMemory()`), nie die
-  selbstsperrenden — ein zweites `RLock()` kann deadlocken, sobald ein
-  Writer wartet (Go-`RWMutex` ist nicht reentrant).
-- Provider-Erkennung gibt es genau einmal: `ResolveProvider`. Auch
-  `cmd/sigoE` (`providerForModelCLI`) delegiert dorthin — keine eigene
-  Heuristik pflegen, sonst geht der Call mit dem falschen API-Key raus.
-- Ollama wird über `localhost:11434`/`127.0.0.1:11434` bzw. das
-  `ollama-`-Präfix erkannt.
-
-### Anthropic-Messages-Bridge (`/v1/messages`)
-
-Übersetzt Anthropic-Messages-Wire-Format (Request, Response, SSE-Streaming,
-Tool-Calling) auf dieselbe interne Engine wie `/v1/chat/completions` — jedes
-sigoREST-Modell ist damit auch über `ANTHROPIC_BASE_URL` (z.B. Claude Code)
-erreichbar, unabhängig vom Provider-Wire-Format. Modellwahl ist 1:1 wie bei
-`/v1/chat/completions` (ID/Shortcode, kein Alias). Keine Memory-/System-
-Prompt-/Session-Injektion in diesem Pfad — der Client verwaltet seinen
-eigenen Kontext. Details: `docs/superpowers/specs/2026-09-12-anthropic-messages-bridge-design.md`.
-
-### Kommunikationsprotokoll (`sigoengine/commlog.go`, Flag `-comm-log`)
-
-Optional (`-comm-log <pfad>`, leer = aus): jeder Chat-/Embedding-Call zum
-Provider wird mit vollständigem Request/Response als JSONL geschrieben.
-Umsetzung als `http.RoundTripper` (`NewCommLogTransport`), der in
-`chatHTTPClient` (`CallAPI`/`CallAPIStream`, also auch `/v1/messages`) und
-im Embedding-Client von `handleEmbeddings` steckt. Provider-Pings
-(`defaultHTTPClient`), Health-Monitor und Boot-Modellabrufe laufen bewusst
-**nicht** darüber — deshalb der eigene `chatHTTPClient`.
-
-- Eintrag wird beim `Close()` des Response-Bodys geschrieben (Tee-Reader),
-  sonst fehlte bei SSE alles nach den Headern. Aufrufer müssen den Body
-  schließen (tun sie: `defer stream.Close()`).
-- Gültiges JSON landet als eingebettetes Objekt (`json.RawMessage`, wird
-  beim Marshal kompaktiert → bleibt eine Zeile), SSE/Sonstiges als String.
-- Secret-Header → `[REDACTED]`; Bodies > 10 MiB abgeschnitten; Datei `0600`,
-  Append-Modus (logrotate mit `copytruncate`).
-- Öffnen fehlgeschlagen → Server-Start bricht ab (explizit angefordert,
-  kein stilles Weiterlaufen ohne Protokoll). Ohne Flag: Transport reicht
-  unverändert durch (`activeCommLog` = nil).
-
-### Session-Management
-
-Sessions als JSON-Dateien:
-- Pfad: `.sessions/<model>-<sessionID>.json`
-- Max 20 Messages pro Session (älteste verworfen)
-- Modell-spezifisch (`gpt41-projekt-a` vs `kimi-projekt-a`)
-
-### Logging
-
-Thread-safes, strukturiertes Logging:
-
-```go
-sigoengine.SetLogLevel(sigoengine.ParseLogLevel("debug"))
-sigoengine.SetJSONMode(true)   // Machine-parsable
-sigoengine.SetQuietMode(true)  // Nur ERROR und FATAL
-```
-
-**Ausgabe:** stderr (stdout sauber für UNIX piping)
-
-## Important Notes
-
-- **Go-Modul**: `sigorest` mit Go 1.26
-- **Embedded Files**: nur `memory.json` eingebettet (Disk hat Vorrang); Server-Modelle kommen dynamisch von den Providern, nicht aus einer embedded CSV
-- **systemd**: Unit muss `Wants/After=network-online.target` setzen, sonst lädt beim Boot nur die ZAI-/Longcat-Fallback-Liste (DNS-Race)
-- **API-Keys (ENV)**: `MAMMOUTH_API_KEY` (optional), `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference), `OPENROUTER_API_KEY`
-- **Kosten-DB**: `costs.db` (SQLite/WAL) im `-data-dir`; `modernc.org/sqlite` (pure Go) — kein CGO-Zwang im Build, bewusst analog zur Hermes-`state.db`-Entscheidung (lokaler Single-Process-Store, kein Netzwerk-Overhead)
-- **Shortcode-DB**: `id_registry.db` (SQLite/WAL) im `-data-dir`, gleicher Treiber wie `costs.db`; hält Provider-Kürzel und Modell-Shortcodes assign-once fest (nie wiederverwendet) — Details unter "ID-/Shortcode-Registry"
-- **Scope-Grenze**: sigoREST bleibt schlanker Proxy, kein Agent-Harness — bewusst kein Tool-Call-Repair o.ä.
-- **IPv6**: Geblockt (außer `::1` loopback)
-- **TLS**: Self-signed Zertifikat automatisch generiert beim ersten Start
-- **Ports**: 8080/8443 belegt auf Gerhards System (lokaler Webserver)
-
-## Retrospektiven
-
-Detaillierte Session-Historie: Siehe `RETROSPECTIVE.md`
-
-## Common Tasks
-
-### Neues Modell hinzufügen
-Server: Modelle kommen dynamisch vom Provider — bekannte Modelle werden in
-`provider_fetchers.go` angereichert (`moonshotKnownModels`, `zaiStaticModels`,
-`longcatKnownModels`, Mammoth via API). CLI: Eintrag in CSV/Registry.
-
-### Neuen Provider hinzufügen
-Reicht NICHT nur: `Fetch*`-Funktion in `provider_fetchers.go` + Eintrag in
-`channel.go` (`knownProviders`) + Aufruf in `loadModelsFromProviders()`.
-Zusätzlich nötig:
-
-- **`modelsEndpointForProvider()` in `sigoengine/engine.go`** braucht einen
-  `case` mit dem `/models`-Endpoint — sonst meldet die Health-Probe immer
-  "unavailable" und der Health-Monitor aktiviert nie einen Kanal des
-  Providers (abgesichert durch `TestModelsEndpointForProvider`, der
-  `knownProviders` gegenprüft).
-- **Provider-Erkennung** (heute `sigoengine/provider_id.go`:
-  `ProviderFromEndpoint` + `ProviderFromModelID` + `providerCodes`; die
-  Server-Funktion `providerForModel()` ist nur noch ein Wrapper darum)
-  braucht den neuen Provider in beiden Zweigen (Endpoint-Match und
-  Namens-Heuristik-Fallback) — sonst fällt jedes Modell des neuen Providers auf
-den Default-Zweig (`mammouth`) zurück und Chat-Calls gehen mit falschem
-API-Key raus (Symptom: HTTP 401 "incorrect api key", obwohl der Key gültig
-ist — beim Longcat-Rollout genau so live aufgetreten). Nach jedem neuen
-Provider einen echten End-to-End Chat-Call testen, nicht nur den Models-Fetch
-beim Boot.
-
-### REST-Server als systemd-Service installieren
-```bash
-sudo cp build/sigoREST /usr/local/sbin/sigoREST
-sudo mkdir -p /usr/local/slib/sigoREST
-sudo cp sigoREST/memory.json /usr/local/slib/sigoREST/
-# API-Keys in EnvironmentFile + Wants/After=network-online.target
-# → vollständige Service-Datei in docs/systemd-install.md
-```
-
-### Ollama-Modell nutzen
-```bash
-# Modell installieren
-ollama pull llama3.3
-
-# Server neu starten
-systemctl restart sigorest  # oder: ./build/sigoREST
-
-# Nutzen (auto-discovered)
-curl -s http://localhost:9080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"ollama-llama3.3","messages":[{"role":"user","content":"Hallo"}]}'
-```
-
-### Kosten im Blick behalten / Budget setzen
-```bash
-# Verbrauch heute / diesen Monat
-curl -s "http://localhost:9080/api/costs?period=today"
-curl -s "http://localhost:9080/api/costs?period=month"
-
-# Hartes Tages-/Monats-Limit setzen (Server lehnt Calls mit HTTP 402 ab,
-# sobald das Limit erreicht ist)
-curl -s -X PUT http://localhost:9080/api/budget \
-  -H "Content-Type: application/json" \
-  -d '{"daily_limit_usd":5,"monthly_limit_usd":100,"hard_stop_enabled":true}'
-
-# Nur beobachten, nie blockieren: hard_stop_enabled auf false lassen/setzen
-curl -s -X PUT http://localhost:9080/api/budget \
-  -H "Content-Type: application/json" \
-  -d '{"daily_limit_usd":5,"monthly_limit_usd":100,"hard_stop_enabled":false}'
-```
-
-### Debugging REST-Server
-```bash
-# Debug-Logs
-./build/sigoREST -v debug
-
-# Health check (Circuit Breaker Status)
-curl -s http://localhost:9080/api/health | jq
-
-# Memory-Block prüfen
-curl -s http://localhost:9080/api/memory
-
-# Session-Datei prüfen
-cat .sessions/gpt41-mein-projekt.json
-```
-
-### Session löschen
-```bash
-rm .sessions/gpt41-mein-projekt.json
-```
+- Server-Handler-Tests: `sigoREST/main_test.go` (Fake-Ollama `startFakeOllama`).
+  Die CLI hat keine Go-Tests — manuell testen.
+- Nach Server-Änderungen zusätzlich ein echter Call gegen einen Test-Server
+  auf freiem Port: `./build/sigoREST -http-port 19080 -https-port 19443
+  -data-dir <tmp>`. Der Live-Dienst belegt 9080/9443; auf Gerhards System
+  sind außerdem 8080/8443 belegt (lokaler Webserver).
+- Nach einem neuen Provider einen echten End-to-End-Chat-Call testen, nicht
+  nur den Models-Fetch beim Boot.
+
+## Regeln für Änderungen
+
+**Scope:** sigoREST bleibt schlanker Proxy, kein Agent-Harness — kein
+Tool-Call-Repair o.ä.
+
+**Modelle & Provider**
+- Der Server lädt Modelle beim Start dynamisch (`loadModelsFromProviders()`),
+  nicht aus einer CSV. Die CSV/Registry (`models_registry.go`) ist nur für die
+  CLI. Nur `sigoREST/memory.json` ist eingebettet, die Disk-Version hat Vorrang.
+- Provider-Erkennung gibt es genau einmal: `ResolveProvider`
+  (`sigoengine/provider_id.go`). Server (`providerForModel`) und CLI
+  (`providerForModelCLI`) delegieren dorthin — keine eigene Heuristik, sonst
+  gehen Calls mit dem falschen API-Key raus (Symptom: HTTP 401 "incorrect api
+  key" trotz gültigem Key).
+- Neuer Provider braucht alles davon: `Fetch*` in `provider_fetchers.go`,
+  Eintrag in `knownProviders` (`channel.go`), Aufruf in
+  `loadModelsFromProviders()`, `case` in `modelsEndpointForProvider()`
+  (`engine.go`, sonst aktiviert der Health-Monitor nie einen Kanal),
+  `ProviderFromEndpoint` + `ProviderFromModelID` + `providerCodes`.
+- Preise immer in $/1M Tokens. Mammouth (`model_info`) und OpenRouter liefern
+  USD pro Token → ×1e6. Ein Modell ohne Preis bucht $0 und hebelt das Budget
+  aus; in der Response ist `cost_usd` dann `null` (Ollama: `0.0`).
+- cheaperinference-IDs sind `ci-`-präfixt; vor dem Call `cfg.Model` mit
+  `Model.UpstreamID` überschreiben, nicht nur den Endpoint.
+- Shortcodes: Jeder Zweig von `GenerateShortcode` läuft durch
+  `resolveCollision` (Suffix `-2`). In der Registry ist der Kollisions-Suffix
+  dagegen `.2`, weil `-` dort den Kanal abtrennt.
+
+**Server-Code**
+- Wer `s.mu` hält, ruft nur lock-freie Varianten (`providerForModelLocked()`,
+  `lookupModelMemory()`). Go-`RWMutex` ist nicht reentrant — ein zweites
+  `RLock()` kann deadlocken, sobald ein Writer wartet.
+- Jeder Chat-Pfad ruft `Server.budgetBlocked()` vor dem Provider-Call
+  (heute `handleChatCompletions` und `handleMessages`).
+- Streaming: `CallAPIStream` setzt `stream_options.include_usage` — ohne
+  echten Usage-Chunk greift `EstimateUsage` und bucht ein Vielfaches.
+- `costDB` und `idRegistry` sind nil-safe; ein DB-Fehler wird nur geloggt und
+  darf nie den Response-Pfad stören.
+- Provider-Budget erschöpft (429/402 mit `budget_exceeded`,
+  `ExceededBudget`, `insufficient_quota`) ist `ErrQuotaExceeded`: kein Retry,
+  kein Failover.
+- Ollama hat keinen API-Key und bekommt seinen Kanal über
+  `AddKeylessChannel("ollama")`; Discovery läuft vor der Channel-Registry.
+- Kanal-Status: Automatik (Health-Monitor, Auth-Fehler) nutzt `SetActive`,
+  nur die API nutzt `SetActiveManual`. Manuell deaktivierte Kanäle aktiviert
+  die Automatik nie wieder.
+- Response-Bodys von Provider-Calls immer schließen — das
+  Kommunikationsprotokoll (`-comm-log`) schreibt den Eintrag erst beim
+  `Close()`.
+
+## Betrieb
+
+- systemd-Unit braucht `Wants=`/`After=network-online.target`, sonst lädt
+  beim Boot nur die statische ZAI-/Longcat-Liste (DNS-Race). Details:
+  `README.md.d/README_betrieb.md`, `docs/systemd-install.md`.
+- API-Keys: `MAMMOUTH_API_KEY`, `MOONSHOT_API_KEY`, `ZAI_API_KEY`,
+  `LONGCAT_API_KEY`, `OMNIROUTE_API_KEY` (cheaperinference),
+  `OPENROUTER_API_KEY`; indizierte `_0`, `_1`, … sind Reservekanäle.
+- Gerhards Tageslimit: $55.93 (= 50 €) mit Hard-Stop.
