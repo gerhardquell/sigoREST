@@ -42,13 +42,13 @@ Prompt-Audit (`/claude-api prompt-audit`) der Claude-Code-Konfiguration, die in 
 - Die Verweise sind einfache Pfade ohne `@`-Import. Ein `@`-Import würde die Datei sofort mitladen, und die Ersparnis wäre weg.
 
 ### 4. Aufräumen außerhalb des Repos
-- **Noch offen** aus dem Audit, betrifft die globale Konfiguration und ist nicht angewendet:
-  - P6: toter graphify-Verweis in `~/.claude/CLAUDE.md`
-  - P7: Zirkelverweis in `RTK.md`
-  - P8: kleingeschriebene Tool-Namen in den Agents
-  - P9: Lehrbuch-Zeilen in `db-expert`
-  - P10: "seit 20261001" in `desktop-start`
-  - P11/P12: `codereview-feynman`, Änderung nötig in der claude.ai-Quelle
+- **Globale Audit-Hunks angewendet** (wirken in allen Projekten):
+  - P6: toten graphify-Verweis aus `~/.claude/CLAUDE.md` entfernt
+  - P7: Zirkelverweis aus `RTK.md` entfernt
+  - P8: Tool-Namen in den Agents großgeschrieben (`Read, Write, Bash`)
+  - P9: Lehrbuch-Zeilen aus `db-expert` entfernt
+  - P10: "seit 20261001" aus `desktop-start` gestrichen
+- **Noch offen:** P11/P12 für `codereview-feynman` — die Änderung muss in der claude.ai-Quelle gemacht werden, ein lokaler Edit würde beim Sync überschrieben.
 - **Skills:**
   - `codeguide` ist jetzt aktiv: Die Datei lag als `~/.claude/skills/codeguide.md` statt in `skills/codeguide/SKILL.md` und wurde deshalb nie geladen. Der Fehler stand schon im Plan vom März.
   - Eine lose, ältere Kopie von `codereview-feynman` ist gelöscht.
