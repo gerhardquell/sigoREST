@@ -597,3 +597,15 @@ Alle Beispiele funktionieren. Streaming zeigt jetzt echte `event: message_delta`
 ---
 
 *(Vorherige Retrospektiven siehe weiter unten im Dokument)*
+
+## Nachtrag: Provider-Kennzeichnung (2026-09-20, aus CLAUDE.md verschoben am 2026-10-12)
+
+Beim Umbau auf die kanonische Provider-Erkennung (`sigoengine/provider_id.go`) gefundene Bugs; die geltenden Regeln stehen in `CLAUDE.md` unter "Provider-Kennzeichnung".
+
+1. **Rekursiver RLock**: `handleShortlist`/`handleModels` hielten `s.mu.RLock()` per `defer` und riefen darin `providerForModel()` auf, das selbst nochmal `s.mu.RLock()` nimmt — Go's `RWMutex` garantiert das nicht deadlock-frei, wenn ein Writer dazwischen wartet. Fix: separate lock-freie `providerForModelLocked()` für Aufrufer, die den Lock schon halten.
+2. **Ollama fiel auf `mammouth` zurück**: die alte Heuristik kannte weder `localhost:11434` noch das `ollama-`-Präfix — seitdem in `ProviderFromEndpoint`/`ProviderFromModelID` explizit behandelt.
+3. **CLI hatte eine zweite, unvollständige Kopie dieser Logik** (`cmd/sigoE/main.go:providerForModelCLI`, eigener Switch nur für Mammouth/Moonshot/ZAI): beim OpenRouter-Rollout aufgefallen, weil `-m <openrouter-shortcode>` sonst auf den `mammouth`-Kanal mit `MAMMOUTH_API_KEY` statt `OPENROUTER_API_KEY` gelaufen wäre — betraf schon vorher jedes Longcat-/cheaperinference-Modell in der CLI. Fix: `providerForModelCLI` delegiert an `ResolveProvider`.
+
+## Nachtrag: Off-by-One bei `CostDB.Summary()` (aus CLAUDE.md verschoben am 2026-10-12)
+
+Beobachtet als "Chat-Call meldet Erfolg, `/api/costs` zeigt trotzdem 0 Requests": gespeicherte Timestamps sind ganze Sekunden (`ts.Unix()`), `until` war `time.Now()` mit Nanosekunden, und `until.Unix()` (floor) schnitt genau die Sekunde ab, in der das Event gerade geschrieben wurde. Fix: `ceilUnix()` rundet `until` auf; Regressionstest `TestSummary_IncludesEventFromSameInstantAsUntil`.

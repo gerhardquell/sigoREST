@@ -1,13 +1,10 @@
 # CLAUDE.md
 
-claude --worktree anthropic-messages-bridge --resume cd4cd259-7826-41a6-b845-5383fc49acf2
-
-
 Anleitung für Claude Code (claude.ai/code) bei Arbeit mit diesem Repo.
 
 ## Developer
 
-- <IMPORTANCE>Deutsch mit User, "Du" und "Gerhard"</IMPORTANCE>
+- Sprache: Deutsch. Gerhard duzen und mit Namen ansprechen.
 
 ## Project Overview
 
@@ -17,7 +14,7 @@ sigoREST = drei-schichtiges Go-Projekt, zwei User-Interfaces:
 - **sigoREST Server**: OpenAI-kompatibler REST-Server für parallele Verbindungen (~100)
 
 Beide nutzen **Shared Package** `sigoengine` für:
-- Model-Registry (Modelle von Mammouth.ai, Moonshot.ai, Z.ai, Longcat, cheaperinference)
+- Model-Registry (Modelle von Mammouth.ai, Moonshot.ai, Z.ai, Longcat, cheaperinference, OpenRouter)
 - API-Abstraktion (OpenAI + Anthropic Formate)
 - Multi-Channel-Support mit Failover + pro-Kanal Rate-Limiting + Health-Monitor
 - Circuit Breaker + Retry Logic
@@ -49,11 +46,11 @@ make clean          # ./build/ entfernen
 ./build/sigoE -l
 
 # Prompt senden
-echo "Hallo" | ./build/sigoE -m claude-h
+echo "Hallo" | ./build/sigoE -m gpt41
 
 # Mit Session
-./build/sigoE -m claude-h -s projekt-x "Erste Nachricht"
-./build/sigoE -m claude-h -s projekt-x "Zweite Nachricht"
+./build/sigoE -m gpt41 -s projekt-x "Erste Nachricht"
+./build/sigoE -m gpt41 -s projekt-x "Zweite Nachricht"
 ```
 
 ### Server testen
@@ -61,10 +58,10 @@ echo "Hallo" | ./build/sigoE -m claude-h
 # Health check
 curl -s http://localhost:9080/api/health
 
-# Chat completion
+# Chat completion (<shortcode> aus: curl -s http://localhost:9080/api/shortcodes)
 curl -s http://localhost:9080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-h","messages":[{"role":"user","content":"Hallo"}]}'
+  -d '{"model":"<shortcode>","messages":[{"role":"user","content":"Hallo"}]}'
 
 # Modell-Liste
 curl -s http://localhost:9080/v1/models | jq '.data[].id'
@@ -159,7 +156,7 @@ Thread-safe Package für CLI und REST (mehrere Dateien, siehe Baum oben). Export
 Schlanker Wrapper nutzt sigoengine. Rückwärtskompatibel zu ursprünglichem sigoEngine Binary.
 
 **Flags:**
-- `-m` Modell (default: `claude-h`, Shortcode oder vollständiger Name)
+- `-m` Modell (default: `gpt41`, Shortcode oder vollständiger Name)
 - `-s` Session-ID (für Gesprächsverlauf)
 - `-n` Max Tokens (0 = Modell-Default)
 - `-T` Temperatur (-1 = Modell-Default)
@@ -214,7 +211,7 @@ sie nicht.
 **sigoREST-Erweiterungen im Request:**
 ```json
 {
-  "model": "claude-h",
+  "model": "<shortcode>",
   "messages": [...],
   "session_id": "mein-projekt",   // Optional
   "timeout": 120,                  // Optional (default 180)
@@ -386,16 +383,16 @@ Ollama-Modelle: kein API-Key (`APIKey: ""`), nutzen `http://localhost:11434/v1/c
 
 **Limitation:** Nur Startzeit-Discovery → Neustart nötig nach `ollama pull`.
 
-**Kanal ohne Key (Bug bis 2026-09-27):** Chat läuft auch für Ollama über
+**Kanal ohne Key:** Chat läuft auch für Ollama über
 `ChannelManager.Resolve`, aber `DiscoverFromEnv` legt Kanäle nur für
-Provider mit API-Key an (`knownProviders`). Ollama hatte deshalb keinen
-Kanal — jeder Ollama-Chat (auch `/v1/messages`) endete mit `404
-CONFIG_NOT_FOUND: no active channel for provider`, ohne Ollama je zu
-erreichen (Embeddings liefen, weil `/v1/embeddings` keinen Kanal nutzt).
-Fix ohne Sonderweg im Handler: Discovery läuft jetzt VOR der Registry,
-`newChannelRegistry` (`sigoREST/main.go`) registriert bei gefundenen
-Modellen `AddKeylessChannel("ollama")` → Kanal `ollama-default`, danach
-`LoadState` (per API deaktiviert bleibt deaktiviert). Regressionstest:
+Provider mit API-Key an (`knownProviders`). Deshalb läuft die
+Ollama-Discovery VOR der Registry, und `newChannelRegistry`
+(`sigoREST/main.go`) registriert bei gefundenen Modellen
+`AddKeylessChannel("ollama")` → Kanal `ollama-default`, danach
+`LoadState` (per API deaktiviert bleibt deaktiviert). Kein Sonderweg im
+Handler. Fehlt der Kanal, endet jeder Ollama-Chat (auch `/v1/messages`)
+mit `404 CONFIG_NOT_FOUND: no active channel for provider`, während
+`/v1/embeddings` (ohne Kanal) weiter funktioniert. Regressionstest:
 `TestHandleChatCompletions_OllamaWithoutAPIKey`.
 
 ### Circuit Breaker
@@ -471,39 +468,37 @@ API-Response-Pfad in den Weg gestellt.
 **Budget-Check vor jedem Call:** `Server.budgetBlocked()` (`main.go`),
 aufgerufen in `handleChatCompletions` (nach dem Provider-Ping) UND in
 `handleMessages` (Anthropic-Bridge, Antwort dort `402 billing_error` im
-Anthropic-Format). Bis 2026-10-08 fehlte der Check in der Bridge — Claude
-Code über `ANTHROPIC_BASE_URL` überschritt ein $10-Tageslimit mit Hard-Stop
-ungebremst auf $25 (TODO 20261008). `CheckBudget(now)` prüft
+Anthropic-Format). Jeder neue Chat-Pfad braucht diesen Check — ohne ihn
+läuft Claude Code über `ANTHROPIC_BASE_URL` ungebremst am Hard-Stop
+vorbei. `CheckBudget(now)` prüft
 Tages-/Monats-Ausgaben (`spendSince`, lokale Zeitzone via
 `StartOfDay`/`StartOfMonth`) gegen die konfigurierten Limits
 (`budget_config`-Tabelle, Singleton-Zeile). Nur bei `hard_stop_enabled:
 true` UND überschrittenem Limit wird der Call mit `HTTP 402
 budget_exceeded` abgelehnt — Default ist reines Tracking, kein Eingriff.
-Modelle ohne Preis buchen $0 und zählen nicht gegen das Limit. Mammouth
-fiel bis 2026-10-08 komplett darunter: `/public/models` liefert Preise und
-Limits im LiteLLM-Format verschachtelt unter `model_info`
-(`input_cost_per_token`/`output_cost_per_token`, **USD pro Token** → ×1e6;
-`max_input_tokens`/`max_output_tokens`), der Fetcher las aber nur
-geratene Top-Level-Felder → alles lief über die statische, teils veraltete
-`mammouthKnownModels`-Tabelle (`claude-opus-5-5` $0, `claude-sonnet-5`
-3/15 statt 2/10 $/1M). Jetzt haben die `model_info`-Werte Vorrang, die
-Tabelle ist nur noch Fallback (Test: `sigoengine/mammouth_fetcher_test.go`).
+Modelle ohne Preis buchen $0 und zählen nicht gegen das Limit — ein
+Fetcher, der Preise nicht findet, hebelt das Budget also still aus.
+Mammouth: `/public/models` liefert Preise und Limits im LiteLLM-Format
+verschachtelt unter `model_info` (`input_cost_per_token`/
+`output_cost_per_token`, **USD pro Token** → ×1e6;
+`max_input_tokens`/`max_output_tokens`). Diese Werte haben Vorrang, die
+statische `mammouthKnownModels`-Tabelle ist nur Fallback und teils
+veraltet (Test: `sigoengine/mammouth_fetcher_test.go`).
 
-**Stream-Usage ist opt-in (Bug bis 2026-10-08):** OpenAI-kompatible
-Provider schicken im SSE-Stream nur dann einen `usage`-Chunk, wenn
-`stream_options.include_usage` gesetzt ist. sigoREST setzte das nie →
-beide Stream-Pfade (`/v1/messages`, `/v1/chat/completions` mit
-`stream:true`) fielen still auf `EstimateUsage` zurück (Runen/3, kein
-Cache-Rabatt). Claude Code über die Bridge wurde dadurch ~4x zu teuer
-gebucht ($80 statt ~$20 am 2026-10-08), der Hard-Stop griff zu früh.
-Fix: `CallAPIStream` setzt `stream_options:{include_usage:true}` für alle
+**Stream-Usage ist opt-in:** OpenAI-kompatible Provider schicken im
+SSE-Stream nur dann einen `usage`-Chunk, wenn
+`stream_options.include_usage` gesetzt ist. Deshalb setzt
+`CallAPIStream` `stream_options:{include_usage:true}` für alle
 Nicht-Anthropic-Provider (ein vom Client gesetzter Wert bleibt erhalten),
-`streamAnthropicResponse` wertet Usage über `ExtractUsage` aus (inkl.
-`cached_tokens`). Tests: `TestCallAPIStream_RequestsUsage`,
+und `streamAnthropicResponse` wertet Usage über `ExtractUsage` aus (inkl.
+`cached_tokens`). Fehlt der Chunk, fallen beide Stream-Pfade still auf
+`EstimateUsage` zurück (Runen/3, kein Cache-Rabatt) — die Buchung ist
+dann ein Mehrfaches zu hoch und der Hard-Stop greift zu früh. Tests:
+`TestCallAPIStream_RequestsUsage`,
 `TestStreamAnthropicResponse_UsageIncludesCachedTokens`. `costs.db`-Werte
-für cheaperinference vor dem Fix sind überhöht (10-08 korrigiert, 10-07
-nicht). Gerhards Tageslimit: $55.93 (= 50 €) mit Hard-Stop, als
-Sicherheitsnetz gegen KI-Schwärme.
+für cheaperinference bis einschließlich 2026-10-07 sind überhöht.
+Gerhards Tageslimit: $55.93 (= 50 €) mit Hard-Stop, als Sicherheitsnetz
+gegen KI-Schwärme.
 
 **Provider-Budget erschöpft ≠ Rate-Limit:** Mammouth (LiteLLM-Gateway)
 meldet ein erschöpftes User-Budget als HTTP 429 (`"type":"budget_exceeded"`,
@@ -514,15 +509,13 @@ Kanäle (alle Keys = derselbe User). Jetzt: `classifyHTTPError` erkennt
 als `ErrQuotaExceeded` — nicht retrybar, kein Failover, Client bekommt 402
 (`budget_exceeded` bzw. `billing_error` in der Bridge).
 
-**Bekannter Bug + Fix (Off-by-One bei `Summary()`):** gespeicherte
-Timestamps sind ganze Sekunden (`ts.Unix()`), aber `until` in
-`/api/costs` ist `time.Now()` mit Nanosekunden-Anteil. Ohne Rundung
-schneidet `until.Unix()` (floor) exakt die Sekunde ab, in der ein Event
-GERADE JETZT geschrieben wurde — beobachtet als "Chat-Call meldet Erfolg,
-`/api/costs` zeigt trotzdem 0 Requests", wenn beide im selben
-Sekunden-Tick liegen. Fix: `ceilUnix()` rundet `until` für die
-`Summary()`-Query auf die nächste volle Sekunde auf (Regressionstest:
-`TestSummary_IncludesEventFromSameInstantAsUntil`).
+**`until` aufrunden (`Summary()`):** gespeicherte Timestamps sind ganze
+Sekunden (`ts.Unix()`), `until` in `/api/costs` ist `time.Now()` mit
+Nanosekunden-Anteil. `ceilUnix()` rundet `until` für die
+`Summary()`-Query auf die nächste volle Sekunde auf; mit `until.Unix()`
+(floor) fiele ein Event aus derselben Sekunde heraus ("Chat-Call meldet
+Erfolg, `/api/costs` zeigt 0 Requests"). Regressionstest:
+`TestSummary_IncludesEventFromSameInstantAsUntil`.
 
 ### ID-/Shortcode-Registry (`sigoengine/id_registry.go`)
 
@@ -542,17 +535,13 @@ berechnete Kürzel sich bei jeder Änderung der Live-Liste verschoben.
   cheaperinference ohne das `ci-`-Präfix). Die Fetcher berechnen ihre
   Codes mit einer fetch-weiten `used`-Map und liefern deshalb innerhalb
   eines Providers unterscheidbare Kürzel.
-- **Bug behoben (war bis 2026-09-21 live): IDs ohne Familien-Präfix
-  kollabierten auf denselben Code.** `GenerateShortcode`s No-Family-Zweig
-  (`shortcode.go`) rief bei fehlendem Präfix-Treffer (`ci-...`,
-  `LongCat-...`) `cutterCode(modelID)` auf und gab sofort zurück, OHNE
-  die `used`-Map zu konsultieren — Schritt 6 (Kollisionsauflösung) griff
-  nur im Familien-Pfad. Da `cutterCode` nur den längsten Tabellen-Präfix
-  zurückgibt (nicht den Rest der ID), bekamen z.B. alle unbekannten
-  Longcat-Modelle denselben Code (`l62`). Fix: gemeinsamer
-  `resolveCollision(sc, used)`-Helper, jetzt von beiden Zweigen genutzt
-  — No-Family-IDs bekommen bei Kollision denselben `-2`/`-3`-Suffix wie
-  familien-basierte Codes (`l62`, `l62-2`, `l62-3`). Regressionstest:
+- **Beide Zweige von `GenerateShortcode` lösen Kollisionen auf.** Der
+  No-Family-Zweig (`shortcode.go`, IDs ohne Präfix-Treffer wie `ci-...`,
+  `LongCat-...`) nutzt `cutterCode(modelID)`, das nur den längsten
+  Tabellen-Präfix liefert — viele IDs ergeben also denselben Code. Deshalb
+  laufen Familien- und No-Family-Pfad durch denselben
+  `resolveCollision(sc, used)`-Helper (`l62`, `l62-2`, `l62-3`). Ein neuer
+  Zweig muss das auch tun. Regressionstest:
   `TestGenerateShortcode_NoFamilyMatchStillDeduplicates`.
 - **Kollisions-Suffix ist `.2`/`.3`**, nicht `-2` — `-` trennt den Kanal
   ab, `zai-glm45-2` wäre sonst zweideutig.
@@ -613,24 +602,16 @@ ersetzen), `/api/shortlist`, `/api/models` (`provider`/`provider_code`),
 `/v1/models` (`owned_by` — vorher hart `"sigorest"`) und `cmd/sigoE`
 (`-l`, `-i`).
 
-**Zwei Bugs beim Umbau gefunden:**
-1. **Rekursiver RLock**: `handleShortlist`/`handleModels` halten
-   `s.mu.RLock()` per `defer` und riefen darin `providerForModel()` auf,
-   das selbst nochmal `s.mu.RLock()` nimmt — Go's `RWMutex` garantiert
-   das nicht deadlock-frei, wenn ein Writer dazwischen wartet. Fix:
-   separate lock-freie `providerForModelLocked()` für Aufrufer, die den
-   Lock schon halten.
-2. **Ollama fiel auf `mammouth` zurück**: die alte Heuristik kannte
-   weder `localhost:11434` noch das `ollama-`-Präfix — jetzt in
-   `ProviderFromEndpoint`/`ProviderFromModelID` explizit behandelt.
-3. **CLI hatte eine zweite, unvollständige Kopie dieser Logik**
-   (`cmd/sigoE/main.go:providerForModelCLI`, eigener Switch nur für
-   Mammouth/Moonshot/ZAI): beim OpenRouter-Rollout aufgefallen, weil
-   `-m <openrouter-shortcode>` sonst auf den `mammouth`-Kanal mit
-   `MAMMOUTH_API_KEY` statt `OPENROUTER_API_KEY` gelaufen wäre — betraf
-   schon vorher jedes Longcat-/cheaperinference-Modell in der CLI,
-   nur unbemerkt. Fix: `providerForModelCLI` delegiert jetzt an
-   `ResolveProvider` statt eine eigene Heuristik zu pflegen.
+**Regeln dazu** (Hintergrund: `RETROSPECTIVE.md`, Nachtrag Provider-Kennzeichnung):
+- Wer `s.mu` schon hält, ruft die lock-freien Varianten
+  (`providerForModelLocked()`, `lookupModelMemory()`), nie die
+  selbstsperrenden — ein zweites `RLock()` kann deadlocken, sobald ein
+  Writer wartet (Go-`RWMutex` ist nicht reentrant).
+- Provider-Erkennung gibt es genau einmal: `ResolveProvider`. Auch
+  `cmd/sigoE` (`providerForModelCLI`) delegiert dorthin — keine eigene
+  Heuristik pflegen, sonst geht der Call mit dem falschen API-Key raus.
+- Ollama wird über `localhost:11434`/`127.0.0.1:11434` bzw. das
+  `ollama-`-Präfix erkannt.
 
 ### Anthropic-Messages-Bridge (`/v1/messages`)
 
@@ -668,7 +649,7 @@ im Embedding-Client von `handleEmbeddings` steckt. Provider-Pings
 Sessions als JSON-Dateien:
 - Pfad: `.sessions/<model>-<sessionID>.json`
 - Max 20 Messages pro Session (älteste verworfen)
-- Modell-spezifisch (`claude-h-projekt-a` vs `gpt41-projekt-a`)
+- Modell-spezifisch (`gpt41-projekt-a` vs `kimi-projekt-a`)
 
 ### Logging
 
@@ -714,8 +695,8 @@ Zusätzlich nötig:
 - **`modelsEndpointForProvider()` in `sigoengine/engine.go`** braucht einen
   `case` mit dem `/models`-Endpoint — sonst meldet die Health-Probe immer
   "unavailable" und der Health-Monitor aktiviert nie einen Kanal des
-  Providers (bis 2026-09-27 bei longcat/cheaperinference so; abgesichert
-  durch `TestModelsEndpointForProvider`, der `knownProviders` gegenprüft).
+  Providers (abgesichert durch `TestModelsEndpointForProvider`, der
+  `knownProviders` gegenprüft).
 - **Provider-Erkennung** (heute `sigoengine/provider_id.go`:
   `ProviderFromEndpoint` + `ProviderFromModelID` + `providerCodes`; die
   Server-Funktion `providerForModel()` ist nur noch ein Wrapper darum)
@@ -780,10 +761,10 @@ curl -s http://localhost:9080/api/health | jq
 curl -s http://localhost:9080/api/memory
 
 # Session-Datei prüfen
-cat .sessions/claude-h-mein-projekt.json
+cat .sessions/gpt41-mein-projekt.json
 ```
 
 ### Session löschen
 ```bash
-rm .sessions/claude-h-mein-projekt.json
+rm .sessions/gpt41-mein-projekt.json
 ```
