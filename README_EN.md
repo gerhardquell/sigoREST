@@ -1,5 +1,7 @@
 # sigoREST
 
+> **Frozen as of 2026-10-12 — no longer maintained.** The current documentation is the German [README.md](README.md) with [`README.md.d/`](README.md.d/). Shortcodes and provider lists below are outdated.
+
 REST server for sigoEngine. Unified OpenAI-compatible API for ~100 parallel connections.
 IP-based access control, global + channel-specific memory, Multi-Channel support with failover.
 

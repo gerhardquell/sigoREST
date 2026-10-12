@@ -1,5 +1,7 @@
 # sigoREST
 
+> **自 2026-10-12 起冻结，不再维护。** 最新文档为德文版 [README.md](README.md) 及 [`README.md.d/`](README.md.d/)。以下的 Shortcode 和 Provider 列表已过时。
+
 sigoEngine 的 REST 服务器。统一兼容 OpenAI 的 API，支持约 100 个并行连接。
 基于 IP 的访问控制，全局和渠道特定的记忆块，支持多渠道和故障转移。
 
