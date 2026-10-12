@@ -68,7 +68,8 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
 
 ### Offen
 
-- [ ] **Die cheaperinference-Zeilen oben passen nicht zu sigoREST.**
+- [x] **Die cheaperinference-Zeilen oben passen nicht zu sigoREST.**
+  Erledigt (2026-10-12): Gerhard hat die betroffenen Keys gelöscht.
   sigoREST schickt `claude-opus-4-7` nur an Mammouth (`mam-cl47-o`, es gibt
   kein `ci-claude-opus-4-7`) und loggte zwischen 13:23:29 und 13:23:42 keinen
   Fehler. Der letzte cheaperinference-Call war um 13:23:29 der erfolgreiche
@@ -84,10 +85,10 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
   (`baseUrl http://127.0.0.1:9080/v1`), seine letzte Session war am
   2026-10-07 um 17:35. Übrig bleiben internes Routing bei cheaperinference
   oder ein Leck der Keys. Vorschlag:
-  - [ ] `KEY_0`/`KEY_1` vorsorglich tauschen, dann neue Keys in
+  - [x] `KEY_0`/`KEY_1` vorsorglich tauschen, dann neue Keys in
     `/usr/local/slib/sigoREST/.env` und `~/.bashrc` eintragen und sigoREST
     neu starten.
-  - [ ] cheaperinference-Support fragen, warum Calls auf `claude-opus-4-7`
+  - [x] cheaperinference-Support fragen, warum Calls auf `claude-opus-4-7`
     mit 0 Tokens unter Gerhards Keys stehen (13:23:29–38), obwohl von ihm
     in diesem Zeitfenster nur ein `gpt-6-sol`-Call kam.
 - [ ] Mammouth-`Spend=21.68` vs. sigoREST-Anteil diesen Monat nach echten
