@@ -1255,7 +1255,7 @@ func TestNewChannelRegistry_NoOllamaNoChannel(t *testing.T) {
 // es weiterhin selbst ergänzen.
 func TestStreamProviderResponse_ExactlyOneDone(t *testing.T) {
 	cases := map[string]string{
-		"upstream mit [DONE]": "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n",
+		"upstream mit [DONE]":  "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n",
 		"upstream ohne [DONE]": "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
 	}
 	for name, upstream := range cases {

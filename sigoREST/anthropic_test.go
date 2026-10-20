@@ -604,9 +604,9 @@ func TestBudgetToEffort(t *testing.T) {
 		budget int
 		want   string
 	}{
-		{0, "low"},     // Client ohne Budget
-		{1024, "low"},  // pi minimal
-		{4096, "low"},  // pi low
+		{0, "low"},    // Client ohne Budget
+		{1024, "low"}, // pi minimal
+		{4096, "low"}, // pi low
 		{8191, "low"},
 		{10240, "medium"}, // pi medium
 		{16383, "medium"},

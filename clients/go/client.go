@@ -115,26 +115,26 @@ type ChatRequest struct {
 
 // ChatResponse represents a chat completion response
 type ChatResponse struct {
-	Content      string `json:"content"`
-	Model        string `json:"model"`
-	SessionID    string `json:"session_id,omitempty"`
-	RawResponse  map[string]interface{}
+	Content     string `json:"content"`
+	Model       string `json:"model"`
+	SessionID   string `json:"session_id,omitempty"`
+	RawResponse map[string]interface{}
 }
 
 // ChatCompletionChunk represents one streaming chunk from the server.
 type ChatCompletionChunk struct {
-	ID      string                     `json:"id"`
-	Object  string                     `json:"object"`
-	Created int64                      `json:"created"`
-	Model   string                     `json:"model"`
+	ID      string                      `json:"id"`
+	Object  string                      `json:"object"`
+	Created int64                       `json:"created"`
+	Model   string                      `json:"model"`
 	Choices []ChatCompletionChunkChoice `json:"choices"`
 }
 
 // ChatCompletionChunkChoice is the choice inside a streaming chunk.
 type ChatCompletionChunkChoice struct {
-	Index        int                        `json:"index"`
-	Delta        ChatCompletionChunkDelta   `json:"delta"`
-	FinishReason string                     `json:"finish_reason,omitempty"`
+	Index        int                      `json:"index"`
+	Delta        ChatCompletionChunkDelta `json:"delta"`
+	FinishReason string                   `json:"finish_reason,omitempty"`
 }
 
 // ChatCompletionChunkDelta is the delta inside a streaming choice.
@@ -166,11 +166,11 @@ type ModelInfo struct {
 
 // HealthResponse represents the server health status
 type HealthResponse struct {
-	Status          string                 `json:"status"`
-	Timestamp       int64                  `json:"timestamp"`
-	AvailableModels int                    `json:"available_models"`
-	MemorySet       bool                   `json:"memory_set"`
-	CircuitBreakers []CircuitBreakerState  `json:"circuit_breakers,omitempty"`
+	Status          string                `json:"status"`
+	Timestamp       int64                 `json:"timestamp"`
+	AvailableModels int                   `json:"available_models"`
+	MemorySet       bool                  `json:"memory_set"`
+	CircuitBreakers []CircuitBreakerState `json:"circuit_breakers,omitempty"`
 }
 
 // CircuitBreakerState represents the state of a circuit breaker

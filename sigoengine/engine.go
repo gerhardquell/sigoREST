@@ -82,7 +82,7 @@ func NewError(code, message string, err error, fields map[string]interface{}) *S
 // APIError - Typisierter Fehler mit HTTP-Status für verbesserte Fehlerbehandlung
 
 type APIError struct {
-	Type       string        // "rate_limit", "auth_failed", "timeout", "server_error", "client_error"
+	Type       string // "rate_limit", "auth_failed", "timeout", "server_error", "client_error"
 	StatusCode int
 	Message    string
 	RetryAfter time.Duration
@@ -822,14 +822,14 @@ func (cb *CircuitBreaker) Failures() int {
 // **********************************************************************
 // EnhancedCircuitBreaker - State-Machine mit zeitlichem Fenster
 type EnhancedCircuitBreaker struct {
-	config           *CircuitBreakerConfig
-	state            CircuitBreakerState
-	failures         []time.Time // Zeitstempel der Fehler im Window
-	halfOpenAttempts int
-	lastStateChange  time.Time
-	lastRequest      time.Time    // Zeitstempel des letzten Requests (Rate Limiting)
+	config             *CircuitBreakerConfig
+	state              CircuitBreakerState
+	failures           []time.Time // Zeitstempel der Fehler im Window
+	halfOpenAttempts   int
+	lastStateChange    time.Time
+	lastRequest        time.Time     // Zeitstempel des letzten Requests (Rate Limiting)
 	minRequestInterval time.Duration // Mindestzeit zwischen Requests
-	mu               sync.RWMutex
+	mu                 sync.RWMutex
 }
 
 // NewEnhancedCircuitBreaker erstellt einen neuen Enhanced Circuit Breaker
@@ -1062,10 +1062,10 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 		}
 
 		LogDebug("Retrying after error", map[string]interface{}{
-			"error_type":     apiErr.Type,
-			"attempt":        attempt + 1,
-			"max_retries":    config.MaxRetries,
-			"backoff_ms":     sleepDuration.Milliseconds(),
+			"error_type":      apiErr.Type,
+			"attempt":         attempt + 1,
+			"max_retries":     config.MaxRetries,
+			"backoff_ms":      sleepDuration.Milliseconds(),
 			"next_backoff_ms": minDuration(time.Duration(float64(backoff)*config.BackoffFactor), config.MaxBackoff).Milliseconds(),
 		})
 

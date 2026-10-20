@@ -101,8 +101,8 @@ func initCutter() {
 // Reihenfolge wichtig: "text-embedding" vor "text", "deepseek-r" vor "deepseek"
 
 type familyEntry struct {
-	prefix  string
-	short   string
+	prefix string
+	short  string
 }
 
 var familyPrefixes = []familyEntry{
@@ -130,39 +130,39 @@ var familyPrefixes = []familyEntry{
 // Bekannte Varianten-Abkürzungen
 
 var variantMap = map[string]string{
-	"mini":       "m",
-	"nano":       "n",
-	"micro":      "u",
-	"small":      "s",
-	"large":      "l",
-	"flash":      "f",
-	"pro":        "p",
-	"lite":       "lt",
-	"air":        "a",
-	"turbo":      "t",
-	"vision":     "vis",
-	"image":      "img",
-	"chat":       "ch",
-	"code":       "cod",
-	"codex":      "cx",
-	"fast":       "fst",
-	"thinking":   "thnk",
-	"reasoning":  "reas",
-	"preview":    "pv",
-	"beta":       "b",
-	"instruct":   "inst",
-	"highspeed":  "hs",
-	"terminus":   "term",
-	"research":   "res",
+	"mini":        "m",
+	"nano":        "n",
+	"micro":       "u",
+	"small":       "s",
+	"large":       "l",
+	"flash":       "f",
+	"pro":         "p",
+	"lite":        "lt",
+	"air":         "a",
+	"turbo":       "t",
+	"vision":      "vis",
+	"image":       "img",
+	"chat":        "ch",
+	"code":        "cod",
+	"codex":       "cx",
+	"fast":        "fst",
+	"thinking":    "thnk",
+	"reasoning":   "reas",
+	"preview":     "pv",
+	"beta":        "b",
+	"instruct":    "inst",
+	"highspeed":   "hs",
+	"terminus":    "term",
+	"research":    "res",
 	"customtools": "ct",
-	"non":        "no",
-	"plus":       "pl",
-	"scout":      "sc",
-	"maverick":   "mv",
-	"sonnet":     "s",
-	"opus":       "o",
-	"haiku":      "h",
-	"auto":       "auto",
+	"non":         "no",
+	"plus":        "pl",
+	"scout":       "sc",
+	"maverick":    "mv",
+	"sonnet":      "s",
+	"opus":        "o",
+	"haiku":       "h",
+	"auto":        "auto",
 	// OpenRouter-Suffixe (":batch", ":free", ...) — selbe Kategorie wie
 	// "beta"/"thinking" oben, nur mit ":" statt "-" an die ID angehängt.
 	"batch":    "bat",

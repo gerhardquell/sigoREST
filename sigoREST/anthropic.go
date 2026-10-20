@@ -59,17 +59,17 @@ type AnthropicThinking struct {
 
 // AnthropicRequest ist der Body von POST /v1/messages.
 type AnthropicRequest struct {
-	Model         string              `json:"model"`
-	MaxTokens     int                 `json:"max_tokens"`
-	Messages      []AnthropicMessage  `json:"messages"`
-	System        json.RawMessage     `json:"system,omitempty"`
-	Tools         []AnthropicTool     `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage     `json:"tool_choice,omitempty"`
-	Temperature   *float64            `json:"temperature,omitempty"`
-	TopP          *float64            `json:"top_p,omitempty"`
-	StopSequences []string            `json:"stop_sequences,omitempty"`
-	Stream        bool                `json:"stream,omitempty"`
-	Thinking      *AnthropicThinking  `json:"thinking,omitempty"`
+	Model         string             `json:"model"`
+	MaxTokens     int                `json:"max_tokens"`
+	Messages      []AnthropicMessage `json:"messages"`
+	System        json.RawMessage    `json:"system,omitempty"`
+	Tools         []AnthropicTool    `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage    `json:"tool_choice,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	TopP          *float64           `json:"top_p,omitempty"`
+	StopSequences []string           `json:"stop_sequences,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	Thinking      *AnthropicThinking `json:"thinking,omitempty"`
 }
 
 // anthropicRequestToInternal übersetzt einen Anthropic-Messages-Request in
@@ -834,8 +834,8 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, stream io.ReadCl
 				})
 			}
 			writeAnthropicSSEEvent(w, flusher, "content_block_delta", map[string]interface{}{
-					"type": "content_block_delta", "index": thinkingBlockIndex,
-					"delta": map[string]interface{}{"type": "thinking_delta", "thinking": reasoning},
+				"type": "content_block_delta", "index": thinkingBlockIndex,
+				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": reasoning},
 			})
 		}
 

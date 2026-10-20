@@ -55,7 +55,8 @@ func GetModelsCSVPath() string {
 
 // loadModelsWithOverride lädt Modelle mit Override-Priorität
 // Priorität: Custom Path (Flag) → ~/.config/sigorest/models.json → ~/.config/sigorest/models.csv
-//           → sigoREST/models.csv (Projekt) → CoreModels (Fallback)
+//
+//	→ sigoREST/models.csv (Projekt) → CoreModels (Fallback)
 func loadModelsWithOverride() []Model {
 	// 1. Custom Pfad (wenn gesetzt via -models Flag)
 	if overrideModelsPath != "" {
@@ -84,10 +85,10 @@ func loadModelsWithOverride() []Model {
 	// Versuche system-weite models.csv (im sigoREST Verzeichnis)
 	// Prüfe mehrere mögliche Pfade
 	possiblePaths := []string{
-		"sigoREST/models.csv",                          // Relativ zum Working Dir
-		"../sigoREST/models.csv",                       // Eben höher
-		"/usr/local/slib/sigoREST/models.csv",          // System-Installation
-		"models.csv",                                   // Im aktuellen Verzeichnis
+		"sigoREST/models.csv",                 // Relativ zum Working Dir
+		"../sigoREST/models.csv",              // Eben höher
+		"/usr/local/slib/sigoREST/models.csv", // System-Installation
+		"models.csv",                          // Im aktuellen Verzeichnis
 	}
 
 	for _, path := range possiblePaths {
