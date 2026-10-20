@@ -109,25 +109,29 @@ var moonshotKnownModels = map[string]Model{
 }
 
 // **********************************************************************
-// ZAI — statische Fallback-Liste (13 Modelle, Quelle: Mastra, Stand 2026-04)
+// ZAI — statische Fallback-Liste und Preistabelle (17 Modelle).
+// Preise laut docs.z.ai/guides/overview/pricing (Stand 2026-10-20, USD/1M).
+// glm-5-turbo/glm-5v-turbo stehen dort nicht: alte Werte, kein Cache-Preis.
 // Wird verwendet wenn GET https://api.z.ai/api/paas/v4/models keinen
 // verwertbaren Response liefert.
 var zaiStaticModels = []Model{
-	{ID: "glm-4.5", Shortcode: "glm45", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.5-air", Shortcode: "glm45a", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.20, OutputCost: 1.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.5-flash", Shortcode: "glm45f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.5v", Shortcode: "glm45v", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 65536, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.6", Shortcode: "glm46", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.6v", Shortcode: "glm46v", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.30, OutputCost: 0.90, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.7", Shortcode: "glm47", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.7-flash", Shortcode: "glm47f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-4.7-flashx", Shortcode: "glm47fx", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.07, OutputCost: 0.40, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5", Shortcode: "glm5", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 3.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5-turbo", Shortcode: "glm5t", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5.1", Shortcode: "glm51", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5v-turbo", Shortcode: "glm5vt", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5.3", Shortcode: "glm53", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, MinTemperature: 0.0, MaxTemperature: 2.0},
-	{ID: "glm-5.3-flash", Shortcode: "glm53-f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.07, OutputCost: 0.40, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5", Shortcode: "glm45", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.20, CachedInputCost: 0.11, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5-air", Shortcode: "glm45a", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.20, OutputCost: 1.10, CachedInputCost: 0.03, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5-flash", Shortcode: "glm45f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, CachedInputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.5v", Shortcode: "glm45v", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 65536, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 1.80, CachedInputCost: 0.11, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.6", Shortcode: "glm46", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.20, CachedInputCost: 0.11, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.6v", Shortcode: "glm46v", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 131072, MaxOutputTokens: 4096, InputCost: 0.30, OutputCost: 0.90, CachedInputCost: 0.05, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.7", Shortcode: "glm47", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.60, OutputCost: 2.20, CachedInputCost: 0.11, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.7-flash", Shortcode: "glm47f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.00, OutputCost: 0.00, CachedInputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-4.7-flashx", Shortcode: "glm47fx", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.07, OutputCost: 0.40, CachedInputCost: 0.01, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5", Shortcode: "glm5", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 3.20, CachedInputCost: 0.20, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5-turbo", Shortcode: "glm5t", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, CachedInputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.1", Shortcode: "glm51", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.40, OutputCost: 4.40, CachedInputCost: 0.26, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.2", Shortcode: "glm52", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.40, OutputCost: 4.40, CachedInputCost: 0.26, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5v-turbo", Shortcode: "glm5vt", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.00, OutputCost: 4.00, CachedInputCost: 0.00, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.3", Shortcode: "glm53", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 1.40, OutputCost: 4.40, CachedInputCost: 0.26, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.3-flash", Shortcode: "glm53-f", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.15, OutputCost: 0.50, CachedInputCost: 0.03, MinTemperature: 0.0, MaxTemperature: 2.0},
+	{ID: "glm-5.3-flashx", Shortcode: "glm53-fx", Endpoint: zaiChatEndpoint, APIKeyEnv: "ZAI_API_KEY", MaxInputTokens: 204800, MaxOutputTokens: 4096, InputCost: 0.37, OutputCost: 1.25, CachedInputCost: 0.075, MinTemperature: 0.0, MaxTemperature: 2.0},
 }
 
 // **********************************************************************

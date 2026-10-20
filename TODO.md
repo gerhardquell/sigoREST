@@ -134,8 +134,15 @@ Beide Punkte fielen bei Messungen aus golisp2 auf (Details:
   Moonshot-Modelle in `FetchMoonshotModels`. Jetzt bekommt jede `kimi-*`-ID
   1–1 (`moonshotTempRange`). Test-Server: `moo-kimik26` mit
   `temperature` 0.2 antwortet. Live seit 2026-10-20.
-- [ ] **zai: kein Cache-Preis.** `cached_input_cost` ist für alle
+- [x] **zai: kein Cache-Preis.** `cached_input_cost` ist für alle
   `zai-*`-Modelle 0 („kein bekannter Rabatt"), gecachte Tokens werden zum
   vollen Eingabepreis gebucht. golisp2 trifft den Cache zu ~99 % (7 488 von
   7 529 Tokens), `costs.db` und `usage.cost_usd` sind damit nur eine obere
   Schranke. Echten Cache-Preis bei Z.ai nachsehen und eintragen.
+  Erledigt (2026-10-20): ZAI-Tabelle komplett nach docs.z.ai/guides/
+  overview/pricing aktualisiert, inkl. Cache-Preisen. Dabei auch korrigiert:
+  `glm-5.2` und `glm-5.3-flashx` fehlten (liefen mit $0 am Budget vorbei),
+  mehrere Basispreise waren veraltet (z.B. `glm-5.3` 1/4 statt 1.4/4.4).
+  Test-Server: 2. Call mit 3412/3413 Cache-Tokens exakt zum Cache-Satz
+  gebucht. `glm-5-turbo`/`glm-5v-turbo` stehen nicht auf der Preisseite
+  (alte Werte, kein Cache-Preis).
