@@ -77,6 +77,35 @@ var moonshotKnownModels = map[string]Model{
 		// Min==Max signalisiert "fixed temperature" → main.go erzwingt den Wert.
 		MinTemperature: 1.0, MaxTemperature: 1.0,
 	},
+	// Preise laut platform.kimi.ai/docs/pricing (Stand 2026-10-20, USD/1M).
+	"kimi-k3": {
+		ID: "kimi-k3", Shortcode: "kimik3",
+		Endpoint: moonshotChatEndpoint, APIKeyEnv: "MOONSHOT_API_KEY",
+		MaxInputTokens: 1048576, MaxOutputTokens: 4096,
+		InputCost: 3.00, OutputCost: 15.00, CachedInputCost: 0.30,
+		MinTemperature: 1.0, MaxTemperature: 1.0,
+	},
+	"kimi-k2.7-code": {
+		ID: "kimi-k2.7-code", Shortcode: "kimik27-cod",
+		Endpoint: moonshotChatEndpoint, APIKeyEnv: "MOONSHOT_API_KEY",
+		MaxInputTokens: 262144, MaxOutputTokens: 4096,
+		InputCost: 0.95, OutputCost: 4.00, CachedInputCost: 0.19,
+		MinTemperature: 1.0, MaxTemperature: 1.0,
+	},
+	"kimi-k2.7-code-highspeed": {
+		ID: "kimi-k2.7-code-highspeed", Shortcode: "kimik27-codhs",
+		Endpoint: moonshotChatEndpoint, APIKeyEnv: "MOONSHOT_API_KEY",
+		MaxInputTokens: 262144, MaxOutputTokens: 4096,
+		InputCost: 1.90, OutputCost: 8.00, CachedInputCost: 0.38,
+		MinTemperature: 1.0, MaxTemperature: 1.0,
+	},
+	"kimi-k2.6": {
+		ID: "kimi-k2.6", Shortcode: "kimik26",
+		Endpoint: moonshotChatEndpoint, APIKeyEnv: "MOONSHOT_API_KEY",
+		MaxInputTokens: 262144, MaxOutputTokens: 4096,
+		InputCost: 0.95, OutputCost: 4.00, CachedInputCost: 0.16,
+		MinTemperature: 1.0, MaxTemperature: 1.0,
+	},
 }
 
 // **********************************************************************
