@@ -114,3 +114,24 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
 - [ ] Alte Mammouth-Einträge in `costs.db` sind mit falschen Preisen
   gebucht (diesen Monat ~$16 gebucht, ~$11,60 echt). Bewusst nicht
   rückwirkend korrigiert.
+
+# Aufgabe 20261020 (aus golisp2)
+
+Beide Punkte fielen bei Messungen aus golisp2 auf (Details:
+`/u/lisp-projekte/golisp2/docs/sigo.md`, „Messung 20261020").
+
+- [ ] **kimi-Modelle: falscher Temperatur-Bereich.** `moo-kimik26`,
+  `moo-kimik27-cod`, `moo-kimik27-codhs`, `moo-kimik3` stehen in der Registry
+  mit `min_temp` 0 / `max_temp` 2. Moonshot erlaubt nur 1:
+  `HTTP 400 "invalid temperature: only 1 is allowed for this model"`.
+  Bisher unbemerkt, weil ohne Client-Wert die Mitte (1,0) genommen wird.
+  golisp2 schickt seit 0.15.0 standardmäßig `temperature` 0.2 → jeder
+  golisp2-Call an kimi scheitert. Fix: min = max = 1 eintragen, dann
+  erzwingt `main.go` (Fall `MinTemperature == MaxTemperature`) den Wert.
+  Prüfen, woher die Werte kommen (Discovery-Default 0–2?), damit neue
+  kimi-Modelle nicht wieder falsch landen.
+- [ ] **zai: kein Cache-Preis.** `cached_input_cost` ist für alle
+  `zai-*`-Modelle 0 („kein bekannter Rabatt"), gecachte Tokens werden zum
+  vollen Eingabepreis gebucht. golisp2 trifft den Cache zu ~99 % (7 488 von
+  7 529 Tokens), `costs.db` und `usage.cost_usd` sind damit nur eine obere
+  Schranke. Echten Cache-Preis bei Z.ai nachsehen und eintragen.
