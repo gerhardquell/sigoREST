@@ -378,6 +378,7 @@ func FetchMoonshotModels() ([]Model, error) {
 			// Unbekanntes Moonshot-Modell: generiere Shortcode, verwende sichere Defaults
 			sc := generateProviderShortcode(item.ID, used)
 			used[sc] = true
+			minT, maxT := moonshotTempRange(item.ID)
 			result = append(result, Model{
 				ID:              item.ID,
 				Shortcode:       sc,
@@ -385,8 +386,8 @@ func FetchMoonshotModels() ([]Model, error) {
 				APIKeyEnv:       "MOONSHOT_API_KEY",
 				MaxInputTokens:  128000,
 				MaxOutputTokens: 4096,
-				MinTemperature:  0.0,
-				MaxTemperature:  2.0,
+				MinTemperature:  minT,
+				MaxTemperature:  maxT,
 			})
 		}
 	}
@@ -401,6 +402,17 @@ func FetchMoonshotModels() ([]Model, error) {
 
 	LogInfo("Moonshot-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
+}
+
+// moonshotTempRange liefert den Temperaturbereich für ein unbekanntes
+// Moonshot-Modell. kimi-Modelle (k2.5 und neuer) akzeptieren nur
+// temperature=1 ("invalid temperature: only 1 is allowed"); Min==Max lässt
+// main.go den Wert erzwingen.
+func moonshotTempRange(id string) (min, max float64) {
+	if strings.HasPrefix(id, "kimi-") {
+		return 1.0, 1.0
+	}
+	return 0.0, 2.0
 }
 
 // **********************************************************************

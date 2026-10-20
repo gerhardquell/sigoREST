@@ -120,7 +120,7 @@ Beide Fixes sind live (Binary deployt, Dienst neu gestartet).
 Beide Punkte fielen bei Messungen aus golisp2 auf (Details:
 `/u/lisp-projekte/golisp2/docs/sigo.md`, „Messung 20261020").
 
-- [ ] **kimi-Modelle: falscher Temperatur-Bereich.** `moo-kimik26`,
+- [x] **kimi-Modelle: falscher Temperatur-Bereich.** `moo-kimik26`,
   `moo-kimik27-cod`, `moo-kimik27-codhs`, `moo-kimik3` stehen in der Registry
   mit `min_temp` 0 / `max_temp` 2. Moonshot erlaubt nur 1:
   `HTTP 400 "invalid temperature: only 1 is allowed for this model"`.
@@ -130,6 +130,10 @@ Beide Punkte fielen bei Messungen aus golisp2 auf (Details:
   erzwingt `main.go` (Fall `MinTemperature == MaxTemperature`) den Wert.
   Prüfen, woher die Werte kommen (Discovery-Default 0–2?), damit neue
   kimi-Modelle nicht wieder falsch landen.
+  Erledigt (2026-10-20): Ursache war der Default 0–2 für unbekannte
+  Moonshot-Modelle in `FetchMoonshotModels`. Jetzt bekommt jede `kimi-*`-ID
+  1–1 (`moonshotTempRange`). Test-Server: `moo-kimik26` mit
+  `temperature` 0.2 antwortet. Noch nicht live deployt.
 - [ ] **zai: kein Cache-Preis.** `cached_input_cost` ist für alle
   `zai-*`-Modelle 0 („kein bekannter Rabatt"), gecachte Tokens werden zum
   vollen Eingabepreis gebucht. golisp2 trifft den Cache zu ~99 % (7 488 von
