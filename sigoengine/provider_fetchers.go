@@ -11,7 +11,9 @@ package sigoengine
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -400,6 +402,7 @@ func FetchMoonshotModels() ([]Model, error) {
 	used := make(map[string]bool)
 	var result []Model
 
+	var unknown []int // Indizes in result ohne Tabelleneintrag
 	for _, item := range listResp.Data {
 		if item.ID == "" {
 			continue
@@ -409,6 +412,7 @@ func FetchMoonshotModels() ([]Model, error) {
 			used[known.Shortcode] = true
 		} else {
 			// Unbekanntes Moonshot-Modell: generiere Shortcode, verwende sichere Defaults
+			unknown = append(unknown, len(result))
 			sc := generateProviderShortcode(item.ID, used)
 			used[sc] = true
 			minT, maxT := moonshotTempRange(item.ID)
@@ -433,8 +437,40 @@ func FetchMoonshotModels() ([]Model, error) {
 		}
 	}
 
+	priceUnknown("moonshot", result, unknown, slices.Collect(maps.Values(moonshotKnownModels)))
 	LogInfo("Moonshot-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
+}
+
+// priceUnknown gibt Modellen ohne Tabelleneintrag (Indizes unknown) den
+// Höchstpreis der bekannten Modelle desselben Fetches, ersatzweise der
+// ganzen Tabelle. Ein neues Modell darf nie $0 buchen, sonst greift der
+// Budget-Hard-Stop nicht; zu hoch gebucht ist die sichere Seite.
+func priceUnknown(provider string, ms []Model, unknown []int, table []Model) {
+	if len(unknown) == 0 {
+		return
+	}
+	isUnknown := make(map[int]bool, len(unknown))
+	for _, i := range unknown {
+		isUnknown[i] = true
+	}
+	var in, out float64
+	for i, m := range ms {
+		if !isUnknown[i] {
+			in, out = max(in, m.InputCost), max(out, m.OutputCost)
+		}
+	}
+	if in == 0 && out == 0 {
+		for _, m := range table {
+			in, out = max(in, m.InputCost), max(out, m.OutputCost)
+		}
+	}
+	for _, i := range unknown {
+		ms[i].InputCost, ms[i].OutputCost = in, out
+		LogWarn("Modell ohne Preis, buche Höchstpreis des Providers — Preis in Tabelle nachtragen", map[string]interface{}{
+			"provider": provider, "model": ms[i].ID, "input_cost": in, "output_cost": out,
+		})
+	}
 }
 
 // moonshotTempRange liefert den Temperaturbereich für ein unbekanntes
@@ -497,6 +533,7 @@ func FetchZAIModels() ([]Model, error) {
 
 	used := make(map[string]bool)
 	var result []Model
+	var unknown []int // Indizes in result ohne Tabelleneintrag
 	for _, item := range listResp.Data {
 		if item.ID == "" {
 			continue
@@ -505,6 +542,7 @@ func FetchZAIModels() ([]Model, error) {
 			result = append(result, known)
 			used[known.Shortcode] = true
 		} else {
+			unknown = append(unknown, len(result))
 			sc := generateProviderShortcode(item.ID, used)
 			used[sc] = true
 			result = append(result, Model{
@@ -520,6 +558,7 @@ func FetchZAIModels() ([]Model, error) {
 		}
 	}
 
+	priceUnknown("zai", result, unknown, zaiStaticModels)
 	LogInfo("ZAI-Modelle geladen (dynamisch)", map[string]interface{}{"count": len(result)})
 	return result, nil
 }
@@ -584,6 +623,7 @@ func FetchLongcatModels() ([]Model, error) {
 	used := make(map[string]bool)
 	var result []Model
 
+	var unknown []int // Indizes in result ohne Tabelleneintrag
 	for _, item := range listResp.Data {
 		if item.ID == "" {
 			continue
@@ -593,6 +633,7 @@ func FetchLongcatModels() ([]Model, error) {
 			used[known.Shortcode] = true
 		} else {
 			// Unbekanntes Longcat-Modell: generiere Shortcode, verwende sichere Defaults
+			unknown = append(unknown, len(result))
 			sc := generateProviderShortcode(item.ID, used)
 			used[sc] = true
 			result = append(result, Model{
@@ -616,6 +657,7 @@ func FetchLongcatModels() ([]Model, error) {
 		}
 	}
 
+	priceUnknown("longcat", result, unknown, slices.Collect(maps.Values(longcatKnownModels)))
 	LogInfo("Longcat-Modelle geladen", map[string]interface{}{"count": len(result)})
 	return result, nil
 }

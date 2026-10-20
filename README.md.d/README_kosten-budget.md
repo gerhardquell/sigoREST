@@ -203,6 +203,11 @@ die Tages-/Monats-Ausgaben (`spendSince`, lokale Zeitzone über
 Modelle ohne Preis buchen $0 und zählen nicht gegen das Limit — ein Fetcher,
 der Preise nicht findet, hebelt das Budget also still aus (siehe
 [Provider & Modelle → Mammouth](README_provider-modelle.md#mammouth)).
+Ausnahme: Moonshot, Z.ai und Longcat liefern keine Preise per API. Ein dort
+neues Modell ohne Tabelleneintrag bekommt beim Boot den Höchstpreis der
+bekannten Modelle desselben Providers (`priceUnknown`), mit Log-Warnung
+„Modell ohne Preis … Preis in Tabelle nachtragen“. Zu viel gebucht ist die
+sichere Seite.
 
 Gerhards Tageslimit: $55.93 (= 50 €) mit Hard-Stop, als Sicherheitsnetz gegen
 KI-Schwärme.

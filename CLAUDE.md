@@ -84,6 +84,9 @@ Tool-Call-Repair o.ä.
 - Preise immer in $/1M Tokens. Mammouth (`model_info`) und OpenRouter liefern
   USD pro Token → ×1e6. Ein Modell ohne Preis bucht $0 und hebelt das Budget
   aus; in der Response ist `cost_usd` dann `null` (Ollama: `0.0`).
+  Bei Moonshot/Z.ai/Longcat (Preise nur aus Tabelle) setzt `priceUnknown`
+  für neue Modelle den Provider-Höchstpreis und warnt im Log — die Warnung
+  heißt: Preis in der Tabelle nachtragen.
 - cheaperinference-IDs sind `ci-`-präfixt; vor dem Call `cfg.Model` mit
   `Model.UpstreamID` überschreiben, nicht nur den Endpoint.
 - Shortcodes: Jeder Zweig von `GenerateShortcode` läuft durch
