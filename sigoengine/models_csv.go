@@ -9,6 +9,7 @@ package sigoengine
 import (
 	"encoding/csv"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 )
@@ -47,7 +48,7 @@ func WriteModelsCSV(w io.Writer, models []Model) error {
 	if err := cw.Write(modelsCSVHeader); err != nil {
 		return err
 	}
-	ff := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+	ff := func(v float64) string { return strconv.FormatFloat(math.Round(v*1e5)/1e5, 'f', -1, 64) } // max. 5 Nachkommastellen, ohne Null-Auffüllung
 	for _, r := range rows {
 		m := r.m
 		if err := cw.Write([]string{

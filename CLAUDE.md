@@ -2,7 +2,19 @@
 
 Anleitung für Claude Code bei Arbeit mit diesem Repo.
 
-- Sprache: Deutsch. Gerhard duzen und mit Namen ansprechen.
+- Sprache: 
+    - Deutsch 
+    - Gerhard duzen und 
+    - mit Namen ansprechen.
+- Inhalt:
+  - Projekt
+  - Befehle
+  - Regeln für Änderunge
+    - Modelle & Provider
+    - Server-Code
+  - Betrieb
+
+--- 
 
 ## Projekt
 
@@ -51,6 +63,9 @@ go test ./sigoengine/ -run TestFetchWithRetry   # einzelne Tests (Regex)
 
 **Scope:** sigoREST bleibt schlanker Proxy, kein Agent-Harness — kein
 Tool-Call-Repair o.ä.
+
+**Formatierung:** Go-Code ist gofmt-konform; vor jedem Commit muss
+`gofmt -l .` leer sein.
 
 **Modelle & Provider**
 - Der Server lädt Modelle beim Start dynamisch (`loadModelsFromProviders()`),
