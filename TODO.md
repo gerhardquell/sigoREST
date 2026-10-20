@@ -133,7 +133,7 @@ Beide Punkte fielen bei Messungen aus golisp2 auf (Details:
   Erledigt (2026-10-20): Ursache war der Default 0–2 für unbekannte
   Moonshot-Modelle in `FetchMoonshotModels`. Jetzt bekommt jede `kimi-*`-ID
   1–1 (`moonshotTempRange`). Test-Server: `moo-kimik26` mit
-  `temperature` 0.2 antwortet. Noch nicht live deployt.
+  `temperature` 0.2 antwortet. Live seit 2026-10-20.
 - [ ] **zai: kein Cache-Preis.** `cached_input_cost` ist für alle
   `zai-*`-Modelle 0 („kein bekannter Rabatt"), gecachte Tokens werden zum
   vollen Eingabepreis gebucht. golisp2 trifft den Cache zu ~99 % (7 488 von
